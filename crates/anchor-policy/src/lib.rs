@@ -28,7 +28,7 @@ pub mod audit;
 pub mod params;
 mod policy;
 
-pub use audit::{AuditEntry, AuditError, AuditLog};
+pub use audit::{AuditEntry, AuditError, AuditLog, Tailer};
 pub use policy::{Action, Policy, PolicyError, Scope};
 
 /// Tools known to the engine. Mirrors the protocol's closed tool set.

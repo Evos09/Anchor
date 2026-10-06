@@ -675,3 +675,39 @@ mod param_validation {
         ));
     }
 }
+
+#[test]
+fn tailer_follows_appends_and_waits_for_partial_lines() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.jsonl");
+    let log = AuditLog::open(&path).unwrap();
+    let mut t = crate::Tailer::new(&path);
+    assert!(t.poll().unwrap().is_empty());
+    log.append("a", serde_json::json!({"n": 1})).unwrap();
+    log.append("b", serde_json::json!({"n": 2})).unwrap();
+    let got = t.poll().unwrap();
+    assert_eq!(
+        got.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert!(t.poll().unwrap().is_empty());
+    // A half-written line is left for later, not reported as corrupt.
+    log.append("c", serde_json::json!({})).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let last = text.lines().last().unwrap().to_string();
+    let cut = text.len() - last.len() - 1;
+    std::fs::write(&path, &text[..cut + 10]).unwrap();
+    assert!(t.poll().unwrap().is_empty());
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    f.write_all(&text.as_bytes()[cut + 10..]).unwrap();
+    assert_eq!(t.poll().unwrap()[0].kind, "c");
+    assert_eq!(t.verified(), 3);
+    // A tampered entry stops the tailer.
+    let mut t2 = crate::Tailer::new(&path);
+    std::fs::write(&path, text.replace("\"n\":2", "\"n\":3")).unwrap();
+    assert!(t2.poll().is_err());
+}

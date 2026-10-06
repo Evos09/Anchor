@@ -591,6 +591,8 @@ impl<'m> MergeQueue<'m> {
                     "  Verification: NONE (unverified merge)\n".to_string()
                 };
                 let view = PromptView {
+                    agent: self.hub.agent(agent).ok().map(|a| a.display_name),
+                    merge_seq: Some(seq),
                     tool: Tool::UserAction,
                     operation: Operation::Write,
                     canonical_target: Some(ws.root().to_path_buf()),

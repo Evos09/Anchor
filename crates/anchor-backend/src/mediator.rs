@@ -21,7 +21,8 @@ use anchor_fs::{Expect, FileContent, FsError, Kind, Resolved, Workspace};
 use anchor_guard::{AppendOnlyStatus, Guard, GuardError, WriteBasis};
 use anchor_policy::audit::hex;
 use anchor_policy::{
-    Action, Approved, Decision, Engine, Operation, PermissionRequest, Tool, UserAction, params,
+    Action, Approved, AuditError, Decision, Engine, Operation, PermissionRequest, Tool, UserAction,
+    params,
 };
 use anchor_protocol::{DeniedBy, EditOp, ToolOutcome, ToolRequest};
 
@@ -310,6 +311,8 @@ impl Mediator {
             )),
             Decision::Prompt(p) => {
                 let view = PromptView {
+                    agent: self.engine.agent().map(String::from),
+                    merge_seq: None,
                     tool: req.tool,
                     operation: req.operation,
                     canonical_target: req.canonical_target.clone(),
@@ -325,6 +328,19 @@ impl Mediator {
         }
     }
 
+    /// Append to the audit log, tagged with the session (and, through the
+    /// engine, the agent) this mediator works for, so every entry can be
+    /// attributed (the dashboard's cost meter and timeline rely on it).
+    pub fn log(&self, kind: &str, mut data: serde_json::Value) -> Result<u64, AuditError> {
+        if !self.session.is_empty()
+            && let Some(obj) = data.as_object_mut()
+        {
+            obj.entry("session_id")
+                .or_insert_with(|| serde_json::Value::String(self.session.clone()));
+        }
+        self.engine.log(kind, data)
+    }
+
     fn audit_mutation(
         &self,
         approval_id: u64,
@@ -333,12 +349,13 @@ impl Mediator {
         after: [u8; 32],
         basis: Option<WriteBasis>,
     ) {
-        let _ = self.engine.audit().append(
+        let _ = self.log(
             "mutation",
             serde_json::json!({
                 "decision_id": approval_id,
                 "turn": self.turn,
                 "canonical_target": canonical,
+                "path": canonical.strip_prefix(self.ws.root()).ok(),
                 "sha256_before": before.map(|h| hex(&h)),
                 "sha256_after": hex(&after),
                 "guard_basis": basis,
@@ -670,6 +687,8 @@ impl Mediator {
                 // diff of what will be deleted, confirmed by the user.
                 let old = cur.as_ref().map(|c| c.bytes.as_slice()).unwrap_or_default();
                 let view = PromptView {
+                    agent: self.engine.agent().map(String::from),
+                    merge_seq: None,
                     tool: Tool::WriteFile,
                     operation: Operation::Write,
                     canonical_target: Some(r.canonical.clone()),
@@ -768,6 +787,8 @@ impl Mediator {
                 if !status.is_append_only() =>
             {
                 let view = PromptView {
+                    agent: self.engine.agent().map(String::from),
+                    merge_seq: None,
                     tool: Tool::EditFile,
                     operation: op,
                     canonical_target: Some(r.canonical.clone()),
@@ -886,7 +907,7 @@ impl Mediator {
         match anchor_exec::run(&spec) {
             Ok(o) => {
                 self.stats.commands += 1;
-                let _ = self.engine.audit().append(
+                let _ = self.log(
                     "command",
                     serde_json::json!({
                         "turn": self.turn,
@@ -918,7 +939,7 @@ impl Mediator {
                 }
             }
             Err(anchor_exec::ExecError::SandboxUnavailable(m)) => {
-                let _ = self.engine.audit().append(
+                let _ = self.log(
                     "command_refused",
                     serde_json::json!({
                         "turn": self.turn,
@@ -974,7 +995,7 @@ impl Mediator {
             // Amortised: prune old turns and unreachable objects.
             match anchor_snapshot::gc(&store, self.keep_turns, 20) {
                 Ok(g) => {
-                    let _ = self.engine.audit().append(
+                    let _ = self.log(
                         "snapshot_gc",
                         serde_json::json!({
                             "refs_pruned": g.refs_pruned,
@@ -990,7 +1011,7 @@ impl Mediator {
     }
 
     fn audit_snapshot(&self, label: &str, r: &SnapshotReport) {
-        let _ = self.engine.audit().append(
+        let _ = self.log(
             "snapshot",
             serde_json::json!({
                 "label": label,
@@ -1075,7 +1096,7 @@ impl Mediator {
                 Ok(log)
             }
             Err(e) => {
-                let _ = self.engine.audit().append(
+                let _ = self.log(
                     "rollback_failed",
                     serde_json::json!({ "target": id.hex(), "error": e.to_string() }),
                 );
@@ -1104,7 +1125,7 @@ impl Mediator {
     }
 
     fn audit_restore(&self, kind: &str, r: &RestoreReport) {
-        let _ = self.engine.audit().append(
+        let _ = self.log(
             kind,
             serde_json::json!({
                 "pre": r.pre.map(|i| i.hex()),
@@ -1121,7 +1142,7 @@ impl Mediator {
         self.guard
             .mark_not_append_only(rel)
             .map_err(|e| e.to_string())?;
-        let _ = self.engine.audit().append(
+        let _ = self.log(
             "user_override",
             serde_json::json!({ "action": "not_append_only", "path": rel }),
         );

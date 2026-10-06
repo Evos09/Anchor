@@ -157,12 +157,16 @@ pub fn run(
     // long one model turn takes.
     let ticker = mediator.hub().cloned().map(heartbeat_ticker);
     let audit = |m: &Mediator, kind: &str, data: serde_json::Value| {
-        let _ = m.engine().audit().append(kind, data);
+        let _ = m.log(kind, data);
     };
     audit(
         mediator,
         "session_started",
-        serde_json::json!({ "session_id": cfg.session_id, "runtime_pid": report.runtime_pid }),
+        serde_json::json!({
+            "session_id": cfg.session_id,
+            "runtime_pid": report.runtime_pid,
+            "review": cfg.review.is_some(),
+        }),
     );
 
     let result = (|| -> Result<(), SessionError> {
@@ -200,9 +204,20 @@ pub fn run(
                 }
                 Message::TurnStarted { turn } => {
                     mediator.set_turn(turn);
+                    audit(
+                        mediator,
+                        "turn_started",
+                        serde_json::json!({ "turn": turn }),
+                    );
                     mediator.interact().notify(&format!("── turn {turn} ──"));
                 }
-                Message::TurnFinished { .. } => {}
+                Message::TurnFinished { turn } => {
+                    audit(
+                        mediator,
+                        "turn_finished",
+                        serde_json::json!({ "turn": turn }),
+                    );
+                }
                 Message::ToolCall(call) if cfg.review.is_some() => {
                     // A reviewer has no workspace access (ADR-0009): fail
                     // closed rather than answer.

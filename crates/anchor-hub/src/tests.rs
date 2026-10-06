@@ -661,3 +661,36 @@ fn verify_detects_audit_truncation() {
         r.errors
     );
 }
+
+#[test]
+fn user_views_see_everything_and_write_no_audit_entries() {
+    let f = fx();
+    let (a, _) = agent(&f.hub, "alpha", &["src/"]);
+    let (b, _) = agent(&f.hub, "beta", &["tests/"]);
+    let Caller::Agent(b_id) = b else {
+        unreachable!()
+    };
+    f.hub
+        .request_claim(a, "src/x.py", ClaimType::Edit, false, None)
+        .unwrap();
+    f.hub
+        .send_message(
+            a,
+            Recipient::Agent(b_id),
+            MessageType::Question,
+            json!({"q": "ok?"}),
+        )
+        .unwrap();
+    f.hub.propose_decision(a, "use x", "because", None).unwrap();
+    f.hub
+        .create_task(a, "write tests", &[], Some(b_id))
+        .unwrap();
+    let before = f.audit.head();
+    assert_eq!(f.hub.view_claims().unwrap().len(), 1);
+    let msgs = f.hub.view_messages(0, 100).unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert!(f.hub.view_messages(msgs[0].id, 100).unwrap().is_empty());
+    assert_eq!(f.hub.view_decisions().unwrap().len(), 1);
+    assert_eq!(f.hub.view_tasks().unwrap().len(), 1);
+    assert_eq!(f.audit.head(), before, "a user view wrote to the audit log");
+}

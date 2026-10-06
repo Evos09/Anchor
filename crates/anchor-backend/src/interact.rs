@@ -18,6 +18,10 @@ pub struct PromptView {
     pub rule: String,
     /// Extra structured context (a deletion diff, an argv).
     pub detail: Option<String>,
+    /// The agent the request is for (team runs).
+    pub agent: Option<String>,
+    /// Set for a merge approval.
+    pub merge_seq: Option<i64>,
 }
 
 pub trait Interaction: Send {

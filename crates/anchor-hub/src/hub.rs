@@ -1417,6 +1417,50 @@ impl Hub {
         Ok(bytes)
     }
 
+    // -- the user's own view (dashboard) -------------------------------------
+
+    /// Every row of `table` for this project, oldest first, read without a
+    /// transaction, a sweep or an audit entry. These are the *user's* views
+    /// (the dashboard polls them); an agent's reads stay audited because
+    /// they are agent actions. Never reachable from the agent endpoints.
+    fn view_rows<T>(
+        &self,
+        cols: &str,
+        table: &str,
+        after: i64,
+        limit: u32,
+        row: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>> {
+        let conn = self.lock();
+        let mut st = conn.prepare(&format!(
+            "SELECT {cols} FROM {table} WHERE project_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3"
+        ))?;
+        let v = st
+            .query_map(params![self.project_id, after, limit.max(1) as i64], row)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(v)
+    }
+
+    /// Every claim, in any state (unaudited; see [`Hub::view_rows`]).
+    pub fn view_claims(&self) -> Result<Vec<Claim>> {
+        self.view_rows(CLAIM_COLS, "claim", 0, u32::MAX, claim_row)
+    }
+
+    /// Messages with an id above `after`, held ones included (unaudited).
+    pub fn view_messages(&self, after: i64, limit: u32) -> Result<Vec<Message>> {
+        self.view_rows(MESSAGE_COLS, "message", after, limit, message_row)
+    }
+
+    /// Every decision (unaudited).
+    pub fn view_decisions(&self) -> Result<Vec<Decision>> {
+        self.view_rows(DECISION_COLS, "decision", 0, u32::MAX, decision_row)
+    }
+
+    /// Every task (unaudited).
+    pub fn view_tasks(&self) -> Result<Vec<Task>> {
+        self.view_rows(TASK_COLS, "task", 0, u32::MAX, task_row)
+    }
+
     // -- merge queue entries (backend only) ----------------------------------
 
     fn require_backend(caller: Caller) -> Result<()> {

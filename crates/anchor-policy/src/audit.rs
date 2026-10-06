@@ -285,3 +285,84 @@ impl AuditLog {
         Ok(entries.len() as u64)
     }
 }
+
+/// Incremental, verifying reader of a log another handle (or process)
+/// appends to: the dashboard's live feed. Each [`Tailer::poll`] returns
+/// the complete entries appended since the last one, each checked to
+/// extend the chain verified so far. A line still being written (no
+/// newline yet) is left for the next poll, never reported as corruption.
+#[derive(Debug)]
+pub struct Tailer {
+    path: PathBuf,
+    offset: u64,
+    next_seq: u64,
+    prev: String,
+}
+
+impl Tailer {
+    pub fn new(path: &Path) -> Tailer {
+        Tailer {
+            path: path.to_path_buf(),
+            offset: 0,
+            next_seq: 0,
+            prev: GENESIS.to_string(),
+        }
+    }
+
+    /// The sequence number the next entry must have (= entries verified).
+    pub fn verified(&self) -> u64 {
+        self.next_seq
+    }
+
+    /// New complete entries, verified. An error is sticky in effect: the
+    /// tailer does not advance past a bad entry.
+    pub fn poll(&mut self) -> Result<Vec<AuditEntry>, AuditError> {
+        let mut f = match File::open(&self.path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let len = f.metadata()?.len();
+        if len < self.offset {
+            return Err(AuditError::Corrupt {
+                line: self.next_seq + 1,
+                msg: "log shrank (truncated)".into(),
+            });
+        }
+        if len == self.offset {
+            return Ok(Vec::new());
+        }
+        f.seek(SeekFrom::Start(self.offset))?;
+        let mut buf = Vec::with_capacity((len - self.offset) as usize);
+        f.take(len - self.offset).read_to_end(&mut buf)?;
+        // Only complete lines.
+        let Some(end) = buf.iter().rposition(|b| *b == b'\n') else {
+            return Ok(Vec::new());
+        };
+        buf.truncate(end + 1);
+        let text = std::str::from_utf8(&buf).map_err(|_| AuditError::Corrupt {
+            line: self.next_seq + 1,
+            msg: "not UTF-8".into(),
+        })?;
+        let mut out = Vec::new();
+        for l in text.lines() {
+            let line = self.next_seq + 1;
+            let e: AuditEntry = serde_json::from_str(l).map_err(|e| AuditError::Corrupt {
+                line,
+                msg: e.to_string(),
+            })?;
+            let h = entry_hash(e.seq, e.ts_ms, &e.kind, &e.data, &e.prev);
+            if e.seq != self.next_seq || e.prev != self.prev || h != e.hash {
+                return Err(AuditError::Corrupt {
+                    line,
+                    msg: "entry does not extend the verified chain".into(),
+                });
+            }
+            self.offset += l.len() as u64 + 1;
+            self.next_seq += 1;
+            self.prev = e.hash.clone();
+            out.push(e);
+        }
+        Ok(out)
+    }
+}
