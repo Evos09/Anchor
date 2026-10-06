@@ -439,7 +439,11 @@ pub fn run(
         let i = p.idx;
         let merge = match submitted {
             Some(sub) if finished_ok(&session) => {
-                let e = queue.submit(ids[i], &p.iso.base, &sub)?;
+                let claims = session
+                    .as_ref()
+                    .map(|r| r.claims.clone())
+                    .unwrap_or_default();
+                let e = queue.submit(ids[i], &p.iso.base, &sub, &claims)?;
                 Some(queue.process(e.seq)?)
             }
             _ => None,

@@ -13,8 +13,11 @@
 //!    fresh snapshot of the main workspace. Path conflicts reject the
 //!    submission with structured feedback, sent to the agent as a
 //!    `review` message.
-//! 3. **Gate**: a [`MergeGate`] may veto the merged tree (Phase 5 plugs
-//!    verification in here).
+//! 3. **Gate**: a [`MergeGate`] may veto the merged tree (the verification
+//!    pipeline, ADR-0024). It runs *without* the store lock, so a long test
+//!    run never stalls other agents; if the main workspace moves meanwhile,
+//!    the merge is recomputed and the new candidate is checked again (an
+//!    identical tree is not re-checked).
 //! 4. **Apply**: with the user's approval (or `--auto-merge`), the main
 //!    workspace is moved to `merged` by an atomic, journaled restore that
 //!    refuses if the workspace changed since `pre`; then the merge is
@@ -29,41 +32,119 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anchor_fs::Resolved;
+use anchor_hub::ArtifactKind;
 use anchor_hub::{
     AgentId, Caller, ClaimPath, ClaimType, Hub, MergeEntry, MergeKind, MergeStatus, MessageType,
     Recipient,
 };
 use anchor_policy::{Operation, PermissionRequest, Tool, UserAction, UserResponse};
+use anchor_protocol::verify::Claim;
 use anchor_snapshot::{Change, Id, Store};
 use serde_json::{Value, json};
 
 use crate::interact::PromptView;
-use crate::mediator::{Mediator, lock_store};
+use crate::mediator::{Mediator, SharedStore, lock_store};
 
 /// Times a merge is recomputed when the main workspace keeps changing
 /// under it.
 const MAX_ATTEMPTS: usize = 3;
 
-/// A check on the merged tree before it is applied. `Err` carries
-/// structured feedback for the agent.
-pub trait MergeGate: Send {
-    fn check(&mut self, store: &Store, merged: &Id, changes: &[Change]) -> Result<(), Value>;
+/// What a gate is asked to check: one merge candidate and where it came
+/// from.
+#[derive(Debug, Clone)]
+pub struct GateContext<'a> {
+    pub seq: i64,
+    /// The recomputation round (1-based; > 1 after the main workspace
+    /// moved under the merge).
+    pub attempt: usize,
+    pub agent: AgentId,
+    /// The agent's base and its submission.
+    pub base: Id,
+    pub submitted: Id,
+    /// The main workspace before the merge, and the merged candidate.
+    pub pre: Id,
+    pub candidate: Id,
+    /// The agent's changes (`base` → `submitted`).
+    pub changes: &'a [Change],
+    /// What the agent claims its change does.
+    pub claims: &'a [Claim],
 }
 
-/// Phase 4 ships no verification gate.
+/// A check on the merged tree before it is applied. `Ok` carries a short
+/// summary shown with the approval prompt and recorded with the merge;
+/// `Err` carries structured feedback for the agent.
+///
+/// The gate is called without the store lock held; it takes the lock only
+/// for as long as it reads the store.
+pub trait MergeGate: Send {
+    fn check(&mut self, ctx: &GateContext<'_>, store: &SharedStore) -> Result<Value, Value>;
+
+    /// Whether this gate verifies anything. Merges through a gate that does
+    /// not are audited as `merge_unverified`.
+    fn verifies(&self) -> bool {
+        true
+    }
+}
+
+/// No verification (an explicit `--unverified` choice, or tests).
 #[derive(Debug, Default)]
 pub struct NoGate;
 
 impl MergeGate for NoGate {
-    fn check(&mut self, _: &Store, _: &Id, _: &[Change]) -> Result<(), Value> {
-        Ok(())
+    fn check(&mut self, _: &GateContext<'_>, _: &SharedStore) -> Result<Value, Value> {
+        Ok(Value::Null)
+    }
+    fn verifies(&self) -> bool {
+        false
+    }
+}
+
+/// Why a merge was rejected. Only [`RejectKind::Gate`] and
+/// [`RejectKind::Conflict`] are worth another attempt by the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectKind {
+    /// Paths changed without the right claims.
+    Claims,
+    /// Path conflicts with the main workspace.
+    Conflict,
+    /// The gate (verification) refused the candidate.
+    Gate,
+    /// The main workspace kept changing during the merge.
+    Drift,
+    /// The user declined.
+    Declined,
+    /// Applying the merge failed.
+    Apply,
+}
+
+impl RejectKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RejectKind::Claims => "claims",
+            RejectKind::Conflict => "conflict",
+            RejectKind::Gate => "gate",
+            RejectKind::Drift => "drift",
+            RejectKind::Declined => "declined",
+            RejectKind::Apply => "apply",
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    Merged { seq: i64, merged: Id },
-    Rejected { seq: i64, feedback: Value },
+    Merged {
+        seq: i64,
+        merged: Id,
+    },
+    Rejected {
+        seq: i64,
+        reason: RejectKind,
+        feedback: Value,
+        /// The main workspace the merge was computed against, and the
+        /// computed candidate (`merges/<seq>-cand`), when it got that far.
+        pre: Option<Id>,
+        candidate: Option<Id>,
+    },
 }
 
 impl Outcome {
@@ -75,6 +156,17 @@ impl Outcome {
     pub fn is_merged(&self) -> bool {
         matches!(self, Outcome::Merged { .. })
     }
+    pub fn reject_kind(&self) -> Option<RejectKind> {
+        match self {
+            Outcome::Rejected { reason, .. } => Some(*reason),
+            Outcome::Merged { .. } => None,
+        }
+    }
+}
+
+/// Evidence name of a merge's claims.
+fn claims_evidence(seq: i64) -> String {
+    format!("merge-{seq:010}/claims.json")
 }
 
 pub struct MergeQueue<'m> {
@@ -150,14 +242,18 @@ impl<'m> MergeQueue<'m> {
         let _ = self.main.engine().log(kind, data);
     }
 
-    /// Queue an agent's submission.
+    /// Queue an agent's submission. Its claims are persisted as evidence
+    /// right away, so a merge re-checked after a crash sees them too.
     pub fn submit(
         &mut self,
         agent: AgentId,
         base: &Id,
         submitted: &Id,
+        claims: &[Claim],
     ) -> Result<MergeEntry, String> {
-        self.hub
+        anchor_protocol::verify::validate_claims(claims)?;
+        let entry = self
+            .hub
             .merge_enqueue(
                 Caller::System,
                 Some(agent),
@@ -166,7 +262,37 @@ impl<'m> MergeQueue<'m> {
                 &submitted.hex(),
                 None,
             )
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec(claims).map_err(|e| e.to_string())?;
+        self.hub
+            .register_evidence(
+                Caller::System,
+                ArtifactKind::Log,
+                &claims_evidence(entry.seq),
+                &bytes,
+                json!({ "type": "claims", "merge": entry.seq, "agent_id": agent }),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(entry)
+    }
+
+    /// The claims submitted with merge `seq` (none if it has no record).
+    pub fn claims_of(&self, seq: i64) -> Result<Vec<Claim>, String> {
+        let path = format!("evidence:{}", claims_evidence(seq));
+        let found = self
+            .hub
+            .list_artifacts(Caller::System, Some(&path))
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|a| a.path == path);
+        let Some(a) = found else {
+            return Ok(Vec::new());
+        };
+        let bytes = self
+            .hub
+            .read_evidence(Caller::System, &a)
+            .map_err(|e| e.to_string())?;
+        serde_json::from_slice(&bytes).map_err(|e| format!("claims of merge {seq}: {e}"))
     }
 
     /// Settle merges a crash left `applying` (the main workspace itself was
@@ -238,7 +364,25 @@ impl<'m> MergeQueue<'m> {
             .map_err(|e| e.to_string())
     }
 
-    fn reject(&mut self, entry: &MergeEntry, feedback: Value) -> Result<Outcome, String> {
+    /// Reject `entry`. `detail` (an object) becomes the feedback, with
+    /// `reason` set from `kind`.
+    fn reject(
+        &mut self,
+        entry: &MergeEntry,
+        kind: RejectKind,
+        detail: Value,
+        ids: Option<(Id, Id)>,
+    ) -> Result<Outcome, String> {
+        let mut feedback = match detail {
+            Value::Object(m) => m,
+            other => {
+                let mut m = serde_json::Map::new();
+                m.insert("detail".into(), other);
+                m
+            }
+        };
+        feedback.insert("reason".into(), json!(kind.as_str()));
+        let feedback = Value::Object(feedback);
         self.set_status(entry.seq, MergeStatus::Rejected, None, feedback.clone())?;
         self.audit(
             "merge_rejected",
@@ -253,9 +397,13 @@ impl<'m> MergeQueue<'m> {
                 json!({ "merge": entry.seq, "status": "rejected", "feedback": feedback }),
             );
         }
+        let (pre, candidate) = ids.map_or((None, None), |(p, c)| (Some(p), Some(c)));
         Ok(Outcome::Rejected {
             seq: entry.seq,
+            reason: kind,
             feedback,
+            pre,
+            candidate,
         })
     }
 
@@ -328,19 +476,28 @@ impl<'m> MergeQueue<'m> {
         };
         let violations = self.claim_violations(agent, &changes)?;
         if !violations.is_empty() {
-            return self.reject(&entry, json!({ "reason": "claims", "paths": violations }));
+            return self.reject(
+                &entry,
+                RejectKind::Claims,
+                json!({ "paths": violations }),
+                None,
+            );
         }
         if changes.is_empty() {
             self.set_status(seq, MergeStatus::Merged, None, json!({ "empty": true }))?;
             self.audit("merge_applied", json!({ "seq": seq, "empty": true }));
             return Ok(Outcome::Merged { seq, merged: base });
         }
+        let claims = self.claims_of(seq)?;
+        let ws =
+            anchor_fs::Workspace::open(self.main.workspace().root()).map_err(|e| e.to_string())?;
+        let opts = self.main.snapshot_options().clone();
+        // Gate verdicts by candidate tree: a recomputation that yields the
+        // same tree needs no new check.
+        let mut verified: Vec<(Id, Value)> = Vec::new();
 
         for attempt in 1..=MAX_ATTEMPTS {
             let store = lock_store(&store_arc);
-            let ws = anchor_fs::Workspace::open(self.main.workspace().root())
-                .map_err(|e| e.to_string())?;
-            let opts = self.main.snapshot_options().clone();
             let pre = anchor_snapshot::take_snapshot(
                 &store,
                 &ws,
@@ -358,46 +515,88 @@ impl<'m> MergeQueue<'m> {
                 &format!("merge {seq} (agent {agent})"),
             )
             .map_err(|e| e.to_string())?;
+            let cand = m.snapshot;
             store
-                .set_ref(&format!("merges/{seq:010}-cand"), &m.snapshot)
+                .set_ref(&format!("merges/{seq:010}-cand"), &cand)
                 .map_err(|e| e.to_string())?;
+            let tree = store.snapshot(&cand).map_err(|e| e.to_string())?.root;
+            drop(store);
             if !m.conflicts.is_empty() {
-                drop(store);
                 let paths: Vec<String> = m.conflicts.iter().map(|p| slash_path(p)).collect();
                 return self.reject(
                     &entry,
-                    json!({
-                        "reason": "conflict",
-                        "paths": paths,
-                        "base": base.hex(),
-                        "main": pre.hex(),
-                    }),
+                    RejectKind::Conflict,
+                    json!({ "paths": paths, "base": base.hex(), "main": pre.hex() }),
+                    Some((pre, cand)),
                 );
             }
-            if let Err(fb) = self.gate.check(&store, &m.snapshot, &changes) {
-                drop(store);
-                return self.reject(&entry, json!({ "reason": "gate", "detail": fb }));
-            }
-            let summary: Vec<String> = anchor_snapshot::diff(&store, &pre, &m.snapshot)
-                .map_err(|e| e.to_string())?
+
+            let cached = verified
                 .iter()
-                .map(|c| c.to_string())
-                .collect();
-            drop(store);
-            self.set_status(
-                seq,
-                MergeStatus::Applying,
-                Some((&pre, &m.snapshot)),
-                json!({}),
-            )?;
+                .find(|(t, _)| *t == tree)
+                .map(|(_, v)| v.clone());
+            let verdict = match cached {
+                Some(v) => v,
+                None => {
+                    let ctx = GateContext {
+                        seq,
+                        attempt,
+                        agent,
+                        base,
+                        submitted,
+                        pre,
+                        candidate: cand,
+                        changes: &changes,
+                        claims: &claims,
+                    };
+                    match self.gate.check(&ctx, &store_arc) {
+                        Ok(v) => {
+                            self.audit(
+                                "merge_verified",
+                                json!({
+                                    "seq": seq,
+                                    "attempt": attempt,
+                                    "candidate": cand.hex(),
+                                    "verified": self.gate.verifies(),
+                                    "summary": v,
+                                }),
+                            );
+                            verified.push((tree, v.clone()));
+                            v
+                        }
+                        Err(fb) => {
+                            return self.reject(
+                                &entry,
+                                RejectKind::Gate,
+                                json!({ "detail": fb, "candidate": cand.hex() }),
+                                Some((pre, cand)),
+                            );
+                        }
+                    }
+                }
+            };
+
+            let summary: Vec<String> = {
+                let store = lock_store(&store_arc);
+                anchor_snapshot::diff(&store, &pre, &cand)
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect()
+            };
             if !self.auto_merge {
+                let verdict_line = if self.gate.verifies() {
+                    format!("  Verification: {verdict}\n")
+                } else {
+                    "  Verification: NONE (unverified merge)\n".to_string()
+                };
                 let view = PromptView {
                     tool: Tool::UserAction,
                     operation: Operation::Write,
                     canonical_target: Some(ws.root().to_path_buf()),
                     rule: "merge_queue".into(),
                     detail: Some(format!(
-                        "  Merge {seq} from agent {agent} changes:\n{}",
+                        "  Merge {seq} from agent {agent} changes:\n{}{verdict_line}",
                         summary
                             .iter()
                             .map(|l| format!("    {l}\n"))
@@ -405,9 +604,17 @@ impl<'m> MergeQueue<'m> {
                     )),
                 };
                 if self.main.interact().confirm(&view) != UserResponse::Approve {
-                    return self.reject(&entry, json!({ "reason": "declined by the user" }));
+                    return self.reject(
+                        &entry,
+                        RejectKind::Declined,
+                        json!({ "detail": "declined by the user" }),
+                        Some((pre, cand)),
+                    );
                 }
             }
+            // Only now is the merge in flight: a crash from here is settled
+            // by `recover`.
+            self.set_status(seq, MergeStatus::Applying, Some((&pre, &cand)), json!({}))?;
             let store = lock_store(&store_arc);
             let engine = self.main.engine();
             let root = ws.root().to_path_buf();
@@ -416,10 +623,9 @@ impl<'m> MergeQueue<'m> {
                     .user_initiated(UserAction::Merge, &user_request(&root, r, op))
                     .map_err(|d| d.rule)
             };
-            match anchor_snapshot::restore_expect(&store, &ws, &opts, &pre, &m.snapshot, &mut auth)
-            {
+            match anchor_snapshot::restore_expect(&store, &ws, &opts, &pre, &cand, &mut auth) {
                 Ok(r) => {
-                    let post = r.post.unwrap_or(m.snapshot);
+                    let post = r.post.unwrap_or(cand);
                     store
                         .set_ref(&format!("merges/{seq:010}"), &post)
                         .map_err(|e| e.to_string())?;
@@ -429,14 +635,18 @@ impl<'m> MergeQueue<'m> {
                         seq,
                         MergeStatus::Merged,
                         Some((&pre, &post)),
-                        json!({ "changes": summary }),
+                        json!({ "changes": summary, "verification": verdict }),
                     )?;
+                    if !self.gate.verifies() {
+                        self.audit("merge_unverified", json!({ "seq": seq, "agent_id": agent }));
+                    }
                     self.audit(
                         "merge_applied",
                         json!({
                             "seq": seq,
                             "agent_id": agent,
                             "pre": pre.hex(),
+                            "candidate": cand.hex(),
                             "merged": post.hex(),
                             "operations": r.ops.len(),
                             "attempt": attempt,
@@ -447,7 +657,8 @@ impl<'m> MergeQueue<'m> {
                 Err(anchor_snapshot::Error::ConcurrentChange(p)) => {
                     drop(store);
                     // The main workspace moved since `pre`: nothing was
-                    // touched; recompute against its new state.
+                    // touched; recompute (and re-check) against its new
+                    // state.
                     self.set_status(
                         seq,
                         MergeStatus::Queued,
@@ -463,14 +674,18 @@ impl<'m> MergeQueue<'m> {
                     drop(store);
                     return self.reject(
                         &entry,
-                        json!({ "reason": "apply failed", "detail": e.to_string() }),
+                        RejectKind::Apply,
+                        json!({ "detail": e.to_string() }),
+                        Some((pre, cand)),
                     );
                 }
             }
         }
         self.reject(
             &entry,
-            json!({ "reason": "the main workspace kept changing during the merge" }),
+            RejectKind::Drift,
+            json!({ "detail": "the main workspace kept changing during the merge" }),
+            None,
         )
     }
 

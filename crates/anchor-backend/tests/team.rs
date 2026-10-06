@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use anchor_backend::interact::{Interaction, PromptView, Scripted};
 use anchor_backend::iso;
 use anchor_backend::mediator::lock_store;
-use anchor_backend::queue::{MergeGate, MergeQueue, NoGate, Outcome};
+use anchor_backend::queue::{GateContext, MergeGate, MergeQueue, NoGate, Outcome};
 use anchor_backend::session;
 use anchor_backend::team::{self, Schedule, Team, TeamAgent, TeamOptions, TeamReport};
 use anchor_backend::{Opened, open_workspace_in};
@@ -410,7 +410,7 @@ fn submit(q: &mut MergeQueue<'_>, agent: i64, i: &iso::Isolated) -> Outcome {
         let store = lock_store(&store_arc);
         iso::submit(&store, i).unwrap()
     };
-    let e = q.submit(agent, &i.base, &sub).unwrap();
+    let e = q.submit(agent, &i.base, &sub, &[]).unwrap();
     q.process(e.seq).unwrap()
 }
 
@@ -516,7 +516,7 @@ fn merge_conflict_returns_structured_feedback() {
         .unwrap();
     std::fs::write(ib.ws.root().join("src/a.txt"), "beta\n").unwrap();
     let o = submit(&mut q, b, &ib);
-    let Outcome::Rejected { seq, feedback } = &o else {
+    let Outcome::Rejected { seq, feedback, .. } = &o else {
         panic!("{o:?}")
     };
     assert_eq!(feedback["reason"], "conflict");
@@ -538,11 +538,10 @@ struct FailingGate;
 impl MergeGate for FailingGate {
     fn check(
         &mut self,
-        _: &anchor_snapshot::Store,
-        _: &anchor_snapshot::Id,
-        changes: &[anchor_snapshot::Change],
-    ) -> Result<(), Value> {
-        Err(json!({ "tests": "1 failed", "changed": changes.len() }))
+        ctx: &GateContext<'_>,
+        _: &anchor_backend::mediator::SharedStore,
+    ) -> Result<Value, Value> {
+        Err(json!({ "tests": "1 failed", "changed": ctx.changes.len() }))
     }
 }
 
@@ -567,9 +566,100 @@ fn merge_gate_failure_rejects() {
         panic!("{o:?}")
     };
     assert_eq!(feedback["reason"], "gate");
+    assert_eq!(
+        o.reject_kind(),
+        Some(anchor_backend::queue::RejectKind::Gate)
+    );
     assert_eq!(feedback["detail"]["tests"], "1 failed");
     drop(q);
     assert_eq!(fx.read("src/a.txt"), "a1\n");
+}
+
+/// Edits the main workspace during its first check, so the candidate it
+/// approved is stale by the time it would be applied.
+struct DriftingGate {
+    main_file: PathBuf,
+    seen: Arc<Mutex<Vec<Checked>>>,
+}
+
+/// A checked candidate, the claim ids the gate saw, and whether the store
+/// was unlocked during the check.
+type Checked = (anchor_snapshot::Id, Vec<String>, bool);
+
+impl MergeGate for DriftingGate {
+    fn check(
+        &mut self,
+        ctx: &GateContext<'_>,
+        store: &anchor_backend::mediator::SharedStore,
+    ) -> Result<Value, Value> {
+        // The queue must not hold the store lock while a gate runs.
+        let unlocked = store.try_lock().is_ok();
+        let mut seen = self.seen.lock().unwrap();
+        let claims = ctx.claims.iter().map(|c| c.id.clone()).collect();
+        seen.push((ctx.candidate, claims, unlocked));
+        if seen.len() == 1 {
+            std::fs::write(&self.main_file, "edited while verifying\n").unwrap();
+        }
+        Ok(json!({ "checked": seen.len() }))
+    }
+}
+
+#[test]
+fn drift_reverifies_candidate() {
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = fx.open();
+    let hub = hub_of(&opened);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let gate = DriftingGate {
+        main_file: fx.ws.join("README.md"),
+        seen: seen.clone(),
+    };
+    let mut q = MergeQueue::new(hub.clone(), &mut opened.mediator, Box::new(gate), true);
+    let (a, ia) = iso_agent(&mut q, &fx, "alpha", &["src/"]);
+    hub.request_claim(Caller::Agent(a), "src/", ClaimType::Edit, false, None)
+        .unwrap();
+    std::fs::write(ia.ws.root().join("src/a.txt"), "alpha\n").unwrap();
+    let sub = {
+        let store_arc = q.main().shared_store();
+        let store = lock_store(&store_arc);
+        iso::submit(&store, &ia).unwrap()
+    };
+    let claims = vec![anchor_protocol::verify::Claim {
+        id: "c1".into(),
+        text: "edits a".into(),
+        files: vec!["src/a.txt".into()],
+        tests: vec![],
+    }];
+    let e = q.submit(a, &ia.base, &sub, &claims).unwrap();
+    // The claims are durable evidence of the merge.
+    assert_eq!(q.claims_of(e.seq).unwrap(), claims);
+    let o = q.process(e.seq).unwrap();
+    let Outcome::Merged { merged, .. } = &o else {
+        panic!("{o:?}")
+    };
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "the recomputed candidate is checked again");
+    assert_ne!(seen[0].0, seen[1].0);
+    assert!(
+        seen.iter()
+            .all(|(_, c, unlocked)| c == &["c1"] && *unlocked)
+    );
+    // What was applied is exactly the tree that was verified last.
+    {
+        let store_arc = q.main().shared_store();
+        let store = lock_store(&store_arc);
+        let root = |id: &anchor_snapshot::Id| store.snapshot(id).unwrap().root;
+        assert_eq!(root(merged), root(&seen[1].0));
+    }
+    drop(q);
+    assert_eq!(fx.read("src/a.txt"), "alpha\n");
+    assert_eq!(fx.read("README.md"), "edited while verifying\n");
+    let entries = AuditLog::read_entries(&opened.paths.audit).unwrap();
+    let count = |k: &str| entries.iter().filter(|e| e.kind == k).count();
+    assert_eq!(count("merge_retry"), 1);
+    assert_eq!(count("merge_verified"), 2);
+    assert_eq!(count("merge_unverified"), 0);
 }
 
 /// Approves merges, but edits the main workspace during the first
@@ -626,6 +716,14 @@ fn merge_never_reverts_concurrent_main_edits() {
     let entries = AuditLog::read_entries(&opened.paths.audit).unwrap();
     assert_eq!(
         entries.iter().filter(|e| e.kind == "merge_retry").count(),
+        1
+    );
+    // Without a verifying gate, the merge is recorded as unverified.
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|e| e.kind == "merge_unverified")
+            .count(),
         1
     );
 }
