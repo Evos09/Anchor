@@ -65,9 +65,15 @@ pub fn parse_tool_call(
         name: name.to_string(),
         error,
     };
-    let request: ToolRequest =
+    let request: ToolRequest = if anchor_protocol::valid_hub_tool(name) {
+        ToolRequest::Hub {
+            tool: name.to_string(),
+            args: arguments.clone(),
+        }
+    } else {
         serde_json::from_value(serde_json::json!({"tool": name, "args": arguments}))
-            .map_err(|e| invalid(e.to_string()))?;
+            .map_err(|e| invalid(e.to_string()))?
+    };
     let call = ToolCall {
         call_id: id.to_string(),
         request,

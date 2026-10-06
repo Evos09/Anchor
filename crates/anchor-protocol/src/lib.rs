@@ -21,7 +21,9 @@ mod messages;
 pub use messages::*;
 
 /// Wire protocol version. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Version 2 (Phase 4) added hub tools ([`ToolRequest::Hub`]) and
+/// [`Task::hub`].
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Hard upper bound on the size of one encoded frame, including the newline.
 pub const MAX_FRAME_BYTES: usize = 16 << 20;

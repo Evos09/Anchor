@@ -129,6 +129,7 @@ fn cmd_run(a: &Args) -> Result<ExitCode, String> {
         checkpoint_threshold: threshold,
         resume_from,
         mock_script: a.get("--mock-script").map(read).transpose()?,
+        hub: None,
     };
     eprintln!(
         "anchor: workspace {}",
@@ -283,7 +284,10 @@ fn cmd_rollback(a: &Args) -> Result<ExitCode, String> {
             let turn: u64 = t.parse().map_err(|e| format!("--turn: {e}"))?;
             (m.snapshot_for_turn(turn)?, format!("before turn {turn}"))
         }
-        (None, Some(s)) => (resolve_snapshot(m.snapshots(), s)?, format!("snapshot {s}")),
+        (None, Some(s)) => (
+            resolve_snapshot(&m.snapshots(), s)?,
+            format!("snapshot {s}"),
+        ),
         _ => return Err("give exactly one of --turn N or --snapshot REF".into()),
     };
     let changes = m.preview_restore(&target)?;
@@ -320,7 +324,8 @@ fn cmd_rollback(a: &Args) -> Result<ExitCode, String> {
 
 fn cmd_snapshot(a: &Args) -> Result<ExitCode, String> {
     let opened = open_cli(a)?;
-    let store = opened.mediator.snapshots();
+    let guard = opened.mediator.snapshots();
+    let store = &*guard;
     match a.pos.get(1).map(String::as_str) {
         Some("list") => {
             for (name, id) in store.all_refs().map_err(|e| e.to_string())? {

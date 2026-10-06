@@ -115,6 +115,7 @@ fn run(fx: &Fx, opened: &mut Opened, script: &str, threshold: f64, roles: &str) 
         checkpoint_threshold: threshold,
         resume_from: None,
         mock_script: Some(script.into()),
+        hub: None,
     };
     let _ = fx;
     session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap()
@@ -312,7 +313,7 @@ fn end_to_end_session_enforces_every_primitive() {
     let snaps: Vec<_> = es.iter().filter(|e| e.kind == "snapshot").collect();
     assert_eq!(snaps.len(), 2, "{snaps:?}");
     assert!(
-        anchor_snapshot::verify(opened.mediator.snapshots())
+        anchor_snapshot::verify(&opened.mediator.snapshots())
             .unwrap()
             .ok()
     );
@@ -409,6 +410,7 @@ fn context_threshold_pauses_and_fresh_session_resumes() {
         checkpoint_threshold: 0.8,
         resume_from: Some(cp.clone()),
         mock_script: Some(r#"{"steps": [{"content": "resumed and finished"}]}"#.into()),
+        hub: None,
     };
     let r2 = session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap();
     assert_eq!(r2.done.as_deref(), Some("resumed and finished"));
@@ -469,6 +471,7 @@ fn crafted_snapshot_cannot_escape_on_restore() {
     };
     let fid = b.put(ObjType::File, &file.encode()).unwrap();
     b.publish().unwrap();
+    drop(store);
     let file_node = Node::File {
         id: fid,
         mode: 0o644,
@@ -481,7 +484,7 @@ fn crafted_snapshot_cannot_escape_on_restore() {
                 name: name.to_vec(),
                 node: file_node.clone(),
             }],
-            opened.mediator.snapshots(),
+            &opened.mediator.snapshots(),
         );
         assert!(
             opened.mediator.rollback_to_snapshot(&id).is_err(),
@@ -506,6 +509,7 @@ fn crafted_snapshot_cannot_escape_on_restore() {
         )
         .unwrap();
     b.publish().unwrap();
+    drop(store);
     let id = crafted(
         vec![TreeEntry {
             name: b"config_link".to_vec(),
@@ -514,7 +518,7 @@ fn crafted_snapshot_cannot_escape_on_restore() {
                 mode: 0o755,
             },
         }],
-        opened.mediator.snapshots(),
+        &opened.mediator.snapshots(),
     );
     opened.mediator.rollback_to_snapshot(&id).unwrap();
     assert_eq!(outside(), "ssh-ed25519 AAAA user@host\n");
@@ -542,6 +546,7 @@ fn crafted_snapshot_cannot_escape_on_restore() {
     let mut bytes = std::fs::read(&cpath).unwrap();
     bytes[1] ^= 1;
     std::fs::write(&cpath, &bytes).unwrap();
+    drop(store);
     let id = crafted(
         vec![TreeEntry {
             name: b"src".to_vec(),
@@ -550,7 +555,7 @@ fn crafted_snapshot_cannot_escape_on_restore() {
                 mode: 0o644,
             },
         }],
-        opened.mediator.snapshots(),
+        &opened.mediator.snapshots(),
     );
     let before = tree_state(&fx.ws);
     let err = opened.mediator.rollback_to_snapshot(&id).unwrap_err();
@@ -678,6 +683,7 @@ fn kill_mid_turn_leaves_valid_checkpoint_and_resumes() {
         checkpoint_threshold: 0.8,
         resume_from: Some(latest),
         mock_script: Some(r#"{"steps": [{"content": "recovered"}]}"#.into()),
+        hub: None,
     };
     let r = session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap();
     assert_eq!(r.done.as_deref(), Some("recovered"));

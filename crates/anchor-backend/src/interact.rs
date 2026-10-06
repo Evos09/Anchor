@@ -20,7 +20,7 @@ pub struct PromptView {
     pub detail: Option<String>,
 }
 
-pub trait Interaction {
+pub trait Interaction: Send {
     fn confirm(&mut self, view: &PromptView) -> UserResponse;
     fn resume_choice(&mut self, checkpoint_id: &str, ratio_hint: &str) -> ResumeChoice;
     fn notify(&mut self, line: &str);

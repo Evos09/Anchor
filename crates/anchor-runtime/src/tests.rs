@@ -273,6 +273,7 @@ fn task(script: &str) -> Task {
         checkpoint_threshold: 0.8,
         resume_from: None,
         mock_script: Some(script.into()),
+        hub: None,
     }
 }
 

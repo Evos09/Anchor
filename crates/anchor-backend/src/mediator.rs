@@ -14,6 +14,7 @@
 //! 7. the outcome audited.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anchor_exec::{CommandSpec, FsConfinement, Limits, Network};
 use anchor_fs::{Expect, FileContent, FsError, Kind, Resolved, Workspace};
@@ -26,6 +27,38 @@ use anchor_protocol::{DeniedBy, EditOp, ToolOutcome, ToolRequest};
 
 use crate::interact::{Interaction, PromptView};
 use anchor_snapshot::{Change, Id, RestoreReport, SnapshotOptions, SnapshotReport, Store};
+
+/// One snapshot store shared by every mediator of a workspace (main and
+/// isolated agent roots). Each whole store operation holds the lock, so
+/// snapshots, restores and gc never interleave.
+pub type SharedStore = Arc<Mutex<Store>>;
+
+/// Ties a mediator to the Coordination Hub as one agent. The identity is
+/// fixed here, by the backend; nothing the runtime sends can change it.
+#[derive(Clone)]
+pub struct HubBinding {
+    pub hub: Arc<anchor_hub::Hub>,
+    pub agent: anchor_hub::AgentId,
+}
+
+impl std::fmt::Debug for HubBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HubBinding")
+            .field("agent", &self.agent)
+            .finish()
+    }
+}
+
+fn hub_outcome(e: anchor_hub::tools::ToolError) -> ToolOutcome {
+    use anchor_hub::HubError;
+    use anchor_hub::tools::ToolError;
+    match e {
+        ToolError::Hub(
+            h @ (HubError::Forbidden(_) | HubError::Conflict(_) | HubError::Unauthenticated),
+        ) => denied(DeniedBy::Hub, h.to_string()),
+        other => error(other.to_string()),
+    }
+}
 
 /// Largest tool output returned to the model in one result.
 pub const MAX_OUTPUT_BYTES: usize = 1 << 20;
@@ -75,9 +108,10 @@ pub struct Mediator {
     ws: Workspace,
     engine: Engine,
     guard: Guard,
-    snapshots: Store,
+    snapshots: SharedStore,
     snap_opts: SnapshotOptions,
     keep_turns: usize,
+    hub: Option<HubBinding>,
     session: String,
     /// The turn whose pre-turn snapshot has been taken.
     snapshotted: Option<u64>,
@@ -127,7 +161,7 @@ impl Mediator {
         ws: Workspace,
         engine: Engine,
         guard: Guard,
-        snapshots: Store,
+        snapshots: SharedStore,
         snap_opts: SnapshotOptions,
         keep_turns: usize,
         interact: Box<dyn Interaction>,
@@ -141,6 +175,7 @@ impl Mediator {
             snapshots,
             snap_opts,
             keep_turns,
+            hub: None,
             session: String::new(),
             snapshotted: None,
             interact,
@@ -167,8 +202,27 @@ impl Mediator {
         self.snapshotted = None;
     }
 
-    pub fn snapshots(&self) -> &Store {
-        &self.snapshots
+    /// The snapshot store, locked for the caller's whole operation.
+    pub fn snapshots(&self) -> MutexGuard<'_, Store> {
+        lock_store(&self.snapshots)
+    }
+
+    pub fn shared_store(&self) -> SharedStore {
+        self.snapshots.clone()
+    }
+
+    pub fn snapshot_options(&self) -> &SnapshotOptions {
+        &self.snap_opts
+    }
+
+    /// Bind this mediator to the Hub as `binding.agent`: hub tools become
+    /// available and file mutations need an edit claim.
+    pub fn bind_hub(&mut self, binding: HubBinding) {
+        self.hub = Some(binding);
+    }
+
+    pub fn hub(&self) -> Option<&HubBinding> {
+        self.hub.as_ref()
     }
 
     pub fn set_turn(&mut self, turn: u64) {
@@ -274,6 +328,7 @@ impl Mediator {
                 args,
                 network,
             } => self.run_command(&program, args, network),
+            ToolRequest::Hub { tool, args } => self.hub_tool(&tool, args),
         };
         if matches!(out, ToolOutcome::Denied { .. }) {
             self.stats.denied += 1;
@@ -489,11 +544,67 @@ impl Mediator {
         self.ws.read(r).map(Some).map_err(fs_outcome)
     }
 
+    fn hub_tool(&mut self, tool: &str, args: serde_json::Value) -> ToolOutcome {
+        let Some(b) = &self.hub else {
+            return denied(DeniedBy::Hub, "this session is not part of a team");
+        };
+        let caller = anchor_hub::Caller::Agent(b.agent);
+        match anchor_hub::tools::call(&b.hub, caller, Some(&self.ws), tool, args) {
+            Ok(v) => ToolOutcome::Ok {
+                output: v.to_string(),
+            },
+            Err(e) => hub_outcome(e),
+        }
+    }
+
+    /// In a team session, a file may change only under an edit claim this
+    /// agent holds. A path another agent has claimed is refused; a free
+    /// path is claimed on the agent's behalf. (The merge queue re-checks
+    /// every changed path; this is the early signal.)
+    fn check_claim(&mut self, r: &Resolved) -> Result<(), ToolOutcome> {
+        let Some(b) = &self.hub else {
+            return Ok(());
+        };
+        let rel = claim_rel(&r.rel);
+        match b.hub.edit_blocker(b.agent, &rel) {
+            Ok(Some(c)) => {
+                return Err(denied(
+                    DeniedBy::Claim,
+                    format!(
+                        "{rel} is claimed by agent {} ({} claim on {})",
+                        c.agent_id, c.claim_type, c.path
+                    ),
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => return Err(denied(DeniedBy::Claim, e.to_string())),
+        }
+        match b.hub.holds_edit(b.agent, &rel) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(e) => return Err(denied(DeniedBy::Claim, e.to_string())),
+        }
+        let caller = anchor_hub::Caller::Agent(b.agent);
+        match b
+            .hub
+            .request_claim(caller, &rel, anchor_hub::ClaimType::Edit, false, None)
+        {
+            Ok(_) => Ok(()),
+            Err(e) => Err(denied(
+                DeniedBy::Claim,
+                format!("could not claim {rel}: {e}"),
+            )),
+        }
+    }
+
     fn write_file(&mut self, path: &str, content: &[u8]) -> ToolOutcome {
         let r = match self.ws.resolve(path) {
             Ok(r) => r,
             Err(e) => return fs_outcome(e),
         };
+        if let Err(o) = self.check_claim(&r) {
+            return o;
+        }
         let cur = match self.current(&r) {
             Ok(c) => c,
             Err(o) => return o,
@@ -573,6 +684,9 @@ impl Mediator {
             Ok(r) => r,
             Err(e) => return fs_outcome(e),
         };
+        if let Err(o) = self.check_claim(&r) {
+            return o;
+        }
         let cur = match self.current(&r) {
             Ok(Some(c)) => c,
             Ok(None) => return error("not found (use write_file to create files)"),
@@ -791,28 +905,34 @@ impl Mediator {
         if self.snapshotted == Some(self.turn) {
             return Ok(());
         }
-        let seq = self
-            .snapshots
-            .list_refs("turns")
-            .map_err(|e| e.to_string())?
+        let store = lock_store(&self.snapshots);
+        let root = self.snap_opts.root.clone();
+        let turns = root.list_refs(&store, "turns").map_err(|e| e.to_string())?;
+        let seq = turns
             .last()
-            .and_then(|(n, _)| n.strip_prefix("turns/")?.parse::<u64>().ok())
+            .and_then(|(n, _)| n.parse::<u64>().ok())
             .unwrap_or(0)
             + 1;
         let label = format!("session {} turn {}", self.session, self.turn);
         let r = anchor_snapshot::take_snapshot(
-            &self.snapshots,
+            &store,
             &self.ws,
             &self.snap_opts,
-            &format!("turns/{seq:010}"),
+            &root.ref_name("turns", &format!("{seq:010}")),
             &label,
         )
         .map_err(|e| e.to_string())?;
         self.audit_snapshot(&label, &r);
         self.snapshotted = Some(self.turn);
+        if !root.is_main() && turns.len() >= self.keep_turns {
+            // An agent root prunes its own turns; gc only knows main's.
+            for (leaf, _) in &turns[..turns.len() + 1 - self.keep_turns.max(1)] {
+                let _ = store.delete_ref(&root.ref_name("turns", leaf));
+            }
+        }
         if seq as usize > self.keep_turns + 20 {
             // Amortised: prune old turns and unreachable objects.
-            match anchor_snapshot::gc(&self.snapshots, self.keep_turns, 20) {
+            match anchor_snapshot::gc(&store, self.keep_turns, 20) {
                 Ok(g) => {
                     let _ = self.engine.audit().append(
                         "snapshot_gc",
@@ -849,17 +969,15 @@ impl Mediator {
     /// The snapshot taken before `turn` of the most recent session that
     /// has snapshots.
     pub fn snapshot_for_turn(&self, turn: u64) -> Result<Id, String> {
+        let store = lock_store(&self.snapshots);
         let refs = self
-            .snapshots
-            .list_refs("turns")
+            .snap_opts
+            .root
+            .list_refs(&store, "turns")
             .map_err(|e| e.to_string())?;
         let mut latest_session: Option<String> = None;
         for (_, id) in refs.iter().rev() {
-            let label = self
-                .snapshots
-                .snapshot(id)
-                .map_err(|e| e.to_string())?
-                .label;
+            let label = store.snapshot(id).map_err(|e| e.to_string())?.label;
             let Some((session, t)) = parse_label(&label) else {
                 continue;
             };
@@ -878,9 +996,10 @@ impl Mediator {
 
     /// What restoring `target` would change.
     pub fn preview_restore(&mut self, target: &Id) -> Result<Vec<Change>, String> {
-        let now = anchor_snapshot::snapshot(&self.snapshots, &self.ws, &self.snap_opts, "preview")
+        let store = lock_store(&self.snapshots);
+        let now = anchor_snapshot::snapshot(&store, &self.ws, &self.snap_opts, "preview")
             .map_err(|e| e.to_string())?;
-        anchor_snapshot::diff(&self.snapshots, &now.id(), target).map_err(|e| e.to_string())
+        anchor_snapshot::diff(&store, &now.id(), target).map_err(|e| e.to_string())
     }
 
     /// Restore the workspace to its state before `turn` (latest session).
@@ -900,8 +1019,9 @@ impl Mediator {
                 .user_initiated(UserAction::Rollback, &user_request(&root, r, op))
                 .map_err(|d| d.rule)
         };
-        let result =
-            anchor_snapshot::restore(&self.snapshots, &self.ws, &self.snap_opts, id, &mut auth);
+        let store = lock_store(&self.snapshots);
+        let result = anchor_snapshot::restore(&store, &self.ws, &self.snap_opts, id, &mut auth);
+        drop(store);
         self.snapshotted = None;
         match result {
             Ok(r) => {
@@ -933,8 +1053,10 @@ impl Mediator {
                 .user_initiated(UserAction::Rollback, &user_request(&root, r, op))
                 .map_err(|d| d.rule)
         };
-        let r = anchor_snapshot::recover(&self.snapshots, &self.ws, &self.snap_opts, &mut auth)
+        let store = lock_store(&self.snapshots);
+        let r = anchor_snapshot::recover(&store, &self.ws, &self.snap_opts, &mut auth)
             .map_err(|e| e.to_string())?;
+        drop(store);
         if let Some(r) = &r {
             self.audit_restore("restore_recovered", r);
         }
@@ -965,6 +1087,21 @@ impl Mediator {
         );
         Ok(self.guard.classify(rel, None))
     }
+}
+
+/// Lock a shared store. A panic elsewhere while holding the lock leaves
+/// the store itself consistent (every operation is crash-safe on disk), so
+/// a poisoned lock is still usable.
+pub fn lock_store(s: &SharedStore) -> MutexGuard<'_, Store> {
+    s.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// A workspace-relative path in the Hub's claim form (`/`-separated).
+fn claim_rel(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// `session <id> turn <n>` → (id, n).

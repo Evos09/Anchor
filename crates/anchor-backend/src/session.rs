@@ -23,6 +23,8 @@ pub struct SessionConfig {
     pub checkpoint_threshold: f64,
     pub resume_from: Option<Checkpoint>,
     pub mock_script: Option<String>,
+    /// Multi-agent runs: the agent's Hub identity and tools.
+    pub hub: Option<anchor_protocol::HubInfo>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -141,6 +143,9 @@ pub fn run(
         next_id: 1,
     };
     let mut reader = BufReader::new(stdout);
+    // A team agent stays alive on the Hub while its runtime runs, however
+    // long one model turn takes.
+    let ticker = mediator.hub().cloned().map(heartbeat_ticker);
     let audit = |m: &Mediator, kind: &str, data: serde_json::Value| {
         let _ = m.engine().audit().append(kind, data);
     };
@@ -179,6 +184,7 @@ pub fn run(
                         checkpoint_threshold: cfg.checkpoint_threshold,
                         resume_from: cfg.resume_from.clone().map(Box::new),
                         mock_script: cfg.mock_script.clone(),
+                        hub: cfg.hub.clone(),
                     })))?;
                 }
                 Message::TurnStarted { turn } => {
@@ -291,6 +297,10 @@ pub fn run(
     if result.is_err() {
         let _ = wire.child.kill();
     }
+    if let Some((stop, t)) = ticker {
+        drop(stop);
+        let _ = t.join();
+    }
     let _ = wire.child.wait();
     let _ = stderr_thread.join();
     while let Ok(line) = rx.try_recv() {
@@ -311,6 +321,26 @@ pub fn run(
         }),
     );
     result.map(|_| report)
+}
+
+/// Heartbeat `b.agent` every third of the Hub's interval until the
+/// returned sender is dropped.
+fn heartbeat_ticker(
+    b: crate::mediator::HubBinding,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let (stop, rx) = std::sync::mpsc::channel::<()>();
+    let every = std::time::Duration::from_millis((b.hub.config().heartbeat_ms / 3).max(10));
+    let t = std::thread::spawn(move || {
+        let caller = anchor_hub::Caller::Agent(b.agent);
+        loop {
+            let _ = b.hub.heartbeat(caller);
+            match rx.recv_timeout(every) {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                _ => return,
+            }
+        }
+    });
+    (stop, t)
 }
 
 /// Locate `anchor-agent` next to the current executable.

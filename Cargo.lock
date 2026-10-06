@@ -25,6 +25,7 @@ dependencies = [
  "anchor-exec",
  "anchor-fs",
  "anchor-guard",
+ "anchor-hub",
  "anchor-policy",
  "anchor-protocol",
  "anchor-snapshot",

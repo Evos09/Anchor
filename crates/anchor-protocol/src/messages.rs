@@ -163,6 +163,26 @@ pub enum ToolRequest {
         #[serde(default)]
         network: bool,
     },
+    /// A Coordination Hub tool (spec §6): claims, messages, tasks,
+    /// decisions. Only offered when [`Task::hub`] is set. The backend
+    /// executes it as the agent bound to this runtime; the arguments can
+    /// never name another caller.
+    Hub {
+        tool: String,
+        args: serde_json::Value,
+    },
+}
+
+/// Largest serialized hub tool argument object.
+pub const MAX_HUB_ARGS_BYTES: usize = 64 << 10;
+
+/// `hub_` followed by 1-40 lowercase letters or underscores.
+pub fn valid_hub_tool(name: &str) -> bool {
+    name.strip_prefix("hub_").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest.len() <= 40
+            && rest.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+    })
 }
 
 impl ToolRequest {
@@ -175,6 +195,7 @@ impl ToolRequest {
             ToolRequest::Glob { .. } => "glob",
             ToolRequest::Grep { .. } => "grep",
             ToolRequest::RunCommand { .. } => "run_command",
+            ToolRequest::Hub { .. } => "hub",
         }
     }
 
@@ -224,6 +245,18 @@ impl Validate for ToolRequest {
                     if a.len() > crate::MAX_PARAM_BYTES || a.contains('\0') {
                         return Err("argument too long or contains NUL".into());
                     }
+                }
+                Ok(())
+            }
+            ToolRequest::Hub { tool, args } => {
+                if !valid_hub_tool(tool) {
+                    return Err("invalid hub tool name".into());
+                }
+                if !(args.is_object() || args.is_null()) {
+                    return Err("hub tool arguments must be an object".into());
+                }
+                if args.to_string().len() > MAX_HUB_ARGS_BYTES {
+                    return Err("hub tool arguments too large".into());
                 }
                 Ok(())
             }
@@ -293,6 +326,11 @@ pub enum DeniedBy {
     PathResolution,
     ParameterValidation,
     Sandbox,
+    /// Another agent holds a conflicting claim, or the path is outside the
+    /// agent's claimable paths (spec §6.4).
+    Claim,
+    /// The Coordination Hub refused the request (permissions, identity).
+    Hub,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -398,6 +436,56 @@ pub struct Task {
     /// Scripted responses for the mock provider (tests and demos only).
     #[serde(default)]
     pub mock_script: Option<String>,
+    /// Set when this agent is part of a multi-agent run (Phase 4): who it
+    /// is on the Hub, its peers, and the hub tools it may call.
+    #[serde(default)]
+    pub hub: Option<HubInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HubInfo {
+    pub agent_id: i64,
+    pub display_name: String,
+    pub peers: Vec<HubPeer>,
+    pub tools: Vec<HubToolDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HubPeer {
+    pub agent_id: i64,
+    pub display_name: String,
+    pub role: String,
+    pub family: String,
+}
+
+/// A hub tool as offered to the model (definitions come from the backend;
+/// the runtime cannot link the Hub).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HubToolDef {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+impl Validate for HubInfo {
+    fn validate(&self) -> Result<(), String> {
+        check_param("display_name", &self.display_name)?;
+        if self.peers.len() > 64 || self.tools.len() > 64 {
+            return Err("too many hub peers or tools".into());
+        }
+        for p in &self.peers {
+            check_param("peer name", &p.display_name)?;
+        }
+        for t in &self.tools {
+            if !valid_hub_tool(&t.name) || t.description.len() > 4096 {
+                return Err(format!("invalid hub tool definition {:?}", t.name));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Validate for Task {
@@ -411,6 +499,9 @@ impl Validate for Task {
         }
         if let Some(c) = &self.resume_from {
             c.validate()?;
+        }
+        if let Some(h) = &self.hub {
+            h.validate()?;
         }
         Ok(())
     }

@@ -225,7 +225,7 @@ pub fn open_workspace_in(
         ws,
         engine,
         guard,
-        snapshots,
+        std::sync::Arc::new(std::sync::Mutex::new(snapshots)),
         snap.options,
         snap.keep_turns,
         interact,

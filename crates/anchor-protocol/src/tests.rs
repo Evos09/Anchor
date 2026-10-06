@@ -21,6 +21,13 @@ fn roundtrips_every_direction() {
             edit: EditOp::Append { text: "x\n".into() },
         },
     }));
+    roundtrip(Message::ToolCall(ToolCall {
+        call_id: "c2".into(),
+        request: ToolRequest::Hub {
+            tool: "hub_request_claim".into(),
+            args: serde_json::json!({ "path": "src/", "claim_type": "edit" }),
+        },
+    }));
     roundtrip(Message::TurnStarted { turn: 3 });
     roundtrip(Message::Shutdown);
     roundtrip(Message::Resume(Resume {
@@ -30,11 +37,11 @@ fn roundtrips_every_direction() {
 
 #[test]
 fn rejects_version_mismatch() {
-    let line = r#"{"v":2,"id":1,"msg":{"kind":"shutdown"}}"#;
+    let line = r#"{"v":1,"id":1,"msg":{"kind":"shutdown"}}"#;
     match decode(line) {
         Err(ProtocolError::VersionMismatch {
-            expected: 1,
-            got: 2,
+            expected: 2,
+            got: 1,
         }) => {}
         other => panic!("expected version mismatch, got {other:?}"),
     }
@@ -42,25 +49,25 @@ fn rejects_version_mismatch() {
 
 #[test]
 fn rejects_unknown_top_level_field() {
-    let line = r#"{"v":1,"id":1,"msg":{"kind":"shutdown"},"extra":true}"#;
+    let line = r#"{"v":2,"id":1,"msg":{"kind":"shutdown"},"extra":true}"#;
     assert!(matches!(decode(line), Err(ProtocolError::Malformed(_))));
 }
 
 #[test]
 fn rejects_unknown_payload_field() {
-    let line = r#"{"v":1,"id":1,"msg":{"kind":"tool_call","payload":{"call_id":"a","request":{"tool":"read_file","args":{"path":"x","follow_symlinks":true}}}}}"#;
+    let line = r#"{"v":2,"id":1,"msg":{"kind":"tool_call","payload":{"call_id":"a","request":{"tool":"read_file","args":{"path":"x","follow_symlinks":true}}}}}"#;
     assert!(matches!(decode(line), Err(ProtocolError::Malformed(_))));
 }
 
 #[test]
 fn rejects_unknown_struct_variant_field() {
-    let line = r#"{"v":1,"id":1,"msg":{"kind":"turn_started","payload":{"turn":1,"x":2}}}"#;
+    let line = r#"{"v":2,"id":1,"msg":{"kind":"turn_started","payload":{"turn":1,"x":2}}}"#;
     assert!(matches!(decode(line), Err(ProtocolError::Malformed(_))));
 }
 
 #[test]
 fn rejects_unknown_tool() {
-    let line = r#"{"v":1,"id":1,"msg":{"kind":"tool_call","payload":{"call_id":"a","request":{"tool":"exec_shell","args":{"cmd":"ls"}}}}}"#;
+    let line = r#"{"v":2,"id":1,"msg":{"kind":"tool_call","payload":{"call_id":"a","request":{"tool":"exec_shell","args":{"cmd":"ls"}}}}}"#;
     assert!(matches!(decode(line), Err(ProtocolError::Malformed(_))));
 }
 
@@ -125,4 +132,35 @@ fn mutating_tools_are_classified_by_tool_not_text() {
         }
         .can_mutate()
     );
+}
+
+#[test]
+fn hub_requests_are_bounded() {
+    let call = |tool: &str, args: serde_json::Value| {
+        Frame::new(
+            1,
+            Message::ToolCall(ToolCall {
+                call_id: "a".into(),
+                request: ToolRequest::Hub {
+                    tool: tool.into(),
+                    args,
+                },
+            }),
+        )
+    };
+    assert!(encode(&call("hub_list_claims", serde_json::json!({}))).is_ok());
+    // Only hub_* names; the args must be an object of bounded size.
+    for (tool, args) in [
+        ("read_file", serde_json::json!({})),
+        ("hub_X", serde_json::json!({})),
+        ("hub_", serde_json::json!({})),
+        ("hub_list_claims", serde_json::json!([1])),
+        (
+            "hub_send_message",
+            serde_json::json!({ "text": "x".repeat(MAX_HUB_ARGS_BYTES) }),
+        ),
+    ] {
+        let line = serde_json::to_string(&call(tool, args)).unwrap();
+        assert!(decode(&line).is_err(), "{tool}");
+    }
 }

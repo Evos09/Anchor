@@ -7,8 +7,8 @@ use std::io::{BufRead, Write};
 use anchor_checkpoint::{ContextStatus, ContextTracker};
 use anchor_protocol::{
     CHECKPOINT_FORMAT_VERSION, ChatMessage, ChatRole, Checkpoint, CheckpointReason, ContextUsage,
-    Done, Failed, Frame, Hello, Message, Notice, NoticeKind, PROTOCOL_VERSION, PauseReason, Paused,
-    ResumeChoice, Task, ToolCall, ToolOutcome, Usage,
+    Done, Failed, FileClaimState, Frame, Hello, HubInfo, Message, Notice, NoticeKind,
+    PROTOCOL_VERSION, PauseReason, Paused, ResumeChoice, Task, ToolCall, ToolOutcome, Usage,
 };
 
 use crate::config::RolesConfig;
@@ -82,6 +82,11 @@ struct Session<'a, T: Transport> {
     tracker: ContextTracker,
     prefix: PrefixMonitor,
     last_used: u64,
+    /// Tool definitions offered to the model: the built-in tools, plus the
+    /// Hub's tools when the session is part of a team.
+    tools: serde_json::Value,
+    /// Claims this agent holds, by Hub claim id (for checkpoints).
+    claims: BTreeMap<i64, FileClaimState>,
 }
 
 /// Run one session: handshake, task, loop until done.
@@ -155,7 +160,10 @@ pub fn run_session<T: Transport>(
                 },
                 ChatMessage {
                     role: ChatRole::User,
-                    content: task.instruction.clone(),
+                    content: match &task.hub {
+                        Some(h) => format!("{}\n\n{}", hub_preamble(h), task.instruction),
+                        None => task.instruction.clone(),
+                    },
                     tool_calls: vec![],
                     tool_call_id: None,
                 },
@@ -164,6 +172,7 @@ pub fn run_session<T: Transport>(
         ),
     };
 
+    let tools = tools_for(task.hub.as_ref());
     let mut s = Session {
         t,
         task,
@@ -176,6 +185,8 @@ pub fn run_session<T: Transport>(
         tracker,
         prefix: PrefixMonitor::default(),
         last_used: 0,
+        tools,
+        claims: BTreeMap::new(),
     };
     let result = s.run();
     match result {
@@ -187,6 +198,47 @@ pub fn run_session<T: Transport>(
         }
         Err(e) => Err(e),
     }
+}
+
+/// The built-in tools, plus the Hub's tools for a team session. Single-agent
+/// sessions get exactly [`TOOLS_JSON`], so their prompt prefix is unchanged.
+fn tools_for(hub: Option<&HubInfo>) -> serde_json::Value {
+    let mut tools = TOOLS_JSON.clone();
+    if let (Some(h), Some(list)) = (hub, tools.as_array_mut()) {
+        for t in &h.tools {
+            list.push(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema,
+                }
+            }));
+        }
+    }
+    tools
+}
+
+fn hub_preamble(h: &HubInfo) -> String {
+    let mut s = format!(
+        "[Team session. You are agent {} ({:?}) on the Anchor Coordination Hub. \
+         You work in an isolated copy of the workspace; your changes are merged \
+         when you finish, and only paths you claimed (hub_request_claim, type \
+         \"edit\") may change. Coordinate with the other agents through \
+         hub_send_message and hub_query_messages.",
+        h.agent_id, h.display_name
+    );
+    if !h.peers.is_empty() {
+        s.push_str(" Other agents:");
+        for p in &h.peers {
+            s.push_str(&format!(
+                " {} ({:?}, role {}, family {});",
+                p.agent_id, p.display_name, p.role, p.family
+            ));
+        }
+    }
+    s.push(']');
+    s
 }
 
 fn wait_shutdown<T: Transport>(t: &mut T) -> Result<(), AgentError> {
@@ -209,7 +261,7 @@ impl<T: Transport> Session<'_, T> {
             self.turn += 1;
             self.t.send(Message::TurnStarted { turn: self.turn })?;
 
-            if self.prefix.check(&self.messages, &TOOLS_JSON).is_err() {
+            if self.prefix.check(&self.messages, &self.tools).is_err() {
                 self.t.send(Message::Notice(Notice {
                     kind: NoticeKind::PromptPrefixChanged,
                     detail: "prompt prefix hash changed between turns; provider cache invalidated"
@@ -232,6 +284,7 @@ impl<T: Transport> Session<'_, T> {
 
             for call in &resp.tool_calls {
                 let outcome = self.execute(call.clone())?;
+                self.track_claims(call, &outcome);
                 let content = match outcome {
                     ToolOutcome::Ok { output } => output,
                     ToolOutcome::Denied { by, detail } => format!("DENIED by {by:?}: {detail}"),
@@ -271,6 +324,40 @@ impl<T: Transport> Session<'_, T> {
             {
                 return Ok(());
             }
+        }
+    }
+
+    /// Keep the checkpoint's claim list in step with successful Hub claim
+    /// calls. The Hub stays authoritative; this is a resume hint only.
+    fn track_claims(&mut self, call: &ToolCall, outcome: &ToolOutcome) {
+        let (anchor_protocol::ToolRequest::Hub { tool, args }, ToolOutcome::Ok { output }) =
+            (&call.request, outcome)
+        else {
+            return;
+        };
+        let out: serde_json::Value = serde_json::from_str(output).unwrap_or_default();
+        match tool.as_str() {
+            "hub_request_claim" => {
+                if let (Some(id), Some(path), Some(ct)) = (
+                    out["id"].as_i64(),
+                    out["path"].as_str(),
+                    out["claim_type"].as_str(),
+                ) {
+                    self.claims.insert(
+                        id,
+                        FileClaimState {
+                            path: path.into(),
+                            claim_type: ct.into(),
+                        },
+                    );
+                }
+            }
+            "hub_release_claim" => {
+                if let Some(id) = args["claim_id"].as_i64() {
+                    self.claims.remove(&id);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -314,7 +401,7 @@ impl<T: Transport> Session<'_, T> {
             let Some(p) = self.providers.get_mut(pid) else {
                 continue;
             };
-            match p.complete(&role.model_id, &self.messages, &TOOLS_JSON, &role.params) {
+            match p.complete(&role.model_id, &self.messages, &self.tools, &role.params) {
                 Ok(r) => {
                     let usage = r.usage.unwrap_or_default();
                     let cost = (usage.prompt_tokens as f64 * role.price_in_per_mtok
@@ -400,7 +487,7 @@ impl<T: Transport> Session<'_, T> {
             context_window_tokens: role.context_window,
             messages: self.messages.clone(),
             tasks: vec![],
-            file_claims: vec![],
+            file_claims: self.claims.values().cloned().collect(),
             pending_decisions: vec![],
             summary: None,
         };
