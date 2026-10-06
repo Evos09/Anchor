@@ -137,6 +137,17 @@ impl Isolation {
     }
 }
 
+/// Resources the command's leader used, with any descendants it waited
+/// for. Descendants killed through the process group without being waited
+/// for are not counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rusage {
+    pub user_cpu: Duration,
+    pub sys_cpu: Duration,
+    /// Peak resident set size, in bytes on every platform.
+    pub max_rss_bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Output {
     pub exit: ExitKind,
@@ -145,6 +156,8 @@ pub struct Output {
     pub truncated: bool,
     pub isolation: Isolation,
     pub elapsed: Duration,
+    /// `None` where the platform does not report it (Windows).
+    pub rusage: Option<Rusage>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -238,13 +251,12 @@ pub fn run(spec: &CommandSpec) -> Result<Output, ExecError> {
     let out_reader = spawn_reader(child.stdout.take(), cap);
     let err_reader = spawn_reader(child.stderr.take(), cap);
 
-    let exit = loop {
-        match child.try_wait().map_err(|e| ExecError::Io(e.to_string()))? {
-            Some(status) => break sys::exit_kind(status),
+    let (exit, rusage) = loop {
+        match sys::try_reap(&mut child).map_err(|e| ExecError::Io(e.to_string()))? {
+            Some((status, usage)) => break (sys::exit_kind(status), usage),
             None if start.elapsed() >= spec.limits.wall_timeout => {
-                sys::kill_tree(&mut child);
-                let _ = child.wait();
-                break ExitKind::TimedOut;
+                let usage = sys::kill_and_reap(&mut child);
+                break (ExitKind::TimedOut, usage);
             }
             None => std::thread::sleep(Duration::from_millis(5)),
         }
@@ -260,6 +272,7 @@ pub fn run(spec: &CommandSpec) -> Result<Output, ExecError> {
         truncated: t1 || t2,
         isolation,
         elapsed: start.elapsed(),
+        rusage,
     })
 }
 
@@ -826,6 +839,65 @@ mod sys {
         }
     }
 
+    /// `wait4` the leader without blocking. `Child::try_wait` would reap it
+    /// and lose its resource usage, so the leader is reaped here instead;
+    /// later `try_wait` calls on `child` then fail harmlessly (ECHILD).
+    pub(super) fn try_reap(
+        child: &mut Child,
+    ) -> std::io::Result<Option<(ExitStatus, Option<Rusage>)>> {
+        wait4(child.id() as libc::pid_t, libc::WNOHANG)
+    }
+
+    /// Kill the leader, reap it with its usage, then kill the rest of the
+    /// group.
+    pub(super) fn kill_and_reap(child: &mut Child) -> Option<Rusage> {
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: killpg has no memory-safety preconditions.
+        unsafe { libc::killpg(pid, libc::SIGKILL) };
+        let usage = wait4(pid, 0).ok().flatten().and_then(|(_, u)| u);
+        kill_tree(child);
+        usage
+    }
+
+    fn wait4(
+        pid: libc::pid_t,
+        flags: libc::c_int,
+    ) -> std::io::Result<Option<(ExitStatus, Option<Rusage>)>> {
+        let mut status: libc::c_int = 0;
+        // SAFETY: an all-zero rusage is a valid value of this plain C struct.
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        loop {
+            // SAFETY: both pointers refer to live, properly typed locals.
+            let r = unsafe { libc::wait4(pid, &mut status, flags, &mut ru) };
+            if r == 0 {
+                return Ok(None);
+            }
+            if r < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e);
+            }
+            return Ok(Some((ExitStatus::from_raw(status), Some(rusage_of(&ru)))));
+        }
+    }
+
+    fn rusage_of(ru: &libc::rusage) -> Rusage {
+        let tv = |t: libc::timeval| {
+            Duration::new(t.tv_sec.max(0) as u64, (t.tv_usec.max(0) as u32) * 1000)
+        };
+        let rss = ru.ru_maxrss.max(0) as u64;
+        // Linux reports kilobytes; macOS reports bytes.
+        #[cfg(target_os = "linux")]
+        let rss = rss * 1024;
+        Rusage {
+            user_cpu: tv(ru.ru_utime),
+            sys_cpu: tv(ru.ru_stime),
+            max_rss_bytes: rss,
+        }
+    }
+
     /// Kill the child's whole process group until nothing is left.
     pub(super) fn kill_tree(child: &mut Child) {
         let pgid = child.id() as libc::pid_t;
@@ -876,6 +948,18 @@ mod sys {
 
     pub(super) fn exit_kind(s: ExitStatus) -> ExitKind {
         ExitKind::Exited(s.code().unwrap_or(-1))
+    }
+
+    pub(super) fn try_reap(
+        child: &mut Child,
+    ) -> std::io::Result<Option<(ExitStatus, Option<Rusage>)>> {
+        Ok(child.try_wait()?.map(|s| (s, None)))
+    }
+
+    pub(super) fn kill_and_reap(child: &mut Child) -> Option<Rusage> {
+        let _ = child.kill();
+        let _ = child.wait();
+        None
     }
 
     pub(super) fn kill_tree(child: &mut Child) {

@@ -242,6 +242,34 @@ fn wall_timeout_kills() {
     let out = run(&s).unwrap();
     assert_eq!(out.exit, ExitKind::TimedOut);
     assert!(out.elapsed < Duration::from_secs(10));
+    // The killed leader is still reaped with its usage.
+    assert!(out.rusage.is_some());
+}
+
+#[test]
+fn resource_usage_is_reported() {
+    if resolve_program("python3", &path_var()).is_err() {
+        eprintln!("SKIPPED: python3 not available");
+        return;
+    }
+    // Busy for about 0.3 s of CPU, holding about 64 MiB.
+    let s = spec(
+        "python3",
+        &[
+            "-c",
+            "import time\nb = bytearray(64 << 20)\nfor i in range(0, len(b), 4096): b[i] = 1\nt = time.process_time()\nwhile time.process_time() - t < 0.3: pass\nprint('done')",
+        ],
+        Network::Deny,
+    );
+    let out = run(&s).unwrap();
+    assert_eq!(out.exit, ExitKind::Exited(0), "{out:?}");
+    let u = out.rusage.expect("rusage on Unix");
+    assert!(
+        u.user_cpu + u.sys_cpu >= Duration::from_millis(200),
+        "{u:?}"
+    );
+    assert!(u.max_rss_bytes >= 64 << 20, "{u:?}");
+    assert!(u.max_rss_bytes < 4 << 30, "{u:?}");
 }
 
 #[test]
