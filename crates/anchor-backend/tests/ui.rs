@@ -595,6 +595,14 @@ fn two_model_collaboration_through_the_dashboard() {
     assert_eq!(row("beta")["family"], "demo-family-b");
     assert_eq!(row("alpha")["sessions"], 2);
     assert_eq!(row("reviewer")["status"], "done");
+    assert_eq!(row("reviewer")["family"], "demo-family-c");
+    assert_eq!(row("reviewer")["model_id"], "demo-reviewer-c");
+    // The executor's claims are attributed to it.
+    assert!(
+        events
+            .iter()
+            .any(|e| e["kind"] == "claims_submitted" && e["agent"] == "alpha")
+    );
     assert_eq!(o["chain"]["error"], Value::Null);
     assert!(o["pending"].as_array().unwrap().is_empty());
 

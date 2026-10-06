@@ -742,8 +742,10 @@ impl State {
         }
         // The diff side: hunks from the review input, or the change list.
         let changes = review_input["changes"].clone();
+        let mut mv = json!(m);
+        mv["agent"] = json!(m.agent_id.and_then(|i| self.names().get(&i).cloned()));
         ok(json!({
-            "merge": m,
+            "merge": mv,
             "evidence_group": group,
             "artifacts": artifacts,
             "decision": decision,

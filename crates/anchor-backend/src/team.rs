@@ -497,9 +497,16 @@ pub fn run(
     // every reported cost from them.
     let prices = |roles: &str| roles_view(roles).map(|v| v.prices()).unwrap_or_default();
     let reviewer = team.verify.as_ref().map(|v| {
+        let id = v
+            .reviewer_roles
+            .as_deref()
+            .and_then(|r| roles_view(r).ok()?.identity(Route::Review).ok());
         serde_json::json!({
             "kind": match v.reviewer { ReviewerKind::Rule => "rule", ReviewerKind::Model => "model" },
             "prices": v.reviewer_roles.as_deref().map(prices),
+            "role": id.as_ref().map(|i| i.role.clone()),
+            "model_id": id.as_ref().map(|i| i.model_id.clone()),
+            "family": id.as_ref().map(|i| i.family.clone()),
         })
     });
     let _ = opened.mediator.engine().log(

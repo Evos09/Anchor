@@ -319,7 +319,7 @@ pub fn run(
                     audit(
                         mediator,
                         "review_verdicts",
-                        serde_json::to_value(&v.verdicts).unwrap_or_default(),
+                        serde_json::json!({ "verdicts": v.verdicts }),
                     );
                     report.verdicts = Some(v.verdicts);
                 }
@@ -328,7 +328,7 @@ pub fn run(
                         audit(
                             mediator,
                             "claims_submitted",
-                            serde_json::to_value(&d.claims).unwrap_or_default(),
+                            serde_json::json!({ "claims": d.claims }),
                         );
                     }
                     report.claims = d.claims;

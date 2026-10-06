@@ -429,7 +429,16 @@ impl Model {
         }
         for name in names {
             let hub = hub_agents.iter().find(|a| a.display_name == name);
-            let spec = team_agents.iter().find(|a| a["name"] == name.as_str());
+            let verify = self
+                .team
+                .as_ref()
+                .map(|t| &t["verify"])
+                .filter(|v| !v.is_null());
+            let spec = team_agents
+                .iter()
+                .find(|a| a["name"] == name.as_str())
+                .copied()
+                .or(if name == "reviewer" { verify } else { None });
             let mine: Vec<&Session> = self
                 .sessions
                 .values()
@@ -612,7 +621,7 @@ impl Model {
             ),
             "usage" => (
                 "cost",
-                Info,
+                Trace,
                 format!(
                     "{who} used {} in / {} out tokens on {} (${:.6} reported)",
                     d["input_tokens"],
@@ -632,7 +641,7 @@ impl Model {
             ),
             "checkpoint_saved" => (
                 "session",
-                Info,
+                Trace,
                 format!(
                     "{who}'s context was checkpointed ({})",
                     short(&d["reason"], 60)
@@ -647,7 +656,7 @@ impl Model {
                 ),
             ),
             "claims_submitted" => {
-                let claims: Vec<String> = d
+                let claims: Vec<String> = d["claims"]
                     .as_array()
                     .into_iter()
                     .flatten()
@@ -660,7 +669,8 @@ impl Model {
                 )
             }
             "review_verdicts" => {
-                let bad = d
+                let v = &d["verdicts"];
+                let bad = v
                     .as_array()
                     .map(|v| v.iter().filter(|x| x["verdict"] != "supported").count())
                     .unwrap_or(0);
@@ -669,7 +679,7 @@ impl Model {
                     if bad > 0 { Warn } else { Ok },
                     format!(
                         "The reviewer returned {} verdict(s), {bad} not supported",
-                        d.as_array().map_or(0, Vec::len)
+                        v.as_array().map_or(0, Vec::len)
                     ),
                 )
             }
@@ -744,7 +754,7 @@ impl Model {
             ),
             "approval_resolved" => (
                 "approval",
-                Info,
+                Trace,
                 format!(
                     "Approval #{} answered {} (via {})",
                     d["id"],
@@ -1069,6 +1079,40 @@ impl Model {
                     "{} submitted its work to the merge queue",
                     n(&args["agent_id"])
                 ),
+            ),
+            "ui_action" => (
+                "approval",
+                Info,
+                match d["action"].as_str() {
+                    Some("answer_approval") => format!(
+                        "You answered approval #{} in the dashboard: {}",
+                        d["args"]["id"],
+                        short(&d["args"]["choice"], 20)
+                    ),
+                    Some("decide_message") => format!(
+                        "You {} held message #{} in the dashboard",
+                        if d["args"]["approve"] == true {
+                            "released"
+                        } else {
+                            "rejected"
+                        },
+                        d["args"]["id"]
+                    ),
+                    Some("decide") => format!(
+                        "You {} decision #{} in the dashboard",
+                        if d["args"]["accept"] == true {
+                            "accepted"
+                        } else {
+                            "rejected"
+                        },
+                        d["args"]["id"]
+                    ),
+                    Some("rollback") => format!(
+                        "You restored snapshot {} from the dashboard",
+                        short(&d["args"]["ref"], 60)
+                    ),
+                    _ => format!("Dashboard action: {}", short(d, 160)),
+                },
             ),
             "hub_merge_update" => (
                 "merge",
