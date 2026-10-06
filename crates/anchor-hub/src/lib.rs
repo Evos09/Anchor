@@ -20,10 +20,14 @@
 //! entry holds its current state. [`Hub::verify`] detects edited, deleted
 //! or rolled-back rows and a truncated log.
 
+pub mod a2a;
 mod db;
+pub mod http;
 mod hub;
+pub mod mcp;
 pub mod model;
 mod path;
+pub mod tools;
 
 pub use hub::{Clock, Hub, HubConfig, HubVerifyReport, ManualClock, SystemClock, VerifiedFile};
 pub use model::*;

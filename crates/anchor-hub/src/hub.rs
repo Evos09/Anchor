@@ -261,6 +261,13 @@ impl Hub {
         self.clock.now_ms()
     }
 
+    /// Append a Hub event that changes no row (e.g. a refused
+    /// authentication at the transport). Failures are ignored: the
+    /// request is refused either way.
+    pub fn audit_event(&self, kind: &str, data: Value) {
+        let _ = self.audit.append(kind, data);
+    }
+
     fn lock(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
     }
