@@ -3,6 +3,9 @@
 
 use std::collections::BTreeMap;
 
+use anchor_protocol::roles::{
+    ProviderView, RoleView, RolesView, Route, RoutingView, shared_family,
+};
 use serde::Deserialize;
 
 pub const ROLES: [&str; 4] = ["planner", "executor", "tester", "reviewer"];
@@ -139,29 +142,52 @@ impl RolesConfig {
     }
 
     pub fn family_of(&self, role: &str) -> Option<String> {
-        let r = self.roles.get(role)?;
-        let fam = r
-            .family
-            .clone()
-            .or_else(|| self.providers.get(&r.provider).map(|p| p.family.clone()))?;
-        Some(fam.trim().to_ascii_lowercase())
+        self.view().role_family(role)
     }
 
     /// Families of a role's primary provider and all its fallbacks.
     pub fn families_of(&self, role: &str) -> Vec<String> {
-        let Some(r) = self.roles.get(role) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        if let Some(f) = self.family_of(role) {
-            out.push(f);
+        self.view().role_families(role)
+    }
+
+    /// The shared family-resolution view (anchor-protocol), so the backend
+    /// and the runtime resolve families identically.
+    fn view(&self) -> RolesView {
+        RolesView {
+            providers: self
+                .providers
+                .iter()
+                .map(|(k, p)| {
+                    (
+                        k.clone(),
+                        ProviderView {
+                            family: p.family.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            roles: self
+                .roles
+                .iter()
+                .map(|(k, r)| {
+                    (
+                        k.clone(),
+                        RoleView {
+                            provider: r.provider.clone(),
+                            model_id: r.model_id.clone(),
+                            family: r.family.clone(),
+                            fallback: r.fallback.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            routing: RoutingView {
+                mechanical: Some(self.routing.mechanical.clone()),
+                architecture: Some(self.routing.architecture.clone()),
+                agentic: Some(self.routing.agentic.clone()),
+                review: Some(self.routing.review.clone()),
+            },
         }
-        for p in &r.fallback {
-            if let Some(pc) = self.providers.get(p) {
-                out.push(pc.family.trim().to_ascii_lowercase());
-            }
-        }
-        out
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -221,11 +247,16 @@ impl RolesConfig {
             }
         }
         // Every family the executor can run on (including fallbacks) must
-        // differ from every family the reviewer can run on.
-        let exec = self.families_of("executor");
-        let rev = self.families_of("reviewer");
-        if let Some(shared) = exec.iter().find(|f| rev.contains(f)) {
-            return Err(ConfigError::SameFamilyReview(shared.clone()));
+        // differ from every family the reviewer can run on: by role name,
+        // and by what the agentic and review routes actually resolve to.
+        let v = self.view();
+        for (exec, rev) in [
+            (v.role_families("executor"), v.role_families("reviewer")),
+            (v.families(Route::Agentic), v.families(Route::Review)),
+        ] {
+            if let Some(shared) = shared_family(&exec, &rev) {
+                return Err(ConfigError::SameFamilyReview(shared));
+            }
         }
         Ok(())
     }

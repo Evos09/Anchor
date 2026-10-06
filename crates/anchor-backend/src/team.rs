@@ -27,6 +27,7 @@ use anchor_checkpoint::CheckpointStore;
 use anchor_guard::Guard;
 use anchor_hub::{AgentId, Caller, Hub, HubConfig, NewAgent, Permissions, SystemClock};
 use anchor_policy::{AuditLog, Responder, UserResponse};
+use anchor_protocol::roles::{RolesView, Route};
 use anchor_protocol::{HubInfo, HubPeer, HubToolDef, ResumeChoice};
 use serde::Deserialize;
 
@@ -160,37 +161,13 @@ impl Team {
 
 /// `(role, model_id, family)` of the agentic route of a roles file.
 pub fn roles_identity(roles_toml: &str) -> Result<(String, String, String), String> {
-    let t: toml::Table = toml::from_str(roles_toml).map_err(|e| format!("roles: {e}"))?;
-    let role = t
-        .get("routing")
-        .and_then(|r| r.get("agentic"))
-        .and_then(|r| r.as_str())
-        .unwrap_or("executor")
-        .to_string();
-    let r = t
-        .get("roles")
-        .and_then(|r| r.get(&role))
-        .ok_or_else(|| format!("roles: no [roles.{role}]"))?;
-    let model = r
-        .get("model_id")
-        .and_then(|m| m.as_str())
-        .ok_or_else(|| format!("roles: [roles.{role}] has no model_id"))?;
-    let family = match r.get("family").and_then(|f| f.as_str()) {
-        Some(f) => f.to_string(),
-        None => {
-            let p = r
-                .get("provider")
-                .and_then(|p| p.as_str())
-                .ok_or_else(|| format!("roles: [roles.{role}] has no provider"))?;
-            t.get("providers")
-                .and_then(|ps| ps.get(p))
-                .and_then(|p| p.get("family"))
-                .and_then(|f| f.as_str())
-                .ok_or_else(|| format!("roles: provider {p:?} has no family"))?
-                .to_string()
-        }
-    };
-    Ok((role, model.to_string(), family.trim().to_ascii_lowercase()))
+    let id = roles_view(roles_toml)?.identity(Route::Agentic)?;
+    Ok((id.role, id.model_id, id.family))
+}
+
+/// The family-resolution view of a roles file (shared with the runtime).
+pub fn roles_view(roles_toml: &str) -> Result<RolesView, String> {
+    toml::from_str(roles_toml).map_err(|e| format!("roles: {e}"))
 }
 
 /// Open the workspace's Hub (`<state>/hub.sqlite`), sharing the audit log.

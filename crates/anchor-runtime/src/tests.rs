@@ -95,6 +95,19 @@ fn fallback_into_reviewer_family_refused() {
     ));
 }
 
+/// The check follows the routes, not just the role names: routing review
+/// to a role in the executor's family is refused too.
+#[test]
+fn review_route_into_executor_family_refused() {
+    let bad = format!("{ROLES}\n[routing]\nreview = \"planner\"\n");
+    assert!(matches!(
+        RolesConfig::parse(&bad),
+        Err(ConfigError::SameFamilyReview(f)) if f == "family-a"
+    ));
+    let ok = format!("{ROLES}\n[routing]\nagentic = \"tester\"\n");
+    assert!(RolesConfig::parse(&ok).is_ok());
+}
+
 #[test]
 fn config_rejects_missing_roles_and_unknown_keys() {
     let missing = ROLES.replace("[roles.tester]", "[roles.unused_tester_name]");
