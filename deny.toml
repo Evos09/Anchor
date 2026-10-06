@@ -1,0 +1,44 @@
+# cargo-deny configuration (spec §0 steps 3 and 5, enforced in CI).
+# See docs/deps/ for the per-dependency records.
+
+[graph]
+all-features = false
+
+[advisories]
+# RustSec advisory database (fetched over git). Any vulnerability or
+# unmaintained/unsound advisory fails the build.
+version = 2
+yanked = "deny"
+unmaintained = "all"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+# Permissive licenses compatible with an Apache-2.0 open core and a
+# commercial desktop shell. Each was read in full; see docs/deps/LICENSES.md.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "0BSD",
+  "Unlicense",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The runtime must not grow an async runtime or a second TLS stack silently.
+deny = [
+  { name = "openssl-sys", reason = "TLS is rustls only" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

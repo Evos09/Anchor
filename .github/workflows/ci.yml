@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  linux:
+    name: Linux (blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (includes the Layer 2 no-filesystem rule)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+      - name: Type-check other platforms
+        run: |
+          rustup target add x86_64-pc-windows-gnu aarch64-apple-darwin
+          # Crates with platform-specific code. anchor-runtime is excluded:
+          # its TLS dependency (ring) needs a C cross-compiler; it has no
+          # platform-specific code of its own beyond the cfg-gated sandbox.
+          for t in x86_64-pc-windows-gnu aarch64-apple-darwin; do
+            cargo check --tests --target "$t" -p anchor-fs -p anchor-exec -p anchor-backend -p anchor-policy -p anchor-guard -p anchor-checkpoint -p anchor-protocol
+          done
+
+  supply-chain:
+    name: Supply chain (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version 0.20.2
+      - name: Advisories, licenses, bans, sources
+        run: cargo deny check
+
+  other-platforms:
+    # The macOS and Windows back ends of anchor-fs/anchor-exec are written and
+    # type-checked but have not yet been observed passing the attack suite
+    # (docs/threat-model.md, ADR-0013). These jobs run the full suite and
+    # report, but do not block until a first green run validates them.
+    name: ${{ matrix.os }} (validation, non-blocking)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace

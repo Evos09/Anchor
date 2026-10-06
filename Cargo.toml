@@ -36,12 +36,12 @@ unicode-normalization = "0.1.25"
 windows-sys = "0.61.2"
 tempfile = "3.27.0"
 
-anchor-protocol = { path = "crates/anchor-protocol" }
-anchor-fs = { path = "crates/anchor-fs" }
-anchor-policy = { path = "crates/anchor-policy" }
-anchor-guard = { path = "crates/anchor-guard" }
-anchor-checkpoint = { path = "crates/anchor-checkpoint" }
-anchor-exec = { path = "crates/anchor-exec" }
+anchor-protocol = { path = "crates/anchor-protocol", version = "0.1.0" }
+anchor-fs = { path = "crates/anchor-fs", version = "0.1.0" }
+anchor-policy = { path = "crates/anchor-policy", version = "0.1.0" }
+anchor-guard = { path = "crates/anchor-guard", version = "0.1.0" }
+anchor-checkpoint = { path = "crates/anchor-checkpoint", version = "0.1.0" }
+anchor-exec = { path = "crates/anchor-exec", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -1,6 +1,9 @@
 //! End-to-end tests: the real `anchor-agent` runtime process, the real
 //! backend mediator, a scripted model.
 
+// Agent commands require a sandbox that only exists on Unix so far
+// (ADR-0003); on Windows they fail closed and these scenarios differ.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used)]
 
 use std::path::PathBuf;
@@ -485,4 +488,3 @@ fn kill_mid_turn_leaves_valid_checkpoint_and_resumes() {
     let r = session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap();
     assert_eq!(r.done.as_deref(), Some("recovered"));
 }
-

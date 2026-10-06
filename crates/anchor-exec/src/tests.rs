@@ -1,3 +1,6 @@
+// The runner's isolation exists only on Unix so far (ADR-0003).
+#![cfg(unix)]
+
 use std::time::Duration;
 
 use super::*;

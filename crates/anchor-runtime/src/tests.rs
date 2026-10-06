@@ -432,3 +432,9 @@ fn invalid_roles_config_fails_cleanly() {
     run_session(&mut b, &*default_factory()).unwrap();
     assert!(matches!(b.sent.last(), Some(Message::Failed(_))));
 }
+
+#[test]
+fn shipped_example_configs_parse() {
+    RolesConfig::parse(include_str!("../../../config/roles.example.toml")).unwrap();
+    RolesConfig::parse(include_str!("../../../examples/demo/roles.mock.toml")).unwrap();
+}

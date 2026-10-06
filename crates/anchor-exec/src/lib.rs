@@ -561,3 +561,23 @@ pub use sys::group_alive;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod tests_windows {
+    use super::*;
+
+    /// Until AppContainer support exists, confined commands must refuse.
+    #[test]
+    fn windows_refuses_confined_commands() {
+        let spec = CommandSpec {
+            program: PathBuf::from(r"C:\Windows\System32\cmd.exe"),
+            args: vec![],
+            cwd: PathBuf::from(r"C:\"),
+            env: vec![],
+            limits: Limits::default(),
+            network: Network::Deny,
+            fs: None,
+        };
+        assert!(matches!(run(&spec), Err(ExecError::SandboxUnavailable(_))));
+    }
+}
