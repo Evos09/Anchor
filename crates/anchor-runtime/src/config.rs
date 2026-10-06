@@ -132,7 +132,8 @@ pub enum ConfigError {
 
 impl RolesConfig {
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
-        let cfg: RolesConfig = toml::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let cfg: RolesConfig =
+            toml::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -182,10 +183,14 @@ impl RolesConfig {
                 }
             }
             if role.model_id.trim().is_empty() {
-                return Err(ConfigError::Invalid(format!("role {name}: model_id is empty")));
+                return Err(ConfigError::Invalid(format!(
+                    "role {name}: model_id is empty"
+                )));
             }
             if role.context_window == 0 {
-                return Err(ConfigError::Invalid(format!("role {name}: context_window is 0")));
+                return Err(ConfigError::Invalid(format!(
+                    "role {name}: context_window is 0"
+                )));
             }
             if !(role.price_in_per_mtok >= 0.0 && role.price_out_per_mtok >= 0.0) {
                 return Err(ConfigError::Invalid(format!("role {name}: negative price")));
@@ -193,7 +198,9 @@ impl RolesConfig {
         }
         for (name, p) in &self.providers {
             if p.family.trim().is_empty() {
-                return Err(ConfigError::Invalid(format!("provider {name}: family is empty")));
+                return Err(ConfigError::Invalid(format!(
+                    "provider {name}: family is empty"
+                )));
             }
             if p.kind == ProviderKind::OpenaiCompatible
                 && !(p.base_url.starts_with("http://") || p.base_url.starts_with("https://"))

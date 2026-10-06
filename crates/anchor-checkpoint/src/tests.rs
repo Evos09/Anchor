@@ -51,10 +51,19 @@ fn tracker_pauses_at_threshold() {
     let mut t = ContextTracker::new(DEFAULT_THRESHOLD).unwrap();
     assert!(matches!(t.update("m", 500, 1000), ContextStatus::Ok { .. }));
     assert!(matches!(t.update("m", 799, 1000), ContextStatus::Ok { .. }));
-    assert!(matches!(t.update("m", 800, 1000), ContextStatus::PauseRequired { .. }));
-    assert!(matches!(t.update("m", 999, 1000), ContextStatus::PauseRequired { .. }));
+    assert!(matches!(
+        t.update("m", 800, 1000),
+        ContextStatus::PauseRequired { .. }
+    ));
+    assert!(matches!(
+        t.update("m", 999, 1000),
+        ContextStatus::PauseRequired { .. }
+    ));
     // Per model.
-    assert!(matches!(t.update("other", 10, 1000), ContextStatus::Ok { .. }));
+    assert!(matches!(
+        t.update("other", 10, 1000),
+        ContextStatus::Ok { .. }
+    ));
     assert_eq!(t.ratio("m"), Some(0.999));
 }
 
@@ -150,7 +159,12 @@ fn kill_mid_write_leaves_valid_checkpoint() {
     let d = tempfile::tempdir().unwrap();
     let exe = std::env::current_exe().unwrap();
     let mut child = std::process::Command::new(exe)
-        .args(["--exact", "tests::child_checkpoint_writer", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "tests::child_checkpoint_writer",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, d.path())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -183,7 +197,10 @@ fn kill_mid_write_leaves_valid_checkpoint() {
     let latest = s.latest(Some("killed")).unwrap().unwrap();
     assert_eq!(latest.messages[1].content.len(), 2 << 20);
     // Temp files from the killed writer were cleaned up on open.
-    assert!(std::fs::read_dir(d.path())
-        .unwrap()
-        .all(|e| !e.unwrap().file_name().to_string_lossy().starts_with(TMP_PREFIX)));
+    assert!(std::fs::read_dir(d.path()).unwrap().all(|e| {
+        !e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(TMP_PREFIX)
+    }));
 }

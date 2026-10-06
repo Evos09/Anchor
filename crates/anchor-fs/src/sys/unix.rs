@@ -43,6 +43,7 @@ fn meta_of(st: &rfs::Stat) -> Meta {
         kind,
         nlink: st.st_nlink as u64,
         len: st.st_size as u64,
+        ctime_ns: st.st_ctime as i128 * 1_000_000_000 + st.st_ctime_nsec as i128,
         mode: (st.st_mode as u32) & 0o7777,
     }
 }
@@ -58,8 +59,11 @@ fn rel_arg(rel: &Path) -> &Path {
 #[cfg(target_os = "linux")]
 fn fd_path(fd: BorrowedFd<'_>) -> Result<PathBuf, FsError> {
     use std::os::fd::AsRawFd;
-    let p = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
-        .map_err(|e| FsError::Io(format!("cannot read descriptor path (is /proc mounted?): {e}")))?;
+    let p = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).map_err(|e| {
+        FsError::Io(format!(
+            "cannot read descriptor path (is /proc mounted?): {e}"
+        ))
+    })?;
     if !p.is_absolute() || p.as_os_str().as_encoded_bytes().ends_with(b" (deleted)") {
         return Err(FsError::Changed);
     }
@@ -75,7 +79,9 @@ fn fd_path(fd: BorrowedFd<'_>) -> Result<PathBuf, FsError> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn fd_path(_fd: BorrowedFd<'_>) -> Result<PathBuf, FsError> {
-    Err(FsError::Io("unsupported platform: cannot read a descriptor's path".into()))
+    Err(FsError::Io(
+        "unsupported platform: cannot read a descriptor's path".into(),
+    ))
 }
 
 /// Component-wise comparison of two paths using [`names_equivalent`].
@@ -381,12 +387,19 @@ pub(crate) fn write_atomic(
     content: &[u8],
     expect: &Expect,
 ) -> Result<(), FsError> {
-    let mut dir = open_strict(root, root_path, base_rel, OFlags::RDONLY | OFlags::DIRECTORY)?;
+    let mut dir = open_strict(
+        root,
+        root_path,
+        base_rel,
+        OFlags::RDONLY | OFlags::DIRECTORY,
+    )?;
     for m in missing_dirs {
-        rfs::mkdirat(&dir, m.as_os_str(), Mode::from_bits_truncate(0o755)).map_err(|e| match e {
-            Errno::EXIST => FsError::Changed,
-            e => io(e),
-        })?;
+        rfs::mkdirat(&dir, m.as_os_str(), Mode::from_bits_truncate(0o755)).map_err(
+            |e| match e {
+                Errno::EXIST => FsError::Changed,
+                e => io(e),
+            },
+        )?;
         dir = rfs::openat(
             &dir,
             m.as_os_str(),
@@ -447,12 +460,15 @@ pub(crate) fn write_atomic(
     drop(f);
 
     let result = match expect {
-        Expect::Absent => rfs::renameat_with(&dir, tmp.as_os_str(), &dir, name, RenameFlags::NOREPLACE)
-            .map_err(|e| match e {
-                Errno::EXIST => FsError::Changed,
-                e if exchange_unsupported(e) => FsError::AtomicReplaceUnsupported,
-                e => io(e),
-            }),
+        Expect::Absent => {
+            rfs::renameat_with(&dir, tmp.as_os_str(), &dir, name, RenameFlags::NOREPLACE).map_err(
+                |e| match e {
+                    Errno::EXIST => FsError::Changed,
+                    e if exchange_unsupported(e) => FsError::AtomicReplaceUnsupported,
+                    e => io(e),
+                },
+            )
+        }
         Expect::Existing { id, .. } => {
             match rfs::renameat_with(&dir, tmp.as_os_str(), &dir, name, RenameFlags::EXCHANGE) {
                 Err(e) if exchange_unsupported(e) => Err(FsError::AtomicReplaceUnsupported),
@@ -498,4 +514,30 @@ pub(crate) fn write_atomic(
             Err(e)
         }
     }
+}
+
+pub(crate) fn remove_strict(
+    root: &Root,
+    root_path: &Path,
+    parent_rel: &Path,
+    name: &OsStr,
+    expected: &Meta,
+) -> Result<(), FsError> {
+    let dir = open_strict(
+        root,
+        root_path,
+        parent_rel,
+        OFlags::RDONLY | OFlags::DIRECTORY,
+    )?;
+    let st = rfs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW).map_err(strict_err)?;
+    let meta = meta_of(&st);
+    if meta.kind != Kind::File {
+        return Err(FsError::NotAFile);
+    }
+    if !meta.same_version(expected) {
+        return Err(FsError::Changed);
+    }
+    rfs::unlinkat(&dir, name, AtFlags::empty()).map_err(io)?;
+    rfs::fsync(&dir).map_err(io)?;
+    Ok(())
 }

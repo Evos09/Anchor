@@ -155,7 +155,11 @@ impl Guard {
     /// Heuristic classification alone.
     pub fn heuristic(rel: &Path, content: Option<&[u8]>) -> Option<HeuristicReason> {
         let file_name = rel.file_name()?.to_string_lossy().to_string();
-        let stem = file_name.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let stem = file_name
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
         if APPEND_ONLY_STEMS.contains(&stem.as_str()) {
             return Some(HeuristicReason::FileName);
         }
@@ -199,7 +203,9 @@ impl Guard {
             }
         }
         match Self::heuristic(rel, content) {
-            Some(r) if self.config.not_append_only.contains(&key) => AppendOnlyStatus::Overridden(r),
+            Some(r) if self.config.not_append_only.contains(&key) => {
+                AppendOnlyStatus::Overridden(r)
+            }
             Some(r) => AppendOnlyStatus::Heuristic(r),
             None => AppendOnlyStatus::No,
         }
@@ -279,7 +285,8 @@ impl Guard {
     }
 
     fn save(&self) -> Result<(), GuardError> {
-        let text = toml::to_string_pretty(&self.config).map_err(|e| GuardError::Config(e.to_string()))?;
+        let text =
+            toml::to_string_pretty(&self.config).map_err(|e| GuardError::Config(e.to_string()))?;
         let dir = self
             .config_path
             .parent()

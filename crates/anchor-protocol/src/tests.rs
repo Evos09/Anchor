@@ -32,7 +32,10 @@ fn roundtrips_every_direction() {
 fn rejects_version_mismatch() {
     let line = r#"{"v":2,"id":1,"msg":{"kind":"shutdown"}}"#;
     match decode(line) {
-        Err(ProtocolError::VersionMismatch { expected: 1, got: 2 }) => {}
+        Err(ProtocolError::VersionMismatch {
+            expected: 1,
+            got: 2,
+        }) => {}
         other => panic!("expected version mismatch, got {other:?}"),
     }
 }
@@ -82,7 +85,10 @@ fn rejects_oversize_frame_without_buffering_it_all() {
     let mut big = vec![b'a'; MAX_FRAME_BYTES + 10];
     big.push(b'\n');
     let mut r = std::io::BufReader::new(&big[..]);
-    assert!(matches!(read_frame(&mut r), Err(ProtocolError::FrameTooLarge)));
+    assert!(matches!(
+        read_frame(&mut r),
+        Err(ProtocolError::FrameTooLarge)
+    ));
 }
 
 #[test]
@@ -111,10 +117,12 @@ fn rejects_bad_call_id() {
 #[test]
 fn mutating_tools_are_classified_by_tool_not_text() {
     assert!(!ToolRequest::ReadFile { path: "a".into() }.can_mutate());
-    assert!(ToolRequest::RunCommand {
-        program: "ls".into(),
-        args: vec![],
-        network: false
-    }
-    .can_mutate());
+    assert!(
+        ToolRequest::RunCommand {
+            program: "ls".into(),
+            args: vec![],
+            network: false
+        }
+        .can_mutate()
+    );
 }

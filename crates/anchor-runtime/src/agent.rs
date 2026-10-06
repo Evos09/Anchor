@@ -55,7 +55,8 @@ impl<R: BufRead, W: Write> Transport for StdioTransport<R, W> {
     fn send(&mut self, msg: Message) -> Result<(), AgentError> {
         let f = Frame::new(self.next_id, msg);
         self.next_id += 1;
-        anchor_protocol::write_frame(&mut self.w, &f).map_err(|e| AgentError::Protocol(e.to_string()))
+        anchor_protocol::write_frame(&mut self.w, &f)
+            .map_err(|e| AgentError::Protocol(e.to_string()))
     }
     fn recv(&mut self) -> Result<Message, AgentError> {
         match anchor_protocol::read_frame(&mut self.r) {
@@ -66,8 +67,8 @@ impl<R: BufRead, W: Write> Transport for StdioTransport<R, W> {
     }
 }
 
-pub type ProviderFactory<'a> =
-    dyn Fn(&crate::config::ProviderConfig, Option<&str>) -> Result<Box<dyn Provider>, ProviderError> + 'a;
+pub type ProviderFactory<'a> = dyn Fn(&crate::config::ProviderConfig, Option<&str>) -> Result<Box<dyn Provider>, ProviderError>
+    + 'a;
 
 struct Session<'a, T: Transport> {
     t: &'a mut T,
@@ -84,24 +85,37 @@ struct Session<'a, T: Transport> {
 }
 
 /// Run one session: handshake, task, loop until done.
-pub fn run_session<T: Transport>(t: &mut T, factory: &ProviderFactory<'_>) -> Result<(), AgentError> {
+pub fn run_session<T: Transport>(
+    t: &mut T,
+    factory: &ProviderFactory<'_>,
+) -> Result<(), AgentError> {
     t.send(Message::Hello(Hello {
         runtime_version: env!("CARGO_PKG_VERSION").into(),
         protocol_version: PROTOCOL_VERSION,
     }))?;
     match t.recv()? {
         Message::Welcome(w) if w.protocol_version == PROTOCOL_VERSION => {}
-        other => return Err(AgentError::Protocol(format!("expected welcome, got {other:?}"))),
+        other => {
+            return Err(AgentError::Protocol(format!(
+                "expected welcome, got {other:?}"
+            )));
+        }
     }
     let task = match t.recv()? {
         Message::Task(task) => *task,
         Message::Shutdown => return Ok(()),
-        other => return Err(AgentError::Protocol(format!("expected task, got {other:?}"))),
+        other => {
+            return Err(AgentError::Protocol(format!(
+                "expected task, got {other:?}"
+            )));
+        }
     };
     let cfg = match RolesConfig::parse(&task.roles_toml) {
         Ok(c) => c,
         Err(e) => {
-            t.send(Message::Failed(Failed { error: e.to_string() }))?;
+            t.send(Message::Failed(Failed {
+                error: e.to_string(),
+            }))?;
             return wait_shutdown(t);
         }
     };
@@ -114,7 +128,8 @@ pub fn run_session<T: Transport>(t: &mut T, factory: &ProviderFactory<'_>) -> Re
             route.role, route.provider, route.model_id, route.reason
         ),
     }))?;
-    let tracker = ContextTracker::new(task.checkpoint_threshold).map_err(|e| AgentError::Fatal(e.to_string()))?;
+    let tracker = ContextTracker::new(task.checkpoint_threshold)
+        .map_err(|e| AgentError::Fatal(e.to_string()))?;
 
     let (messages, turn) = match &task.resume_from {
         Some(cp) => {
@@ -197,10 +212,13 @@ impl<T: Transport> Session<'_, T> {
             if self.prefix.check(&self.messages, &TOOLS_JSON).is_err() {
                 self.t.send(Message::Notice(Notice {
                     kind: NoticeKind::PromptPrefixChanged,
-                    detail: "prompt prefix hash changed between turns; provider cache invalidated".into(),
+                    detail: "prompt prefix hash changed between turns; provider cache invalidated"
+                        .into(),
                 }))?;
                 if cfg!(debug_assertions) {
-                    return Err(AgentError::Fatal("prompt prefix changed (debug build)".into()));
+                    return Err(AgentError::Fatal(
+                        "prompt prefix changed (debug build)".into(),
+                    ));
                 }
             }
 
@@ -243,7 +261,9 @@ impl<T: Transport> Session<'_, T> {
             self.t.send(Message::TurnFinished { turn: self.turn })?;
 
             if resp.tool_calls.is_empty() && resp.invalid_calls.is_empty() {
-                self.t.send(Message::Done(Done { summary: resp.content }))?;
+                self.t.send(Message::Done(Done {
+                    summary: resp.content,
+                }))?;
                 return Ok(());
             }
             if let ContextStatus::PauseRequired { ratio } = status {
@@ -272,7 +292,10 @@ impl<T: Transport> Session<'_, T> {
                     detail: format!(
                         "provider {:?} failed ({}); falling back to {pid:?}",
                         chain[i - 1],
-                        last_err.as_ref().map(|e: &ProviderError| e.to_string()).unwrap_or_default()
+                        last_err
+                            .as_ref()
+                            .map(|e: &ProviderError| e.to_string())
+                            .unwrap_or_default()
                     ),
                 }))?;
             }
@@ -330,9 +353,17 @@ impl<T: Transport> Session<'_, T> {
 
     fn report_context(&mut self, resp: &ChatResponse) -> Result<ContextStatus, AgentError> {
         let used = match resp.usage {
-            Some(u) if u.prompt_tokens + u.completion_tokens > 0 => u.prompt_tokens + u.completion_tokens,
+            Some(u) if u.prompt_tokens + u.completion_tokens > 0 => {
+                u.prompt_tokens + u.completion_tokens
+            }
             // No usage reported: estimate ~4 bytes per token.
-            _ => self.messages.iter().map(|m| m.content.len() as u64).sum::<u64>() / 4,
+            _ => {
+                self.messages
+                    .iter()
+                    .map(|m| m.content.len() as u64)
+                    .sum::<u64>()
+                    / 4
+            }
         };
         self.last_used = used;
         let role = self.role_cfg().clone();
@@ -341,10 +372,16 @@ impl<T: Transport> Session<'_, T> {
             used_tokens: used,
             window_tokens: role.context_window,
         }))?;
-        Ok(self.tracker.update(&role.model_id, used, role.context_window))
+        Ok(self
+            .tracker
+            .update(&role.model_id, used, role.context_window))
     }
 
-    fn checkpoint(&mut self, reason: CheckpointReason, suffix: Option<&str>) -> Result<String, AgentError> {
+    fn checkpoint(
+        &mut self,
+        reason: CheckpointReason,
+        suffix: Option<&str>,
+    ) -> Result<String, AgentError> {
         let role = self.role_cfg().clone();
         let id = format!(
             "{}-t{:04}{}",
@@ -371,7 +408,9 @@ impl<T: Transport> Session<'_, T> {
         match self.t.recv()? {
             Message::CheckpointSaved(s) if s.checkpoint_id == id => Ok(id),
             Message::Shutdown => Err(AgentError::Shutdown),
-            other => Err(AgentError::Protocol(format!("expected checkpoint_saved, got {other:?}"))),
+            other => Err(AgentError::Protocol(format!(
+                "expected checkpoint_saved, got {other:?}"
+            ))),
         }
     }
 
@@ -385,7 +424,11 @@ impl<T: Transport> Session<'_, T> {
         let choice = match self.t.recv()? {
             Message::Resume(r) => r.choice,
             Message::Shutdown => return Err(AgentError::Shutdown),
-            other => return Err(AgentError::Protocol(format!("expected resume, got {other:?}"))),
+            other => {
+                return Err(AgentError::Protocol(format!(
+                    "expected resume, got {other:?}"
+                )));
+            }
         };
         match choice {
             ResumeChoice::ContinueWithCompaction => {
@@ -411,7 +454,10 @@ impl<T: Transport> Session<'_, T> {
 /// starting the tail on an orphaned tool reply). The full history stays in
 /// the checkpoint on disk.
 pub fn compact(messages: &mut Vec<ChatMessage>, checkpoint_id: &str) {
-    let head_len = messages.iter().take_while(|m| m.role == ChatRole::System).count()
+    let head_len = messages
+        .iter()
+        .take_while(|m| m.role == ChatRole::System)
+        .count()
         + usize::from(messages.iter().any(|m| m.role == ChatRole::User));
     if messages.len() <= head_len + COMPACT_KEEP_TAIL {
         return;

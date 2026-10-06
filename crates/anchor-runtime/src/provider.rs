@@ -55,14 +55,19 @@ pub trait Provider: std::fmt::Debug {
 /// Convert a model-proposed (name, arguments) pair into a validated request.
 /// Model output is hostile: anything that does not decode into the closed
 /// tool set, or fails validation, is rejected here.
-pub fn parse_tool_call(id: &str, name: &str, arguments: &serde_json::Value) -> Result<ToolCall, InvalidCall> {
+pub fn parse_tool_call(
+    id: &str,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Result<ToolCall, InvalidCall> {
     let invalid = |error: String| InvalidCall {
         id: id.to_string(),
         name: name.to_string(),
         error,
     };
-    let request: ToolRequest = serde_json::from_value(serde_json::json!({"tool": name, "args": arguments}))
-        .map_err(|e| invalid(e.to_string()))?;
+    let request: ToolRequest =
+        serde_json::from_value(serde_json::json!({"tool": name, "args": arguments}))
+            .map_err(|e| invalid(e.to_string()))?;
     let call = ToolCall {
         call_id: id.to_string(),
         request,
@@ -87,7 +92,9 @@ impl OpenAiCompatible {
         let api_key = match &cfg.api_key_env {
             None => None,
             Some(var) if var.is_empty() => None,
-            Some(var) => Some(std::env::var(var).map_err(|_| ProviderError::MissingKey(var.clone()))?),
+            Some(var) => {
+                Some(std::env::var(var).map_err(|_| ProviderError::MissingKey(var.clone()))?)
+            }
         };
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(cfg.timeout_secs)))
@@ -177,8 +184,8 @@ struct OaUsage {
 
 /// Parse an OpenAI-compatible response body.
 pub fn parse_openai_response(body: &serde_json::Value) -> Result<ChatResponse, ProviderError> {
-    let r: OaResponse =
-        serde_json::from_value(body.clone()).map_err(|e| ProviderError::BadResponse(e.to_string()))?;
+    let r: OaResponse = serde_json::from_value(body.clone())
+        .map_err(|e| ProviderError::BadResponse(e.to_string()))?;
     let choice = r
         .choices
         .into_iter()
@@ -233,7 +240,9 @@ impl Provider for OpenAiCompatible {
         if let Some(m) = params.max_tokens {
             body["max_tokens"] = serde_json::json!(m);
         }
-        let mut req = self.agent.post(format!("{}/chat/completions", self.base_url));
+        let mut req = self
+            .agent
+            .post(format!("{}/chat/completions", self.base_url));
         if let Some(k) = &self.api_key {
             req = req.header("Authorization", format!("Bearer {k}"));
         }
@@ -289,7 +298,8 @@ pub struct MockProvider {
 
 impl MockProvider {
     pub fn from_script(script: &str) -> Result<Self, ProviderError> {
-        let s: MockScript = serde_json::from_str(script).map_err(|e| ProviderError::Script(e.to_string()))?;
+        let s: MockScript =
+            serde_json::from_str(script).map_err(|e| ProviderError::Script(e.to_string()))?;
         Ok(MockProvider {
             steps: s.steps.into_iter(),
             call_counter: 0,
@@ -343,11 +353,15 @@ impl Provider for MockProvider {
 }
 
 /// Build a provider from config. Mock providers require a script.
-pub fn build(cfg: &ProviderConfig, mock_script: Option<&str>) -> Result<Box<dyn Provider>, ProviderError> {
+pub fn build(
+    cfg: &ProviderConfig,
+    mock_script: Option<&str>,
+) -> Result<Box<dyn Provider>, ProviderError> {
     match cfg.kind {
         ProviderKind::OpenaiCompatible => Ok(Box::new(OpenAiCompatible::new(cfg)?)),
         ProviderKind::Mock => {
-            let script = mock_script.ok_or_else(|| ProviderError::Script("no mock script supplied".into()))?;
+            let script = mock_script
+                .ok_or_else(|| ProviderError::Script("no mock script supplied".into()))?;
             Ok(Box::new(MockProvider::from_script(script)?))
         }
     }
@@ -391,7 +405,10 @@ pub fn detect_local_servers(timeout: Duration) -> Vec<LocalServer> {
                     .collect()
             })
             .unwrap_or_default();
-        found.push(LocalServer { base_url: base, models });
+        found.push(LocalServer {
+            base_url: base,
+            models,
+        });
     }
     found
 }

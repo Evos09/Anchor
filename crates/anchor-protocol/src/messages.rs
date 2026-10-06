@@ -4,7 +4,12 @@ use crate::{MAX_CONTENT_BYTES, Validate, check_param};
 
 /// Every message that may appear on the wire, in either direction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "payload", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum Message {
     // ---- runtime -> backend -------------------------------------------
     /// First frame from the runtime.
@@ -22,8 +27,12 @@ pub enum Message {
     /// Something the user must be told (fallback, downgrade, ...).
     Notice(Notice),
     /// Turn bookkeeping.
-    TurnStarted { turn: u64 },
-    TurnFinished { turn: u64 },
+    TurnStarted {
+        turn: u64,
+    },
+    TurnFinished {
+        turn: u64,
+    },
     /// Final answer for the task.
     Done(Done),
     /// Fatal runtime error.
@@ -119,7 +128,12 @@ impl Validate for ToolCall {
 /// The closed set of tools the runtime may request. Every parameter is
 /// treated by the backend as hostile input (spec §5.2(e)).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "tool", content = "args", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(
+    tag = "tool",
+    content = "args",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum ToolRequest {
     ReadFile {
         path: String,
@@ -257,10 +271,17 @@ pub struct ToolResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolOutcome {
-    Ok { output: String },
+    Ok {
+        output: String,
+    },
     /// Refused by the permission engine, the guard, or the user.
-    Denied { by: DeniedBy, detail: String },
-    Error { detail: String },
+    Denied {
+        by: DeniedBy,
+        detail: String,
+    },
+    Error {
+        detail: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

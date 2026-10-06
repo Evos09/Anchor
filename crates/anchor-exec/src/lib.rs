@@ -15,6 +15,12 @@
 //!   cannot be established the command is **refused**, never run without it.
 //!   Windows has no implementation yet and refuses `Network::Deny`
 //!   (ADR-0003).
+//! * **Filesystem confinement** (capability layer): with an
+//!   [`FsConfinement`], the child may write only beneath `read_write` paths
+//!   and read only beneath those plus `read_only` paths. Linux uses Landlock
+//!   (ruleset built in the parent, applied in the child with two raw
+//!   syscalls); macOS adds the equivalent rules to the `sandbox-exec`
+//!   profile. If confinement cannot be enforced the command is refused.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -50,6 +56,40 @@ pub enum Network {
     Allow,
 }
 
+/// Filesystem view granted to a child process.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FsConfinement {
+    pub read_write: Vec<PathBuf>,
+    pub read_only: Vec<PathBuf>,
+}
+
+impl FsConfinement {
+    /// Typical system locations a build tool needs to read and execute.
+    pub fn system_read_only() -> Vec<PathBuf> {
+        [
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib64",
+            "/lib32",
+            "/etc",
+            "/opt",
+            "/nix/store",
+            "/proc",
+            "/dev",
+            "/System",
+            "/Library/Developer",
+            "/private/etc",
+            "/Applications/Xcode.app",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     /// Absolute path of the program (see [`resolve_program`]).
@@ -59,6 +99,9 @@ pub struct CommandSpec {
     pub env: Vec<(String, String)>,
     pub limits: Limits,
     pub network: Network,
+    /// `None` leaves the filesystem unconfined (only for trusted callers;
+    /// the backend always confines agent commands).
+    pub fs: Option<FsConfinement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +114,7 @@ pub enum ExitKind {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Isolation {
     pub network_isolated: bool,
+    pub fs_confined: bool,
     pub dropped_root: bool,
 }
 
@@ -276,19 +320,21 @@ mod sys {
         let is_root = unsafe { libc::geteuid() } == 0;
         isolation.dropped_root = is_root;
 
-        let mut cmd = if cfg!(target_os = "macos") && spec.network == Network::Deny {
-            let mut c = Command::new("/usr/bin/sandbox-exec");
-            c.arg("-p")
-                .arg("(version 1)(allow default)(deny network*)")
-                .arg(&spec.program)
-                .args(&spec.args);
-            isolation.network_isolated = true;
-            c
-        } else {
-            let mut c = Command::new(&spec.program);
-            c.args(&spec.args);
-            c
-        };
+        let mut cmd =
+            if cfg!(target_os = "macos") && (spec.network == Network::Deny || spec.fs.is_some()) {
+                let mut c = Command::new("/usr/bin/sandbox-exec");
+                c.arg("-p")
+                    .arg(macos_profile(spec))
+                    .arg(&spec.program)
+                    .args(&spec.args);
+                isolation.network_isolated = spec.network == Network::Deny;
+                isolation.fs_confined = spec.fs.is_some();
+                c
+            } else {
+                let mut c = Command::new(&spec.program);
+                c.args(&spec.args);
+                c
+            };
 
         let limits = spec.limits.clone();
         let deny_net = spec.network == Network::Deny && cfg!(target_os = "linux");
@@ -304,6 +350,20 @@ mod sys {
         };
         let uid_map: Vec<u8> = format!("{uid} {uid} 1").into_bytes();
         let gid_map: Vec<u8> = format!("{gid} {gid} 1").into_bytes();
+
+        #[cfg(target_os = "linux")]
+        let landlock_fd: Option<std::os::fd::OwnedFd> = match &spec.fs {
+            None => None,
+            Some(fs) => {
+                isolation.fs_confined = true;
+                Some(landlock_ruleset(fs)?)
+            }
+        };
+        #[cfg(target_os = "linux")]
+        let landlock_raw: libc::c_int = {
+            use std::os::fd::AsRawFd;
+            landlock_fd.as_ref().map(|f| f.as_raw_fd()).unwrap_or(-1)
+        };
 
         // SAFETY: the closure only performs async-signal-safe syscalls on
         // pre-allocated data.
@@ -341,11 +401,100 @@ mod sys {
                     write_proc(c"/proc/self/uid_map", &uid_map)?;
                     write_proc(c"/proc/self/gid_map", &gid_map)?;
                 }
+                #[cfg(target_os = "linux")]
+                if landlock_raw >= 0 {
+                    // Keeps the OwnedFd alive for as long as the Command.
+                    let _keep = &landlock_fd;
+                    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                        || libc::syscall(libc::SYS_landlock_restrict_self, landlock_raw, 0) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
                 let _ = (&uid_map, &gid_map, deny_net);
                 Ok(())
             });
         }
         Ok((cmd, isolation))
+    }
+
+    /// Build a Landlock ruleset in the parent (allocation is fine here); the
+    /// child only applies it.
+    #[cfg(target_os = "linux")]
+    fn landlock_ruleset(fs: &FsConfinement) -> Result<std::os::fd::OwnedFd, ExecError> {
+        use landlock::{
+            ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr,
+            RulesetCreatedAttr, path_beneath_rules,
+        };
+        let abi = ABI::V3;
+        let existing =
+            |v: &[PathBuf]| -> Vec<PathBuf> { v.iter().filter(|p| p.exists()).cloned().collect() };
+        let err =
+            |e: landlock::RulesetError| ExecError::SandboxUnavailable(format!("landlock: {e}"));
+        let created = Ruleset::default()
+            // Refuse rather than silently run unconfined on old kernels.
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::from_all(abi))
+            .map_err(err)?
+            .create()
+            .map_err(err)?
+            .add_rules(path_beneath_rules(
+                existing(&fs.read_only),
+                AccessFs::from_read(abi),
+            ))
+            .map_err(err)?
+            .add_rules(path_beneath_rules(
+                existing(&fs.read_write),
+                AccessFs::from_all(abi),
+            ))
+            .map_err(err)?
+            .add_rules(path_beneath_rules(
+                ["/dev/null", "/dev/zero"],
+                AccessFs::from_all(abi),
+            ))
+            .map_err(err)?;
+        let fd: Option<std::os::fd::OwnedFd> = created.into();
+        fd.ok_or_else(|| {
+            ExecError::SandboxUnavailable("Landlock is not supported by this kernel".into())
+        })
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn macos_profile(spec: &CommandSpec) -> String {
+        // Seatbelt profile (ADR-0003). Paths are quoted with escaping.
+        let q = |p: &Path| {
+            format!(
+                "\"{}\"",
+                p.display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+            )
+        };
+        let mut prof = String::from("(version 1)(allow default)");
+        if spec.network == Network::Deny {
+            prof.push_str("(deny network*)");
+        }
+        if let Some(fs) = &spec.fs {
+            prof.push_str("(deny file-write*)");
+            prof.push_str("(allow file-write* (literal \"/dev/null\")");
+            for p in &fs.read_write {
+                prof.push_str(&format!(" (subpath {})", q(p)));
+            }
+            prof.push(')');
+            if let Some(home) = std::env::var_os("HOME") {
+                prof.push_str(&format!(
+                    "(deny file-read* (subpath {}))",
+                    q(Path::new(&home))
+                ));
+                prof.push_str("(allow file-read*");
+                for p in fs.read_write.iter().chain(fs.read_only.iter()) {
+                    prof.push_str(&format!(" (subpath {})", q(p)));
+                }
+                prof.push(')');
+            }
+        }
+        prof
     }
 
     pub(super) fn exit_kind(s: ExitStatus) -> ExitKind {
@@ -384,9 +533,9 @@ mod sys {
     use super::*;
 
     pub(super) fn build(spec: &CommandSpec) -> Result<(Command, Isolation), ExecError> {
-        if spec.network == Network::Deny {
+        if spec.network == Network::Deny || spec.fs.is_some() {
             return Err(ExecError::SandboxUnavailable(
-                "network isolation on Windows (AppContainer) is not implemented yet; refusing"
+                "network/filesystem isolation on Windows (AppContainer) is not implemented yet; refusing"
                     .into(),
             ));
         }

@@ -47,7 +47,14 @@ fn selftest() -> ExitCode {
     let _ = std::io::stdin().read_line(&mut line);
     let target = line.trim().to_string();
     let status = restrict_self();
-    println!("sandbox {}", if status == SandboxStatus::FullyEnforced { "enforced" } else { "not-enforced" });
+    println!(
+        "sandbox {}",
+        if status == SandboxStatus::FullyEnforced {
+            "enforced"
+        } else {
+            "not-enforced"
+        }
+    );
     let read = std::fs::read(&target).is_ok();
     let write = std::fs::write(format!("{target}.agent-write"), b"x").is_ok();
     println!("read {}", if read { "ALLOWED" } else { "DENIED" });

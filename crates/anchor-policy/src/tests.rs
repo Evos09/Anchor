@@ -56,19 +56,35 @@ fn reads_in_workspace_allowed() {
 #[test]
 fn writes_in_workspace_prompt() {
     let (e, _d) = engine_with(DEFAULT_POLICY);
-    let r = req(Tool::WriteFile, Operation::Write, "/home/dev/project/src/main.rs");
+    let r = req(
+        Tool::WriteFile,
+        Operation::Write,
+        "/home/dev/project/src/main.rs",
+    );
     assert_eq!(action_of(&e, &r), ("prompt", "prompt_on_write".into()));
-    let r = req(Tool::EditFile, Operation::Edit, "/home/dev/project/src/main.rs");
+    let r = req(
+        Tool::EditFile,
+        Operation::Edit,
+        "/home/dev/project/src/main.rs",
+    );
     assert_eq!(action_of(&e, &r), ("prompt", "prompt_on_write".into()));
 }
 
 #[test]
 fn append_to_append_only_allowed_but_write_prompts() {
     let (e, _d) = engine_with(DEFAULT_POLICY);
-    let mut r = req(Tool::EditFile, Operation::Append, "/home/dev/project/DEVLOG.md");
+    let mut r = req(
+        Tool::EditFile,
+        Operation::Append,
+        "/home/dev/project/DEVLOG.md",
+    );
     r.is_append_only = true;
     assert_eq!(action_of(&e, &r).0, "allow");
-    let mut w = req(Tool::WriteFile, Operation::Write, "/home/dev/project/DEVLOG.md");
+    let mut w = req(
+        Tool::WriteFile,
+        Operation::Write,
+        "/home/dev/project/DEVLOG.md",
+    );
     w.is_append_only = true;
     assert_eq!(action_of(&e, &w).0, "prompt");
 }
@@ -105,7 +121,11 @@ fn credentials_denied_everywhere() {
             (Tool::Grep, Operation::Search),
         ] {
             let r = req(tool, op, t);
-            assert_eq!(action_of(&e, &r), ("deny", "deny_credentials".into()), "{t} {tool:?}");
+            assert_eq!(
+                action_of(&e, &r),
+                ("deny", "deny_credentials".into()),
+                "{t} {tool:?}"
+            );
         }
     }
 }
@@ -128,7 +148,11 @@ action = "deny"
 match = { target_matches = ["**/secrets/**"] }
 "#;
     let (e, _d) = engine_with(policy);
-    let r = req(Tool::ReadFile, Operation::Read, "/home/dev/project/secrets/key");
+    let r = req(
+        Tool::ReadFile,
+        Operation::Read,
+        "/home/dev/project/secrets/key",
+    );
     assert_eq!(action_of(&e, &r), ("deny", "deny_secrets".into()));
 }
 
@@ -172,7 +196,11 @@ fn unmatched_request_falls_to_default() {
 fn capability_floor_protects_anchor_state_dir() {
     let policy = "version = 1\n[default]\naction = \"allow\"\n";
     let (e, _d) = engine_with(policy);
-    let r = req(Tool::WriteFile, Operation::Write, "/home/dev/project/.anchor/audit.jsonl");
+    let r = req(
+        Tool::WriteFile,
+        Operation::Write,
+        "/home/dev/project/.anchor/audit.jsonl",
+    );
     let (a, rule) = action_of(&e, &r);
     assert_eq!((a, rule.as_str()), ("deny", "capability:anchor_state_dir"));
 }
@@ -231,10 +259,18 @@ match = { operation = ["list"] }
     let mut c = req(Tool::RunCommand, Operation::Execute, "/usr/bin/curl");
     c.network = true;
     assert_eq!(action_of(&e, &c), ("prompt", "net".into()));
-    let c = req(Tool::RunCommand, Operation::Execute, "/home/dev/.cargo/bin/cargo");
+    let c = req(
+        Tool::RunCommand,
+        Operation::Execute,
+        "/home/dev/.cargo/bin/cargo",
+    );
     assert_eq!(action_of(&e, &c).0, "allow");
     // `program` only matches run_command.
-    let c = req(Tool::ReadFile, Operation::Read, "/home/dev/.cargo/bin/cargo");
+    let c = req(
+        Tool::ReadFile,
+        Operation::Read,
+        "/home/dev/.cargo/bin/cargo",
+    );
     assert_eq!(action_of(&e, &c).0, "deny");
 
     let mut b = req(Tool::Grep, Operation::Search, "/home/dev/project");
@@ -299,7 +335,10 @@ fn invalid_reload_keeps_last_good_policy() {
         .into_iter()
         .filter(|e| e.kind == "policy_reload_failed")
         .count();
-    assert_eq!(failures, 1, "a failing file is logged once, not per request");
+    assert_eq!(
+        failures, 1,
+        "a failing file is logged once, not per request"
+    );
     std::fs::remove_file(&policy_path).unwrap();
     assert_eq!(action_of(&e, &r).0, "deny");
 }
@@ -320,7 +359,10 @@ fn every_decision_is_logged_with_structured_context() {
     assert_eq!(entries[0].kind, "decision");
     assert_eq!(entries[0].data["matched_rule"], "prompt_on_write");
     assert_eq!(entries[0].data["action"], "prompt");
-    assert_eq!(entries[0].data["request"]["canonical_target"], "/home/dev/project/x.rs");
+    assert_eq!(
+        entries[0].data["request"]["canonical_target"],
+        "/home/dev/project/x.rs"
+    );
     assert_eq!(entries[1].kind, "prompt_response");
     assert_eq!(entries[1].data["response"], "approve");
 }
@@ -332,7 +374,10 @@ fn user_denial_mints_nothing() {
     let Decision::Prompt(p) = e.decide(&r) else {
         panic!()
     };
-    assert!(e.resolve_prompt(p, UserResponse::Deny, Responder::Interactive).is_err());
+    assert!(
+        e.resolve_prompt(p, UserResponse::Deny, Responder::Interactive)
+            .is_err()
+    );
 }
 
 #[test]
@@ -344,7 +389,11 @@ fn audit_chain_detects_tampering() {
     let path = dir.path().join("audit.jsonl");
     assert_eq!(AuditLog::verify(&path).unwrap(), 5);
     let text = std::fs::read_to_string(&path).unwrap();
-    let tampered = text.replacen("deny_file_tools_outside_workspace", "allow_reads_in_workspace", 1);
+    let tampered = text.replacen(
+        "deny_file_tools_outside_workspace",
+        "allow_reads_in_workspace",
+        1,
+    );
     std::fs::write(&path, tampered).unwrap();
     assert!(AuditLog::verify(&path).is_err());
     // Refuses to append to a broken chain.
@@ -408,7 +457,11 @@ fn would_allow_does_not_mint_or_log() {
     let (e, dir) = engine_with(DEFAULT_POLICY);
     let before = approvals_minted();
     assert!(e.would_allow(&req(Tool::ReadFile, Operation::Read, "/home/dev/project/a")));
-    assert!(!e.would_allow(&req(Tool::ReadFile, Operation::Read, "/home/dev/.ssh/id_rsa")));
+    assert!(!e.would_allow(&req(
+        Tool::ReadFile,
+        Operation::Read,
+        "/home/dev/.ssh/id_rsa"
+    )));
     // Other tests run concurrently and may mint; this test only checks that
     // nothing was logged by would_allow.
     let _ = before;
@@ -422,13 +475,31 @@ mod param_validation {
     /// Threat 3: traversal smuggled through a glob parameter.
     #[test]
     fn glob_traversal_and_absolute_refused() {
-        assert_eq!(validate_glob("../../../../etc/passwd").unwrap_err(), ParamError::Traversal);
-        assert_eq!(validate_glob("src/../../x").unwrap_err(), ParamError::Traversal);
-        assert_eq!(validate_glob("/etc/*").unwrap_err(), ParamError::AbsoluteGlob);
-        assert_eq!(validate_glob("C:/Windows/*").unwrap_err(), ParamError::AbsoluteGlob);
-        assert_eq!(validate_glob("~/.ssh/*").unwrap_err(), ParamError::HomeExpansion);
+        assert_eq!(
+            validate_glob("../../../../etc/passwd").unwrap_err(),
+            ParamError::Traversal
+        );
+        assert_eq!(
+            validate_glob("src/../../x").unwrap_err(),
+            ParamError::Traversal
+        );
+        assert_eq!(
+            validate_glob("/etc/*").unwrap_err(),
+            ParamError::AbsoluteGlob
+        );
+        assert_eq!(
+            validate_glob("C:/Windows/*").unwrap_err(),
+            ParamError::AbsoluteGlob
+        );
+        assert_eq!(
+            validate_glob("~/.ssh/*").unwrap_err(),
+            ParamError::HomeExpansion
+        );
         assert_eq!(validate_glob("a\0b").unwrap_err(), ParamError::Nul);
-        assert_eq!(validate_glob(&"a".repeat(2000)).unwrap_err(), ParamError::TooLong);
+        assert_eq!(
+            validate_glob(&"a".repeat(2000)).unwrap_err(),
+            ParamError::TooLong
+        );
         assert!(validate_glob("src/**/*.rs").is_ok());
     }
 
@@ -449,6 +520,9 @@ mod param_validation {
             validate_regex("(?:a{1000}){1000}"),
             Err(ParamError::BadRegex(_))
         ));
-        assert!(matches!(validate_regex("(unclosed"), Err(ParamError::BadRegex(_))));
+        assert!(matches!(
+            validate_regex("(unclosed"),
+            Err(ParamError::BadRegex(_))
+        ));
     }
 }

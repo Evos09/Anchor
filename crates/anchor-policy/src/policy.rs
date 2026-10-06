@@ -176,7 +176,8 @@ impl Policy {
     /// Parse and compile a policy. `home` is used to expand a leading `~/`
     /// in `target_matches` patterns.
     pub fn parse(text: &str, home: &Path) -> Result<Self, PolicyError> {
-        let file: PolicyFile = toml::from_str(text).map_err(|e| PolicyError::Parse(e.to_string()))?;
+        let file: PolicyFile =
+            toml::from_str(text).map_err(|e| PolicyError::Parse(e.to_string()))?;
         if file.version != POLICY_VERSION {
             return Err(PolicyError::Version(file.version));
         }
@@ -192,7 +193,9 @@ impl Policy {
             }
             let m = def.matcher;
             if m.target_within.is_some() && m.target_outside.is_some() {
-                return Err(err("target_within and target_outside are mutually exclusive".into()));
+                return Err(err(
+                    "target_within and target_outside are mutually exclusive".into(),
+                ));
             }
             let target_matches = match m.target_matches {
                 None => None,
@@ -217,7 +220,10 @@ impl Policy {
             };
             for (field, empty) in [
                 ("tool", m.tool.as_ref().is_some_and(|v| v.is_empty())),
-                ("operation", m.operation.as_ref().is_some_and(|v| v.is_empty())),
+                (
+                    "operation",
+                    m.operation.as_ref().is_some_and(|v| v.is_empty()),
+                ),
                 ("program", m.program.as_ref().is_some_and(|v| v.is_empty())),
             ] {
                 if empty {

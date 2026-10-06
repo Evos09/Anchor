@@ -19,6 +19,7 @@ fn spec(program: &str, args: &[&str], network: Network) -> CommandSpec {
             ..Limits::default()
         },
         network,
+        fs: None,
     }
 }
 
@@ -26,7 +27,10 @@ fn spec(program: &str, args: &[&str], network: Network) -> CommandSpec {
 fn program_must_be_bare_name() {
     for bad in ["/bin/sh", "./x", "../x", "a/b", "", "-rf", "a\\b"] {
         assert!(
-            matches!(resolve_program(bad, "/bin"), Err(ExecError::ProgramNotBareName(_))),
+            matches!(
+                resolve_program(bad, "/bin"),
+                Err(ExecError::ProgramNotBareName(_))
+            ),
             "{bad}"
         );
     }
@@ -99,7 +103,11 @@ fn fork_bomb_is_contained() {
     s.limits.wall_timeout = Duration::from_secs(3);
     let t = std::time::Instant::now();
     let out = run(&s).unwrap();
-    assert!(t.elapsed() < Duration::from_secs(30), "took {:?}", t.elapsed());
+    assert!(
+        t.elapsed() < Duration::from_secs(30),
+        "took {:?}",
+        t.elapsed()
+    );
     assert_ne!(out.exit, ExitKind::Exited(0));
     // Give the kernel a moment to reap, then ensure nothing survived.
     std::thread::sleep(Duration::from_millis(200));
@@ -124,14 +132,21 @@ fn fork_bomb_is_contained() {
 fn process_limit_refuses_excess_forks() {
     let mut s = spec(
         "sh",
-        &["-c", "i=0; while [ $i -lt 100 ]; do sleep 30 & i=$((i+1)); done; echo done"],
+        &[
+            "-c",
+            "i=0; while [ $i -lt 100 ]; do sleep 30 & i=$((i+1)); done; echo done",
+        ],
         Network::Deny,
     );
     s.limits.max_processes = 16;
     s.limits.wall_timeout = Duration::from_secs(10);
     let out = run(&s).unwrap();
     let err = String::from_utf8_lossy(&out.stderr).to_lowercase();
-    eprintln!("nproc test: exit {:?}, stderr: {}", out.exit, err.lines().next().unwrap_or(""));
+    eprintln!(
+        "nproc test: exit {:?}, stderr: {}",
+        out.exit,
+        err.lines().next().unwrap_or("")
+    );
     assert!(
         err.contains("fork") || err.contains("resource") || out.exit != ExitKind::Exited(0),
         "expected fork failures, got exit {:?} stderr {err}",
@@ -146,7 +161,11 @@ fn memory_limit_enforced() {
         eprintln!("SKIPPED: python3 not available");
         return;
     }
-    let mut s = spec("python3", &["-c", "x = bytearray(1 << 30); print('allocated')"], Network::Deny);
+    let mut s = spec(
+        "python3",
+        &["-c", "x = bytearray(1 << 30); print('allocated')"],
+        Network::Deny,
+    );
     s.limits.address_space_bytes = 256 << 20;
     let out = run(&s).unwrap();
     assert_ne!(out.exit, ExitKind::Exited(0));
@@ -176,4 +195,55 @@ fn nul_in_argument_refused() {
     let mut s = spec("echo", &[], Network::Deny);
     s.args = vec!["a\0b".into()];
     assert_eq!(run(&s).unwrap_err(), ExecError::NulInArgument);
+}
+
+/// Capability layer for Threat 5: a confined command can write only inside
+/// its read-write roots and cannot read outside its granted roots (e.g. a
+/// credential directory).
+#[cfg(target_os = "linux")]
+#[test]
+fn filesystem_confinement_enforced() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(d.path()).unwrap();
+    let ws = base.join("ws");
+    let creds = base.join("creds");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&creds).unwrap();
+    std::fs::write(creds.join("id_rsa"), b"PRIVATE").unwrap();
+    // The child may run as `nobody` when tests run as root.
+    for p in [&base, &ws, &creds] {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+    std::fs::set_permissions(creds.join("id_rsa"), std::fs::Permissions::from_mode(0o666)).unwrap();
+    let confine = FsConfinement {
+        read_write: vec![ws.clone()],
+        read_only: FsConfinement::system_read_only(),
+    };
+    let mk = |args: &[&str]| {
+        let mut s = spec("sh", &[], Network::Deny);
+        s.args = vec!["-c".into(), args.join(" ")];
+        s.cwd = ws.clone();
+        s.fs = Some(confine.clone());
+        s
+    };
+    let out = run(&mk(&["echo ok > inside.txt && cat inside.txt"])).unwrap();
+    assert!(out.isolation.fs_confined);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "ok\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = run(&mk(&["cat", creds.join("id_rsa").to_str().unwrap()])).unwrap();
+    assert_ne!(out.exit, ExitKind::Exited(0));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("PRIVATE"));
+    let out = run(&mk(&[
+        "echo pwned >",
+        base.join("escape.txt").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_ne!(out.exit, ExitKind::Exited(0));
+    assert!(!base.join("escape.txt").exists());
+    assert_eq!(std::fs::read(creds.join("id_rsa")).unwrap(), b"PRIVATE");
 }

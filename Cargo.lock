@@ -52,6 +52,7 @@ dependencies = [
 name = "anchor-exec"
 version = "0.1.0"
 dependencies = [
+ "landlock",
  "libc",
  "tempfile",
  "thiserror",

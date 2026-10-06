@@ -16,7 +16,15 @@ const CANON: &str = "/ws/src/main.rs";
 
 #[test]
 fn heuristic_file_names() {
-    for n in ["DEVLOG", "DEVLOG.md", "CHANGELOG.md", "changelog", "History.rst", "JOURNAL.txt", "docs/CHANGES"] {
+    for n in [
+        "DEVLOG",
+        "DEVLOG.md",
+        "CHANGELOG.md",
+        "changelog",
+        "History.rst",
+        "JOURNAL.txt",
+        "docs/CHANGES",
+    ] {
         assert_eq!(
             Guard::heuristic(Path::new(n), None),
             Some(HeuristicReason::FileName),
@@ -30,7 +38,8 @@ fn heuristic_file_names() {
 
 #[test]
 fn heuristic_dated_entries() {
-    let log = b"# Notes\n\n## 2026-01-01\nstarted\n\n## 2026-01-02\nmore\n\n## 2026-01-05\nthings\n";
+    let log =
+        b"# Notes\n\n## 2026-01-01\nstarted\n\n## 2026-01-02\nmore\n\n## 2026-01-05\nthings\n";
     assert_eq!(
         Guard::heuristic(Path::new("notes.md"), Some(log)),
         Some(HeuristicReason::DatedEntries)
@@ -62,13 +71,25 @@ fn marker_and_explicit_config() {
         not_append_only: vec![],
     };
     let g = Guard::with_config(&d.path().join("w.toml"), cfg).unwrap();
-    assert_eq!(g.classify(Path::new("logs/a.md"), None), AppendOnlyStatus::Explicit);
-    assert_eq!(g.classify(Path::new("logs/sub/a.md"), None), AppendOnlyStatus::No);
     assert_eq!(
-        g.classify(Path::new("x.txt"), Some(b"<!-- anchor:append-only -->\nhello")),
+        g.classify(Path::new("logs/a.md"), None),
+        AppendOnlyStatus::Explicit
+    );
+    assert_eq!(
+        g.classify(Path::new("logs/sub/a.md"), None),
+        AppendOnlyStatus::No
+    );
+    assert_eq!(
+        g.classify(
+            Path::new("x.txt"),
+            Some(b"<!-- anchor:append-only -->\nhello")
+        ),
         AppendOnlyStatus::Marker
     );
-    assert_eq!(g.classify(Path::new("x.txt"), Some(b"hello")), AppendOnlyStatus::No);
+    assert_eq!(
+        g.classify(Path::new("x.txt"), Some(b"hello")),
+        AppendOnlyStatus::No
+    );
 }
 
 /// §5.3 test: a Write to an append-only file is refused.
@@ -94,7 +115,10 @@ fn append_only_edits() {
     let orig = b"## 1.0\n- first\n";
     let mut appended = orig.to_vec();
     appended.extend_from_slice(b"## 1.1\n- second\n");
-    assert!(g.check_edit(Path::new("/ws/CHANGELOG.md"), st, orig, &appended, false).is_ok());
+    assert!(
+        g.check_edit(Path::new("/ws/CHANGELOG.md"), st, orig, &appended, false)
+            .is_ok()
+    );
     let modified = b"## 1.0\n- FIRST\n## 1.1\n";
     assert_eq!(
         g.check_edit(Path::new("/ws/CHANGELOG.md"), st, orig, modified, true),
@@ -112,7 +136,12 @@ fn append_only_edits() {
 fn write_without_read_refused() {
     let (g, _d) = guard();
     assert_eq!(
-        g.check_write(Path::new(CANON), AppendOnlyStatus::No, Some(sha(b"old")), false),
+        g.check_write(
+            Path::new(CANON),
+            AppendOnlyStatus::No,
+            Some(sha(b"old")),
+            false
+        ),
         Err(GuardError::NotReadInSession)
     );
 }
@@ -123,7 +152,12 @@ fn write_after_full_read_succeeds() {
     let (mut g, _d) = guard();
     g.record_full_read(Path::new(CANON), sha(b"old"));
     assert_eq!(
-        g.check_write(Path::new(CANON), AppendOnlyStatus::No, Some(sha(b"old")), false),
+        g.check_write(
+            Path::new(CANON),
+            AppendOnlyStatus::No,
+            Some(sha(b"old")),
+            false
+        ),
         Ok(WriteBasis::FullReadInSession)
     );
 }
@@ -133,11 +167,21 @@ fn stale_read_refused_but_diff_confirmation_allows() {
     let (mut g, _d) = guard();
     g.record_full_read(Path::new(CANON), sha(b"old"));
     assert_eq!(
-        g.check_write(Path::new(CANON), AppendOnlyStatus::No, Some(sha(b"changed")), false),
+        g.check_write(
+            Path::new(CANON),
+            AppendOnlyStatus::No,
+            Some(sha(b"changed")),
+            false
+        ),
         Err(GuardError::StaleRead)
     );
     assert_eq!(
-        g.check_write(Path::new(CANON), AppendOnlyStatus::No, Some(sha(b"changed")), true),
+        g.check_write(
+            Path::new(CANON),
+            AppendOnlyStatus::No,
+            Some(sha(b"changed")),
+            true
+        ),
         Ok(WriteBasis::UserConfirmedDiff)
     );
 }
@@ -159,7 +203,10 @@ fn edits_require_read_too() {
         Err(GuardError::NotReadInSession)
     );
     g.record_full_read(Path::new(CANON), sha(b"a"));
-    assert!(g.check_edit(Path::new(CANON), AppendOnlyStatus::No, b"a", b"b", false).is_ok());
+    assert!(
+        g.check_edit(Path::new(CANON), AppendOnlyStatus::No, b"a", b"b", false)
+            .is_ok()
+    );
 }
 
 /// §5.3 test: the "not append-only" override persists across sessions and is
@@ -174,7 +221,8 @@ fn override_persists_across_sessions() {
             g.classify(Path::new("docs/HISTORY.md"), None),
             AppendOnlyStatus::Heuristic(HeuristicReason::FileName)
         );
-        g.mark_not_append_only(Path::new("docs/HISTORY.md")).unwrap();
+        g.mark_not_append_only(Path::new("docs/HISTORY.md"))
+            .unwrap();
     }
     let g = Guard::load(&cfg_path).unwrap();
     let st = g.classify(Path::new("docs/HISTORY.md"), None);

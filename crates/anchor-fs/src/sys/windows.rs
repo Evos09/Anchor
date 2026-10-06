@@ -41,7 +41,10 @@ pub(crate) struct Root {
 }
 
 fn wide(p: &Path) -> Vec<u16> {
-    p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    p.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn last_err() -> std::io::Error {
@@ -55,7 +58,12 @@ fn map_open_err(e: std::io::Error) -> FsError {
     }
 }
 
-fn open_handle(path: &Path, access: u32, extra_flags: u32, disposition: u32) -> Result<OwnedHandle, FsError> {
+fn open_handle(
+    path: &Path,
+    access: u32,
+    extra_flags: u32,
+    disposition: u32,
+) -> Result<OwnedHandle, FsError> {
     let w = wide(path);
     // SAFETY: `w` is a NUL-terminated UTF-16 string that outlives the call;
     // all other arguments are plain values or null.
@@ -134,6 +142,9 @@ fn info(h: &OwnedHandle) -> Result<(Meta, u32), FsError> {
             kind,
             nlink: i.nNumberOfLinks as u64,
             len: ((i.nFileSizeHigh as u64) << 32) | i.nFileSizeLow as u64,
+            ctime_ns: ((((i.ftLastWriteTime.dwHighDateTime as u64) << 32)
+                | i.ftLastWriteTime.dwLowDateTime as u64) as i128)
+                * 100,
             mode: 0,
         },
         attrs,
@@ -175,7 +186,11 @@ pub(crate) fn open_root(path: &Path) -> Result<(Root, PathBuf), FsError> {
     Ok((Root { _handle: h }, p))
 }
 
-pub(crate) fn resolve_follow(_root: &Root, root_path: &Path, rel: &Path) -> Result<(PathBuf, Meta), FsError> {
+pub(crate) fn resolve_follow(
+    _root: &Root,
+    root_path: &Path,
+    rel: &Path,
+) -> Result<(PathBuf, Meta), FsError> {
     let full = root_path.join(rel);
     let h = open_handle(&full, FILE_READ_ATTRIBUTES, 0, OPEN_EXISTING)?;
     let canonical = final_path(&h)?;
@@ -201,16 +216,30 @@ fn open_strict(root_path: &Path, rel: &Path, access: u32) -> Result<(OwnedHandle
     Ok((h, meta))
 }
 
-pub(crate) fn is_symlink(_root: &Root, root_path: &Path, parent_rel: &Path, name: &OsStr) -> Result<bool, FsError> {
+pub(crate) fn is_symlink(
+    _root: &Root,
+    root_path: &Path,
+    parent_rel: &Path,
+    name: &OsStr,
+) -> Result<bool, FsError> {
     let full = root_path.join(parent_rel).join(name);
-    match open_handle(&full, FILE_READ_ATTRIBUTES, FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING) {
+    match open_handle(
+        &full,
+        FILE_READ_ATTRIBUTES,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        OPEN_EXISTING,
+    ) {
         Ok(h) => Ok(info(&h)?.1 & FILE_ATTRIBUTE_REPARSE_POINT != 0),
         Err(FsError::NotFound) => Ok(false),
         Err(e) => Err(e),
     }
 }
 
-pub(crate) fn read_strict(_root: &Root, root_path: &Path, rel: &Path) -> Result<(Meta, Vec<u8>), FsError> {
+pub(crate) fn read_strict(
+    _root: &Root,
+    root_path: &Path,
+    rel: &Path,
+) -> Result<(Meta, Vec<u8>), FsError> {
     let (h, meta) = open_strict(root_path, rel, GENERIC_READ)?;
     if meta.kind != Kind::File {
         return Err(FsError::NotAFile);
@@ -227,7 +256,11 @@ pub(crate) fn read_strict(_root: &Root, root_path: &Path, rel: &Path) -> Result<
     Ok((meta, buf))
 }
 
-pub(crate) fn list_strict(_root: &Root, root_path: &Path, rel: &Path) -> Result<(FileId, Vec<DirEntryInfo>), FsError> {
+pub(crate) fn list_strict(
+    _root: &Root,
+    root_path: &Path,
+    rel: &Path,
+) -> Result<(FileId, Vec<DirEntryInfo>), FsError> {
     let (_h, meta) = open_strict(root_path, rel, FILE_READ_ATTRIBUTES)?;
     if meta.kind != Kind::Dir {
         return Err(FsError::NotADirectory);
@@ -300,7 +333,12 @@ pub(crate) fn write_atomic(
     match expect {
         Expect::Absent => {
             if !matches!(
-                open_handle(&target, FILE_READ_ATTRIBUTES, FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING),
+                open_handle(
+                    &target,
+                    FILE_READ_ATTRIBUTES,
+                    FILE_FLAG_OPEN_REPARSE_POINT,
+                    OPEN_EXISTING
+                ),
                 Err(FsError::NotFound)
             ) {
                 return Err(FsError::Changed);
@@ -328,7 +366,12 @@ pub(crate) fn write_atomic(
 
     let tmp = root_path.join(&parent_rel).join(tmp_name("tmp"));
     {
-        let h = open_handle(&tmp, GENERIC_WRITE, FILE_FLAG_OPEN_REPARSE_POINT, CREATE_NEW)?;
+        let h = open_handle(
+            &tmp,
+            GENERIC_WRITE,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            CREATE_NEW,
+        )?;
         let mut f = std::fs::File::from(h);
         if let Err(e) = f.write_all(content).and_then(|_| f.sync_all()) {
             let w = wide(&tmp);
@@ -377,10 +420,15 @@ pub(crate) fn write_atomic(
                 delete_tmp();
                 return Err(FsError::Io(e.to_string()));
             }
-            let displaced_ok = open_handle(&backup, FILE_READ_ATTRIBUTES, FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING)
-                .and_then(|h| info(&h))
-                .map(|(m, _)| m.kind == Kind::File && m.id == *id)
-                .unwrap_or(false);
+            let displaced_ok = open_handle(
+                &backup,
+                FILE_READ_ATTRIBUTES,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                OPEN_EXISTING,
+            )
+            .and_then(|h| info(&h))
+            .map(|(m, _)| m.kind == Kind::File && m.id == *id)
+            .unwrap_or(false);
             if !displaced_ok {
                 // SAFETY: as above.
                 unsafe {
@@ -398,6 +446,30 @@ pub(crate) fn write_atomic(
             // SAFETY: NUL-terminated wide string.
             unsafe { DeleteFileW(wb.as_ptr()) };
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn remove_strict(
+    _root: &Root,
+    root_path: &Path,
+    parent_rel: &Path,
+    name: &OsStr,
+    expected: &Meta,
+) -> Result<(), FsError> {
+    let rel = parent_rel.join(name);
+    let (h, meta) = open_strict(root_path, &rel, FILE_READ_ATTRIBUTES)?;
+    if meta.kind != Kind::File {
+        return Err(FsError::NotAFile);
+    }
+    if !meta.same_version(expected) {
+        return Err(FsError::Changed);
+    }
+    drop(h);
+    let w = wide(&root_path.join(&rel));
+    // SAFETY: NUL-terminated wide string.
+    if unsafe { DeleteFileW(w.as_ptr()) } == 0 {
+        return Err(FsError::Io(last_err().to_string()));
     }
     Ok(())
 }

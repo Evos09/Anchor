@@ -58,8 +58,19 @@ pub struct Meta {
     pub kind: Kind,
     pub nlink: u64,
     pub len: u64,
+    /// Inode change time (Unix ctime / Windows last-write time) in ns.
+    /// Inode numbers are reused quickly after deletion, so identity checks
+    /// compare `(id, ctime)` rather than `id` alone.
+    pub ctime_ns: i128,
     #[cfg_attr(windows, allow(dead_code))]
     pub(crate) mode: u32,
+}
+
+impl Meta {
+    /// Same file, and not modified or replaced since `other` was observed.
+    pub fn same_version(&self, other: &Meta) -> bool {
+        self.id == other.id && self.ctime_ns == other.ctime_ns
+    }
 }
 
 /// The result of resolving a tool-supplied path.
@@ -81,7 +92,13 @@ impl Resolved {
         self.meta.is_some()
     }
     pub fn is_dir(&self) -> bool {
-        matches!(self.meta, Some(Meta { kind: Kind::Dir, .. }))
+        matches!(
+            self.meta,
+            Some(Meta {
+                kind: Kind::Dir,
+                ..
+            })
+        )
     }
 }
 
@@ -264,10 +281,11 @@ impl Workspace {
                         return Err(FsError::NotADirectory);
                     }
                     missing.reverse();
-                    let canonical: PathBuf = missing.iter().fold(canon_parent.clone(), |mut acc, m| {
-                        acc.push(m);
-                        acc
-                    });
+                    let canonical: PathBuf =
+                        missing.iter().fold(canon_parent.clone(), |mut acc, m| {
+                            acc.push(m);
+                            acc
+                        });
                     // `missing` is [dir.., target]; keep only the directories.
                     let target = missing.pop().ok_or(FsError::NotFound)?;
                     // The existing ancestor must not hold a dangling symlink
@@ -310,7 +328,7 @@ impl Workspace {
             return Err(FsError::HardlinkRefused(expected.nlink));
         }
         let (meta, bytes) = sys::read_strict(&self.handle, &self.root, &r.rel)?;
-        if meta.id != expected.id {
+        if !meta.same_version(&expected) {
             return Err(FsError::Changed);
         }
         if meta.nlink > 1 && !self.allow_hardlinked_reads {
@@ -387,6 +405,23 @@ impl Workspace {
             new_sha256: sha256(content),
             decision_id: approval.decision_id(),
         })
+    }
+
+    /// Remove a resolved regular file, verifying it is still the approved
+    /// file (same identity) before unlinking it.
+    pub fn remove(&self, r: &Resolved, approval: Approved) -> Result<(), FsError> {
+        check_approval(&approval, r)?;
+        if approval.operation() != Operation::Delete {
+            return Err(FsError::ApprovalMismatch);
+        }
+        let meta = r.meta.ok_or(FsError::NotFound)?;
+        if meta.kind != Kind::File {
+            return Err(FsError::NotAFile);
+        }
+        let (parent_rel, name) = split_parent(&r.rel)?;
+        sys::remove_strict(&self.handle, &self.root, &parent_rel, &name, &meta)?;
+        MUTATIONS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Append `suffix` to an existing file, verifying byte-for-byte that the

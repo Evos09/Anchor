@@ -66,13 +66,19 @@ fn same_family_review_refused() {
     ));
     // Family comparison is case/whitespace-insensitive.
     let bad = ROLES.replace("family = \"family-b\"", "family = \" FAMILY-A \"");
-    assert!(matches!(RolesConfig::parse(&bad), Err(ConfigError::SameFamilyReview(_))));
+    assert!(matches!(
+        RolesConfig::parse(&bad),
+        Err(ConfigError::SameFamilyReview(_))
+    ));
     // A per-role override that collides is caught too.
     let bad = ROLES.replace(
         "model_id = \"review-model\"",
         "model_id = \"review-model\"\nfamily = \"family-a\"",
     );
-    assert!(matches!(RolesConfig::parse(&bad), Err(ConfigError::SameFamilyReview(_))));
+    assert!(matches!(
+        RolesConfig::parse(&bad),
+        Err(ConfigError::SameFamilyReview(_))
+    ));
 }
 
 /// A fallback provider in the reviewer's family would silently turn review
@@ -83,15 +89,23 @@ fn fallback_into_reviewer_family_refused() {
         "price_out_per_mtok = 2.0",
         "price_out_per_mtok = 2.0\nfallback = [\"other\"]",
     );
-    assert!(matches!(RolesConfig::parse(&bad), Err(ConfigError::SameFamilyReview(_))));
+    assert!(matches!(
+        RolesConfig::parse(&bad),
+        Err(ConfigError::SameFamilyReview(_))
+    ));
 }
 
 #[test]
 fn config_rejects_missing_roles_and_unknown_keys() {
     let missing = ROLES.replace("[roles.tester]", "[roles.unused_tester_name]");
     assert!(RolesConfig::parse(&missing).is_err());
-    let unknown = format!("{ROLES}\n[providers.x]\nkind = \"mock\"\nfamily = \"f\"\napi_key = \"sk-literal\"\n");
-    assert!(RolesConfig::parse(&unknown).is_err(), "inline keys are not a config field");
+    let unknown = format!(
+        "{ROLES}\n[providers.x]\nkind = \"mock\"\nfamily = \"f\"\napi_key = \"sk-literal\"\n"
+    );
+    assert!(
+        RolesConfig::parse(&unknown).is_err(),
+        "inline keys are not a config field"
+    );
 }
 
 #[test]
@@ -148,7 +162,11 @@ fn prompt_prefix_is_stable_across_turns() {
         mon.check(&msgs, &TOOLS_JSON).unwrap();
         assert_eq!(prefix_hash(&msgs, &TOOLS_JSON), h0);
         msgs.push(ChatMessage {
-            role: if i % 2 == 0 { ChatRole::User } else { ChatRole::Assistant },
+            role: if i % 2 == 0 {
+                ChatRole::User
+            } else {
+                ChatRole::Assistant
+            },
             content: format!("turn {i}"),
             tool_calls: vec![],
             tool_call_id: None,
@@ -167,7 +185,11 @@ fn compaction_keeps_head_tail_and_never_orphans_tool_replies() {
         role,
         content: c.into(),
         tool_calls: vec![],
-        tool_call_id: if role == ChatRole::Tool { Some("x".into()) } else { None },
+        tool_call_id: if role == ChatRole::Tool {
+            Some("x".into())
+        } else {
+            None
+        },
     };
     let mut m = vec![mk(ChatRole::System, "sys"), mk(ChatRole::User, "task")];
     for i in 0..20 {
@@ -213,7 +235,8 @@ impl FakeBackend {
 impl Transport for FakeBackend {
     fn send(&mut self, msg: Message) -> Result<(), AgentError> {
         // Every message must survive the real wire encoding.
-        let line = encode(&Frame::new(1, msg.clone())).map_err(|e| AgentError::Protocol(e.to_string()))?;
+        let line =
+            encode(&Frame::new(1, msg.clone())).map_err(|e| AgentError::Protocol(e.to_string()))?;
         decode(&line).map_err(|e| AgentError::Protocol(e.to_string()))?;
         match &msg {
             Message::ToolCall(c) => self.inbox.push_back(Message::ToolResult(ToolResult {
@@ -222,9 +245,12 @@ impl Transport for FakeBackend {
                     output: format!("result of {}", c.request.name()),
                 },
             })),
-            Message::Checkpoint(cp) => self.inbox.push_back(Message::CheckpointSaved(CheckpointSaved {
-                checkpoint_id: cp.checkpoint_id.clone(),
-            })),
+            Message::Checkpoint(cp) => {
+                self.inbox
+                    .push_back(Message::CheckpointSaved(CheckpointSaved {
+                        checkpoint_id: cp.checkpoint_id.clone(),
+                    }))
+            }
             Message::Paused(_) => self.inbox.push_back(Message::Resume(Resume {
                 choice: self.resume_choice,
             })),
@@ -276,16 +302,29 @@ fn agent_loop_end_to_end_with_mock_provider() {
             _ => "other",
         })
         .collect();
-    assert_eq!(kinds.iter().filter(|k| **k == "tool_call").count(), 2, "{kinds:?}");
+    assert_eq!(
+        kinds.iter().filter(|k| **k == "tool_call").count(),
+        2,
+        "{kinds:?}"
+    );
     assert_eq!(kinds.iter().filter(|k| **k == "checkpoint").count(), 3);
     assert_eq!(*kinds.last().unwrap(), "done");
     // Cost accounting uses configured prices: (100*1 + 10*2) / 1e6.
-    let Message::Usage(u) = b.sent.iter().find(|m| matches!(m, Message::Usage(_))).unwrap() else {
+    let Message::Usage(u) = b
+        .sent
+        .iter()
+        .find(|m| matches!(m, Message::Usage(_)))
+        .unwrap()
+    else {
         unreachable!()
     };
     assert!((u.cost_usd - 120.0 / 1e6).abs() < 1e-12);
     // The bogus tool call never reached the backend.
-    assert!(!b.sent.iter().any(|m| matches!(m, Message::ToolCall(c) if c.request.name() == "bogus_tool")));
+    assert!(
+        !b.sent
+            .iter()
+            .any(|m| matches!(m, Message::ToolCall(c) if c.request.name() == "bogus_tool"))
+    );
 }
 
 /// Spec §5.4: a session that fills the context pauses at the threshold and
@@ -298,7 +337,11 @@ fn agent_pauses_at_context_threshold() {
     ]}"#;
     let mut b = FakeBackend::new(task(script), ResumeChoice::FreshSession);
     run_session(&mut b, &*default_factory()).unwrap();
-    let paused = b.sent.iter().position(|m| matches!(m, Message::Paused(_))).expect("paused");
+    let paused = b
+        .sent
+        .iter()
+        .position(|m| matches!(m, Message::Paused(_)))
+        .expect("paused");
     let Message::Checkpoint(cp) = &b.sent[paused - 1] else {
         panic!("pause must be preceded by a checkpoint")
     };
@@ -309,7 +352,13 @@ fn agent_pauses_at_context_threshold() {
     };
     assert!(d.summary.contains(&cp.checkpoint_id));
     // No further model turns after the user chose a fresh session.
-    assert_eq!(b.sent.iter().filter(|m| matches!(m, Message::TurnStarted { .. })).count(), 1);
+    assert_eq!(
+        b.sent
+            .iter()
+            .filter(|m| matches!(m, Message::TurnStarted { .. }))
+            .count(),
+        1
+    );
 }
 
 /// Spec §5.4: a fresh session seeded from a checkpoint resumes from it.
@@ -331,11 +380,21 @@ fn fresh_session_seeded_from_checkpoint_resumes() {
     t.resume_from = Some(cp.clone());
     let mut second = FakeBackend::new(t, ResumeChoice::ContinueWithCompaction);
     run_session(&mut second, &*default_factory()).unwrap();
-    let Message::TurnStarted { turn } = second.sent.iter().find(|m| matches!(m, Message::TurnStarted { .. })).unwrap() else {
+    let Message::TurnStarted { turn } = second
+        .sent
+        .iter()
+        .find(|m| matches!(m, Message::TurnStarted { .. }))
+        .unwrap()
+    else {
         unreachable!()
     };
     assert_eq!(*turn, 3, "turn numbering continues from the checkpoint");
-    let Message::Checkpoint(c2) = second.sent.iter().find(|m| matches!(m, Message::Checkpoint(_))).unwrap() else {
+    let Message::Checkpoint(c2) = second
+        .sent
+        .iter()
+        .find(|m| matches!(m, Message::Checkpoint(_)))
+        .unwrap()
+    else {
         unreachable!()
     };
     // History is carried over in full, plus the resume marker and new turn.
@@ -355,8 +414,14 @@ fn provider_fallback_is_announced() {
     t.roles_toml = roles;
     let mut b = FakeBackend::new(t, ResumeChoice::ContinueWithCompaction);
     run_session(&mut b, &*default_factory()).unwrap();
-    assert!(b.sent.iter().any(|m| matches!(m, Message::Notice(n) if n.kind == NoticeKind::ProviderFallback)));
-    assert!(matches!(b.sent.last(), Some(Message::Failed(f)) if f.error.contains("all providers failed")));
+    assert!(
+        b.sent
+            .iter()
+            .any(|m| matches!(m, Message::Notice(n) if n.kind == NoticeKind::ProviderFallback))
+    );
+    assert!(
+        matches!(b.sent.last(), Some(Message::Failed(f)) if f.error.contains("all providers failed"))
+    );
 }
 
 #[test]

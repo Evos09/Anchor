@@ -58,7 +58,12 @@ impl ContextTracker {
     }
 
     /// Record usage for a model and say whether the agent must pause.
-    pub fn update(&mut self, model_id: &str, used_tokens: u64, window_tokens: u64) -> ContextStatus {
+    pub fn update(
+        &mut self,
+        model_id: &str,
+        used_tokens: u64,
+        window_tokens: u64,
+    ) -> ContextStatus {
         self.usage
             .insert(model_id.to_string(), (used_tokens, window_tokens.max(1)));
         let ratio = used_tokens as f64 / window_tokens.max(1) as f64;
@@ -70,9 +75,7 @@ impl ContextTracker {
     }
 
     pub fn ratio(&self, model_id: &str) -> Option<f64> {
-        self.usage
-            .get(model_id)
-            .map(|(u, w)| *u as f64 / *w as f64)
+        self.usage.get(model_id).map(|(u, w)| *u as f64 / *w as f64)
     }
 }
 
@@ -120,13 +123,19 @@ impl CheckpointStore {
     /// Persist a checkpoint atomically. Returns its path.
     pub fn save(&self, cp: &Checkpoint) -> Result<PathBuf, CheckpointError> {
         cp.validate().map_err(CheckpointError::Invalid)?;
-        let bytes = serde_json::to_vec_pretty(cp).map_err(|e| CheckpointError::Parse(e.to_string()))?;
+        let bytes =
+            serde_json::to_vec_pretty(cp).map_err(|e| CheckpointError::Parse(e.to_string()))?;
         let final_path = self.path_for(&cp.checkpoint_id);
-        let tmp = self
-            .dir
-            .join(format!("{TMP_PREFIX}{}-{}", std::process::id(), cp.checkpoint_id));
+        let tmp = self.dir.join(format!(
+            "{TMP_PREFIX}{}-{}",
+            std::process::id(),
+            cp.checkpoint_id
+        ));
         let result = (|| -> std::io::Result<()> {
-            let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
             f.write_all(&bytes)?;
             f.sync_all()?;
             fs::rename(&tmp, &final_path)?;
@@ -167,7 +176,10 @@ impl CheckpointStore {
         let mut bad = Vec::new();
         for ent in fs::read_dir(&self.dir)? {
             let path = ent?.path();
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             if name.starts_with(TMP_PREFIX) || !name.ends_with(".json") {
                 continue;
             }

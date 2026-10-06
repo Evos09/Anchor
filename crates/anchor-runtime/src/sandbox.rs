@@ -13,11 +13,15 @@ pub enum SandboxStatus {
 }
 
 /// System paths the runtime may read (never write).
-pub const READABLE_SYSTEM_PATHS: &[&str] = &["/etc", "/usr", "/lib", "/lib64", "/lib32", "/nix/store"];
+pub const READABLE_SYSTEM_PATHS: &[&str] =
+    &["/etc", "/usr", "/lib", "/lib64", "/lib32", "/nix/store"];
 
 #[cfg(target_os = "linux")]
 pub fn restrict_self() -> SandboxStatus {
-    use landlock::{ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, path_beneath_rules};
+    use landlock::{
+        ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+        path_beneath_rules,
+    };
     let abi = ABI::V5;
     let existing: Vec<&str> = READABLE_SYSTEM_PATHS
         .iter()
@@ -33,7 +37,9 @@ pub fn restrict_self() -> SandboxStatus {
         Ok(s) => match s.ruleset {
             RulesetStatus::FullyEnforced => SandboxStatus::FullyEnforced,
             RulesetStatus::PartiallyEnforced => SandboxStatus::PartiallyEnforced,
-            RulesetStatus::NotEnforced => SandboxStatus::NotEnforced("kernel does not support Landlock".into()),
+            RulesetStatus::NotEnforced => {
+                SandboxStatus::NotEnforced("kernel does not support Landlock".into())
+            }
         },
         Err(e) => SandboxStatus::NotEnforced(e.to_string()),
     }
@@ -42,6 +48,7 @@ pub fn restrict_self() -> SandboxStatus {
 #[cfg(not(target_os = "linux"))]
 pub fn restrict_self() -> SandboxStatus {
     SandboxStatus::NotEnforced(
-        "no self-sandbox on this platform yet; isolation relies on the process boundary (ADR-0003)".into(),
+        "no self-sandbox on this platform yet; isolation relies on the process boundary (ADR-0003)"
+            .into(),
     )
 }

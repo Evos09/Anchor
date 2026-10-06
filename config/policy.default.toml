@@ -37,7 +37,7 @@ match = { tool = ["read_file", "write_file", "edit_file", "list_dir", "glob", "g
 [[rule]]
 name = "deny_git_internals_mutation"
 action = "deny"
-match = { operation = ["create", "write", "append", "edit"], target_matches = ["**/.git/**"] }
+match = { operation = ["create", "write", "append", "edit", "delete"], target_matches = ["**/.git/**"] }
 
 # --- Allow / prompt rules (first match wins) ---------------------------------
 

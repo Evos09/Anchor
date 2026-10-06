@@ -57,6 +57,7 @@ pub enum Operation {
     Write,
     Append,
     Edit,
+    Delete,
     Execute,
 }
 
@@ -64,7 +65,11 @@ impl Operation {
     pub fn is_mutation(self) -> bool {
         matches!(
             self,
-            Operation::Create | Operation::Write | Operation::Append | Operation::Edit
+            Operation::Create
+                | Operation::Write
+                | Operation::Append
+                | Operation::Edit
+                | Operation::Delete
         )
     }
 }
@@ -242,7 +247,11 @@ pub enum EngineError {
 impl Engine {
     /// Create an engine from a policy file. The file is re-read on every
     /// decision; a change takes effect on the next request (spec §5.2(g)).
-    pub fn from_file(policy_path: &Path, home: &Path, audit: AuditLog) -> Result<Self, EngineError> {
+    pub fn from_file(
+        policy_path: &Path,
+        home: &Path,
+        audit: AuditLog,
+    ) -> Result<Self, EngineError> {
         let bytes = std::fs::read(policy_path).map_err(|source| EngineError::Io {
             path: policy_path.to_path_buf(),
             source,
@@ -395,6 +404,18 @@ impl Engine {
         matches!(evaluate(&state.policy, req).0, Action::Allow)
     }
 
+    /// The action the policy would take, without minting or logging. Used to
+    /// skip user interaction (e.g. a diff confirmation) for requests that
+    /// will be denied anyway; the denial itself still goes through
+    /// [`Engine::decide`] and is logged.
+    pub fn peek(&self, req: &PermissionRequest) -> Action {
+        let state = match self.state.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        evaluate(&state.policy, req).0
+    }
+
     /// Record the user's answer to a prompt.
     pub fn resolve_prompt(
         &self,
@@ -413,7 +434,9 @@ impl Engine {
             }),
         );
         match (response, logged) {
-            (UserResponse::Approve, Ok(_)) => Ok(Approved::mint(prompt.decision_id, &prompt.request)),
+            (UserResponse::Approve, Ok(_)) => {
+                Ok(Approved::mint(prompt.decision_id, &prompt.request))
+            }
             (UserResponse::Approve, Err(_)) => Err(Denial {
                 decision_id: prompt.decision_id,
                 rule: "audit_log_unavailable".into(),

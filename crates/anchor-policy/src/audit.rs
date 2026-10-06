@@ -127,8 +127,8 @@ impl AuditLog {
             prev: tail.prev.clone(),
             hash: hash.clone(),
         };
-        let mut line = serde_json::to_string(&entry)
-            .map_err(|e| AuditError::Io(std::io::Error::other(e)))?;
+        let mut line =
+            serde_json::to_string(&entry).map_err(|e| AuditError::Io(std::io::Error::other(e)))?;
         line.push('\n');
         tail.file.write_all(line.as_bytes())?;
         tail.file.sync_data()?;

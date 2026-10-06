@@ -52,13 +52,23 @@ fn approve(f: &Fixture, w: &Workspace, r: &Resolved, op: Operation) -> Approved 
     }
 }
 
-fn write_new(f: &Fixture, w: &Workspace, path: &str, content: &[u8]) -> Result<WriteReceipt, FsError> {
+fn write_new(
+    f: &Fixture,
+    w: &Workspace,
+    path: &str,
+    content: &[u8],
+) -> Result<WriteReceipt, FsError> {
     let r = w.resolve(path)?;
     let a = approve(f, w, &r, Operation::Create);
     w.write(&r, content, Expect::Absent, a)
 }
 
-fn replace(f: &Fixture, w: &Workspace, path: &str, content: &[u8]) -> Result<WriteReceipt, FsError> {
+fn replace(
+    f: &Fixture,
+    w: &Workspace,
+    path: &str,
+    content: &[u8],
+) -> Result<WriteReceipt, FsError> {
     let r = w.resolve(path)?;
     let cur = w.read(&r)?;
     let a = approve(f, w, &r, Operation::Write);
@@ -79,7 +89,11 @@ fn assert_outside_untouched(f: &Fixture) {
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
-    assert_eq!(names, vec![std::ffi::OsString::from("secret")], "outside dir gained files");
+    assert_eq!(
+        names,
+        vec![std::ffi::OsString::from("secret")],
+        "outside dir gained files"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -98,7 +112,10 @@ fn create_read_replace_roundtrip() {
     let r = w.resolve("a.txt").unwrap();
     assert_eq!(w.read(&r).unwrap().bytes, b"two");
     // No temp files left behind.
-    let names: Vec<_> = fs::read_dir(&f.ws).unwrap().map(|e| e.unwrap().file_name()).collect();
+    let names: Vec<_> = fs::read_dir(&f.ws)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
     assert_eq!(names, vec![std::ffi::OsString::from("a.txt")]);
 }
 
@@ -138,7 +155,10 @@ fn compare_and_swap_preconditions() {
         a,
     );
     assert_eq!(res, Err(FsError::ContentMismatch));
-    assert_eq!(fs::read(f.ws.join("a.txt")).unwrap(), b"concurrently modified");
+    assert_eq!(
+        fs::read(f.ws.join("a.txt")).unwrap(),
+        b"concurrently modified"
+    );
 }
 
 #[test]
@@ -148,7 +168,10 @@ fn approval_must_match_target_and_operation() {
     let ra = w.resolve("a.txt").unwrap();
     let rb = w.resolve("b.txt").unwrap();
     let a = approve(&f, &w, &ra, Operation::Create);
-    assert_eq!(w.write(&rb, b"x", Expect::Absent, a), Err(FsError::ApprovalMismatch));
+    assert_eq!(
+        w.write(&rb, b"x", Expect::Absent, a),
+        Err(FsError::ApprovalMismatch)
+    );
     let read_only = approve(&f, &w, &rb, Operation::Read);
     assert_eq!(
         w.write(&rb, b"x", Expect::Absent, read_only),
@@ -165,7 +188,8 @@ fn append_verified_preserves_prefix() {
     let r = w.resolve("DEVLOG.md").unwrap();
     let cur = w.read(&r).unwrap();
     let a = approve(&f, &w, &r, Operation::Append);
-    w.append_verified(&r, b"2026-01-02 more\n", cur.sha256, a).unwrap();
+    w.append_verified(&r, b"2026-01-02 more\n", cur.sha256, a)
+        .unwrap();
     assert_eq!(
         fs::read(f.ws.join("DEVLOG.md")).unwrap(),
         b"2026-01-01 start\n2026-01-02 more\n"
@@ -177,6 +201,25 @@ fn append_verified_preserves_prefix() {
         w.append_verified(&r, b"x", cur.sha256, a),
         Err(FsError::ContentMismatch)
     );
+}
+
+#[test]
+fn remove_requires_delete_approval_and_same_file() {
+    let f = fixture();
+    let w = Workspace::open(&f.ws).unwrap();
+    write_new(&f, &w, "gone.txt", b"x").unwrap();
+    let r = w.resolve("gone.txt").unwrap();
+    let wrong_op = approve(&f, &w, &r, Operation::Write);
+    assert_eq!(w.remove(&r, wrong_op), Err(FsError::ApprovalMismatch));
+    // Replaced by a different file after resolution: refused.
+    fs::remove_file(f.ws.join("gone.txt")).unwrap();
+    fs::write(f.ws.join("gone.txt"), b"other").unwrap();
+    let a = approve(&f, &w, &r, Operation::Delete);
+    assert_eq!(w.remove(&r, a), Err(FsError::Changed));
+    let r = w.resolve("gone.txt").unwrap();
+    let a = approve(&f, &w, &r, Operation::Delete);
+    w.remove(&r, a).unwrap();
+    assert!(!f.ws.join("gone.txt").exists());
 }
 
 #[test]
@@ -207,8 +250,14 @@ fn list_dir_is_sorted_and_typed() {
     assert_eq!(
         ents,
         vec![
-            DirEntryInfo { name: "b".into(), kind: Kind::File },
-            DirEntryInfo { name: "d".into(), kind: Kind::Dir },
+            DirEntryInfo {
+                name: "b".into(),
+                kind: Kind::File
+            },
+            DirEntryInfo {
+                name: "d".into(),
+                kind: Kind::Dir
+            },
         ]
     );
 }
@@ -228,7 +277,10 @@ fn dotdot_traversal_is_normalised_and_confined() {
         w.resolve("../../../../etc/passwd"),
         Err(FsError::TraversalEscapesRoot)
     );
-    assert_eq!(w.resolve("../outside/secret"), Err(FsError::TraversalEscapesRoot));
+    assert_eq!(
+        w.resolve("../outside/secret"),
+        Err(FsError::TraversalEscapesRoot)
+    );
     assert_outside_untouched(&f);
 }
 
@@ -236,7 +288,10 @@ fn dotdot_traversal_is_normalised_and_confined() {
 fn absolute_path_injection_is_confined_or_refused() {
     let f = fixture();
     let w = Workspace::open(&f.ws).unwrap();
-    assert_eq!(w.resolve("/etc/passwd"), Err(FsError::AbsoluteOutsideWorkspace));
+    assert_eq!(
+        w.resolve("/etc/passwd"),
+        Err(FsError::AbsoluteOutsideWorkspace)
+    );
     let outside_secret = f.outside.join("secret");
     assert_eq!(
         w.resolve(outside_secret.to_str().unwrap()),
@@ -324,7 +379,10 @@ mod symlinks {
         let w = Workspace::open(&f.ws).unwrap();
         assert_eq!(w.resolve("pw"), Err(FsError::EscapesWorkspace));
         assert_eq!(w.resolve("cwd"), Err(FsError::EscapesWorkspace));
-        assert_eq!(w.resolve("/proc/self/root/etc/passwd"), Err(FsError::AbsoluteOutsideWorkspace));
+        assert_eq!(
+            w.resolve("/proc/self/root/etc/passwd"),
+            Err(FsError::AbsoluteOutsideWorkspace)
+        );
     }
 
     #[test]
@@ -364,7 +422,10 @@ mod symlinks {
         symlink(&f.outside, f.ws.join("sub")).unwrap();
         let res = w.write(&r, b"pwned", Expect::Absent, a);
         assert!(
-            matches!(res, Err(FsError::SymlinkInStrictPath) | Err(FsError::EscapesWorkspace)),
+            matches!(
+                res,
+                Err(FsError::SymlinkInStrictPath) | Err(FsError::EscapesWorkspace)
+            ),
             "{res:?}"
         );
         assert_outside_untouched(&f);
@@ -415,7 +476,11 @@ mod symlinks {
             let mut n = 0u64;
             while !s2.load(Ordering::Relaxed) {
                 let tmp = ws.join(format!(".flip{n}"));
-                let target: &Path = if n % 2 == 0 { &outside } else { Path::new("inside") };
+                let target: &Path = if n % 2 == 0 {
+                    &outside
+                } else {
+                    Path::new("inside")
+                };
                 let _ = symlink(target, &tmp);
                 let _ = fs::rename(&tmp, ws.join("flip"));
                 n += 1;
