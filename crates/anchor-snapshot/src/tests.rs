@@ -379,7 +379,7 @@ fn revert_restores_exactly() {
     // Verified by rescan: same root tree id.
     let again = snapshot(&store, &ws, &opts(), "check").unwrap();
     assert_eq!(again.root, s1.root);
-    assert!(store.journal().unwrap().is_none());
+    assert!(store.journal(&Root::main()).unwrap().is_none());
     // The pre-restore state is kept, so the restore itself can be undone.
     let pre = r.pre.unwrap();
     restore(&store, &ws, &opts(), &pre, &mut auth).unwrap();
@@ -551,7 +551,7 @@ fn failed_restore_reverts_to_pre_restore_state() {
         "{err}"
     );
     assert_eq!(state(&e.ws), pre_restore);
-    assert!(store.journal().unwrap().is_none());
+    assert!(store.journal(&Root::main()).unwrap().is_none());
 }
 
 /// A file changed by someone else during a restore is never clobbered
@@ -903,7 +903,7 @@ fn kill_mid_restore_recovers_to_pre_restore_state() {
     // The child died part-way: the journal is there and the workspace is
     // neither state.
     let store = Store::open(&e.store_dir).unwrap();
-    assert!(store.journal().unwrap().is_some());
+    assert!(store.journal(&Root::main()).unwrap().is_some());
     assert_ne!(state(&e.ws), pre_restore);
     let ws = Workspace::open(&e.ws).unwrap();
     let mut auth = approver(&e.engine, ws.root());
@@ -916,7 +916,7 @@ fn kill_mid_restore_recovers_to_pre_restore_state() {
     let r = recover(&store, &ws, &opts(), &mut auth).unwrap();
     assert!(r.is_some());
     assert_eq!(state(&e.ws), pre_restore);
-    assert!(store.journal().unwrap().is_none());
+    assert!(store.journal(&Root::main()).unwrap().is_none());
     assert!(recover(&store, &ws, &opts(), &mut auth).unwrap().is_none());
 }
 
@@ -956,4 +956,109 @@ fn damaged_objects_are_healed_from_the_workspace() {
     assert!(v.ok(), "{:?}", v.errors);
     restore(&store, &ws, &opts(), &s1.id(), &mut auth).unwrap();
     assert_eq!(fs::read_to_string(e.ws.join("keep")).unwrap(), "precious");
+}
+
+// ---------------------------------------------------------------------------
+// Multiple roots (Phase 4: agents' isolated workspaces share one store)
+// ---------------------------------------------------------------------------
+
+fn root_opts(name: &str) -> SnapshotOptions {
+    SnapshotOptions {
+        root: Root::named(name).unwrap(),
+        ..opts()
+    }
+}
+
+#[test]
+fn root_names_are_validated() {
+    for bad in ["", "-a", "A", "a.b", "a/b", &"x".repeat(41)] {
+        assert!(Root::named(bad).is_err(), "{bad:?}");
+    }
+    let r = Root::named("agent-1_x").unwrap();
+    assert_eq!(r.head_ref(), "r-agent-1_x/head");
+    assert_eq!(r.ref_name("turn", "0001"), "r-agent-1_x/turn-0001");
+    assert!(valid_ref(&r.head_ref()) && valid_ref(&r.ref_name("restore", "12-mid")));
+    assert_eq!(Root::main().ref_name("turns", "0001"), "turns/0001");
+}
+
+#[test]
+fn two_roots_share_objects_but_not_state() {
+    let e = env();
+    fs::write(e.ws.join("a"), "main").unwrap();
+    let store = Store::open(&e.store_dir).unwrap();
+    let ws = Workspace::open(&e.ws).unwrap();
+    let base = snap(&store, &ws, "turns/1").id();
+
+    // Materialize main's snapshot into an agent root; main's HEAD stays.
+    let iso_dir = e.base.join("iso");
+    fs::create_dir(&iso_dir).unwrap();
+    let iso = Workspace::open(&iso_dir).unwrap();
+    let ro = root_opts("alpha");
+    let mut auth = approver(&e.engine, iso.root());
+    materialize(&store, &iso, &ro, &base, &mut auth).unwrap();
+    assert_eq!(store.get_ref("HEAD").unwrap(), Some(base));
+    assert!(store.get_ref("r-alpha/head").unwrap().is_some());
+
+    // Changes in the agent root are snapshotted under its namespace with
+    // its own index; main is unaffected.
+    tick();
+    fs::write(iso_dir.join("a"), "agent").unwrap();
+    fs::write(iso_dir.join("b"), "new").unwrap();
+    let r = take_snapshot(&store, &iso, &ro, "r-alpha/turn-0001", "t").unwrap();
+    assert_eq!(r.hashed_files, 2);
+    assert!(store.index_path(&ro.root).exists());
+    let leaves: Vec<String> = ro
+        .root
+        .list_refs(&store, "turn")
+        .unwrap()
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect();
+    assert_eq!(leaves, ["0001"]);
+    assert_eq!(store.get_ref("HEAD").unwrap(), Some(base));
+    let main_again = snap(&store, &ws, "turns/2");
+    assert_eq!(main_again.root, Some(store.snapshot(&base).unwrap().root));
+
+    // Restore inside the agent root uses the agent's journal and refs.
+    let mut auth = approver(&e.engine, iso.root());
+    restore(&store, &iso, &ro, &base, &mut auth).unwrap();
+    assert_eq!(fs::read_to_string(iso_dir.join("a")).unwrap(), "main");
+    assert!(!iso_dir.join("b").exists());
+    assert!(!ro.root.list_refs(&store, "restore").unwrap().is_empty());
+    assert!(store.list_refs("restore").unwrap().is_empty());
+    assert!(store.journal(&ro.root).unwrap().is_none());
+
+    // gc drops every root's index and keeps both roots' snapshots intact.
+    gc(&store, 10, 10).unwrap();
+    assert!(!store.index_path(&ro.root).exists());
+    assert!(verify(&store).unwrap().ok());
+    take_snapshot(&store, &iso, &ro, "r-alpha/turn-0002", "t").unwrap();
+    assert!(verify(&store).unwrap().ok());
+}
+
+#[test]
+fn restore_expect_refuses_when_the_workspace_drifted() {
+    let e = env();
+    fs::write(e.ws.join("f"), "1").unwrap();
+    let store = Store::open(&e.store_dir).unwrap();
+    let ws = Workspace::open(&e.ws).unwrap();
+    let one = snap(&store, &ws, "turns/1").id();
+    tick();
+    fs::write(e.ws.join("f"), "2").unwrap();
+    let two = snap(&store, &ws, "turns/2").id();
+    tick();
+    // Someone edits the workspace after `two` was computed as the pre-state.
+    fs::write(e.ws.join("g"), "late edit").unwrap();
+    let mut auth = approver(&e.engine, ws.root());
+    let r = restore_expect(&store, &ws, &opts(), &two, &one, &mut auth);
+    assert!(matches!(r, Err(Error::ConcurrentChange(_))), "{r:?}");
+    assert_eq!(fs::read_to_string(e.ws.join("g")).unwrap(), "late edit");
+    assert_eq!(fs::read_to_string(e.ws.join("f")).unwrap(), "2");
+    assert!(store.journal(&Root::main()).unwrap().is_none());
+
+    // With the right expectation it applies.
+    let now = snap(&store, &ws, "turns/3").id();
+    restore_expect(&store, &ws, &opts(), &now, &one, &mut auth).unwrap();
+    assert_eq!(fs::read_to_string(e.ws.join("f")).unwrap(), "1");
+    assert!(!e.ws.join("g").exists());
 }

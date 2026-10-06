@@ -135,7 +135,9 @@ impl Index {
     /// Save (temp + rename; no fsync needed for a cache whose corruption
     /// is detected and harmless).
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(format!(".tmp-{}", std::process::id()));
+        let tmp = std::path::PathBuf::from(tmp);
         std::fs::write(&tmp, self.encode())?;
         std::fs::rename(&tmp, path)
     }

@@ -19,13 +19,16 @@ impl VerifyReport {
     }
 }
 
-/// Snapshot ids the store must keep: every ref plus an in-flight journal.
+/// Snapshot ids the store must keep: every ref plus every root's
+/// in-flight journal.
 fn roots(store: &Store) -> Result<Vec<(String, Id)>> {
     let mut v = store.all_refs()?;
-    if let Some(j) = store.journal()? {
-        for (n, h) in [("journal.pre", &j.pre), ("journal.target", &j.target)] {
-            if let Some(id) = Id::parse(h) {
-                v.push((n.to_string(), id));
+    for root in store.journaled_roots()? {
+        if let Some(j) = store.journal(&root)? {
+            for (n, h) in [("journal.pre", &j.pre), ("journal.target", &j.target)] {
+                if let Some(id) = Id::parse(h) {
+                    v.push((n.to_string(), id));
+                }
             }
         }
     }
@@ -145,7 +148,9 @@ pub fn gc(store: &Store, keep_turns: usize, keep_restores: usize) -> Result<GcRe
             report.bytes_freed += len;
         }
     }
-    // The index may name collected file objects; it is only a cache.
-    let _ = std::fs::remove_file(store.index_path());
+    // Indexes may name collected file objects; they are only caches.
+    for p in store.all_index_paths()? {
+        let _ = std::fs::remove_file(p);
+    }
     Ok(report)
 }

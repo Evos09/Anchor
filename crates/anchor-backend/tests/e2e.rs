@@ -557,7 +557,14 @@ fn crafted_snapshot_cannot_escape_on_restore() {
     assert!(err.contains("hash"), "{err}");
     assert_eq!(tree_state(&fx.ws), before);
     assert_eq!(outside(), "ssh-ed25519 AAAA user@host\n");
-    assert!(opened.mediator.snapshots().journal().unwrap().is_none());
+    assert!(
+        opened
+            .mediator
+            .snapshots()
+            .journal(&anchor_snapshot::Root::main())
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// Snapshots cover `.gitignore`d files and `.git/`: a command that deletes

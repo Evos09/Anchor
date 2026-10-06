@@ -8,7 +8,14 @@
 //!   index                     change-detection cache (rebuildable)
 //!   tmp/                      staging; wiped on open
 //!   restore.journal           present only while a restore is in flight
+//!   index.d/<root>            per-root cache of an agent's isolated root
+//!   journals/<root>           per-root restore journal
 //! ```
+//!
+//! One store can serve several workspace roots: the main workspace and the
+//! isolated workspaces of agents (ADR-0007). Objects and refs are shared;
+//! the index, `HEAD` and the restore journal belong to a [`Root`]. An
+//! agent root's refs live in its own namespace `r-<root>/`.
 //!
 //! Publication order is what makes a kill harmless: new objects are
 //! written to `tmp/`, made durable, then renamed into `objects/`; only then
@@ -42,10 +49,13 @@ pub(crate) struct Fault {
     pub snapshot_after: Option<u64>,
     /// Abort the process after this many restore operations.
     pub restore_after: Option<u64>,
+    /// Abort the process after this many operations of a merge apply
+    /// ([`crate::restore_expect`]).
+    pub merge_after: Option<u64>,
 }
 
 impl Fault {
-    /// `ANCHOR_TEST_FAULT=snapshot:N|restore:N`, honoured only in debug
+    /// `ANCHOR_TEST_FAULT=snapshot:N|restore:N|merge:N`, honoured only in debug
     /// builds (used by the kill-mid-snapshot / kill-mid-restore tests).
     fn from_env() -> Fault {
         let mut f = Fault::default();
@@ -57,6 +67,7 @@ impl Fault {
             match k {
                 "snapshot" => f.snapshot_after = n,
                 "restore" => f.restore_after = n,
+                "merge" => f.merge_after = n,
                 _ => {}
             }
         }
@@ -81,7 +92,80 @@ pub struct Store {
     _lock: File,
     fanouts: Mutex<HashSet<u8>>,
     pub(crate) fault: Fault,
-    pub(crate) restore_ops: AtomicU64,
+}
+
+/// A workspace root served by a store: the main workspace, or an agent's
+/// isolated workspace.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Root(Option<String>);
+
+impl Root {
+    pub fn main() -> Root {
+        Root(None)
+    }
+
+    /// An agent root. Names are 1-40 characters of `[a-z0-9_-]`, not
+    /// starting with `-`.
+    pub fn named(name: &str) -> Result<Root> {
+        let ok = !name.is_empty()
+            && name.len() <= 40
+            && !name.starts_with('-')
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+        if ok {
+            Ok(Root(Some(name.to_string())))
+        } else {
+            Err(Error::BadRef(format!("root {name:?}")))
+        }
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+
+    pub fn is_main(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// The ref holding this root's most recent snapshot.
+    pub fn head_ref(&self) -> String {
+        match &self.0 {
+            None => "HEAD".into(),
+            Some(n) => format!("r-{n}/head"),
+        }
+    }
+
+    /// The ref `leaf` in namespace `ns` for this root: `ns/leaf` for main,
+    /// `r-<root>/ns-leaf` for an agent root.
+    pub fn ref_name(&self, ns: &str, leaf: &str) -> String {
+        match &self.0 {
+            None => format!("{ns}/{leaf}"),
+            Some(n) => format!("r-{n}/{ns}-{leaf}"),
+        }
+    }
+
+    /// The refs of namespace `ns` of this root, as `(leaf, id)`, sorted.
+    pub fn list_refs(&self, store: &Store, ns: &str) -> Result<Vec<(String, Id)>> {
+        Ok(match &self.0 {
+            None => store
+                .list_refs(ns)?
+                .into_iter()
+                .filter_map(|(full, id)| {
+                    full.strip_prefix(&format!("{ns}/"))
+                        .map(|l| (l.to_string(), id))
+                })
+                .collect(),
+            Some(n) => {
+                let pre = format!("r-{n}/{ns}-");
+                store
+                    .list_refs(&format!("r-{n}"))?
+                    .into_iter()
+                    .filter_map(|(full, id)| full.strip_prefix(&pre).map(|l| (l.to_string(), id)))
+                    .collect()
+            }
+        })
+    }
 }
 
 fn now_ms() -> u64 {
@@ -179,7 +263,14 @@ impl Store {
     /// Open (creating if needed) and lock the store. Fails with
     /// [`Error::Locked`] if another process holds it.
     pub fn open(dir: &Path) -> Result<Store> {
-        for d in ["objects", "refs/turns", "refs/restore", "tmp"] {
+        for d in [
+            "objects",
+            "refs/turns",
+            "refs/restore",
+            "tmp",
+            "index.d",
+            "journals",
+        ] {
             fs::create_dir_all(dir.join(d))?;
         }
         let lock = lock_file(&dir.join("lock"))?;
@@ -193,7 +284,6 @@ impl Store {
             _lock: lock,
             fanouts: Mutex::new(HashSet::new()),
             fault: Fault::from_env(),
-            restore_ops: AtomicU64::new(0),
         })
     }
 
@@ -201,8 +291,20 @@ impl Store {
         &self.dir
     }
 
-    pub(crate) fn index_path(&self) -> PathBuf {
-        self.dir.join("index")
+    pub(crate) fn index_path(&self, root: &Root) -> PathBuf {
+        match root.name() {
+            None => self.dir.join("index"),
+            Some(n) => self.dir.join("index.d").join(n),
+        }
+    }
+
+    /// Every change-detection index (they are caches; gc deletes them all).
+    pub(crate) fn all_index_paths(&self) -> Result<Vec<PathBuf>> {
+        let mut v = vec![self.dir.join("index")];
+        for e in fs::read_dir(self.dir.join("index.d"))? {
+            v.push(e?.path());
+        }
+        Ok(v)
     }
 
     fn object_path(&self, id: &Id) -> PathBuf {
@@ -319,7 +421,6 @@ impl Store {
             pending: Mutex::new(Vec::new()),
             seen: Mutex::new(HashSet::new()),
             new_bytes: AtomicU64::new(0),
-            seq: AtomicU64::new(0),
         }
     }
 
@@ -418,12 +519,16 @@ impl Store {
 
     // -- restore journal ----------------------------------------------------
 
-    fn journal_path(&self) -> PathBuf {
-        self.dir.join("restore.journal")
+    fn journal_path(&self, root: &Root) -> PathBuf {
+        match root.name() {
+            None => self.dir.join("restore.journal"),
+            Some(n) => self.dir.join("journals").join(n),
+        }
     }
 
-    pub fn journal(&self) -> Result<Option<Journal>> {
-        match fs::read(self.journal_path()) {
+    /// The in-flight restore journal of `root`, if any.
+    pub fn journal(&self, root: &Root) -> Result<Option<Journal>> {
+        match fs::read(self.journal_path(root)) {
             Ok(b) => {
                 let j: Journal = serde_json::from_slice(&b)
                     .map_err(|e| Error::Corrupt(format!("restore journal: {e}")))?;
@@ -437,7 +542,22 @@ impl Store {
         }
     }
 
-    pub(crate) fn write_journal(&self, pre: &Id, target: &Id) -> Result<()> {
+    /// Every root with an in-flight restore journal.
+    pub fn journaled_roots(&self) -> Result<Vec<Root>> {
+        let mut v = Vec::new();
+        if self.journal_path(&Root::main()).exists() {
+            v.push(Root::main());
+        }
+        for e in fs::read_dir(self.dir.join("journals"))? {
+            let n = e?.file_name().to_string_lossy().into_owned();
+            if let Ok(r) = Root::named(&n) {
+                v.push(r);
+            }
+        }
+        Ok(v)
+    }
+
+    pub(crate) fn write_journal(&self, root: &Root, pre: &Id, target: &Id) -> Result<()> {
         let j = Journal {
             version: 1,
             pre: pre.hex(),
@@ -445,17 +565,20 @@ impl Store {
             started_unix_ms: now_ms(),
         };
         let bytes = serde_json::to_vec_pretty(&j).map_err(|e| Error::Corrupt(e.to_string()))?;
-        atomic_write(&self.journal_path(), &bytes)?;
+        atomic_write(&self.journal_path(root), &bytes)?;
         Ok(())
     }
 
-    pub(crate) fn clear_journal(&self) -> Result<()> {
-        match fs::remove_file(self.journal_path()) {
+    pub(crate) fn clear_journal(&self, root: &Root) -> Result<()> {
+        let p = self.journal_path(root);
+        match fs::remove_file(&p) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
         }
-        fsync_dir(&self.dir)?;
+        if let Some(d) = p.parent() {
+            fsync_dir(d)?;
+        }
         Ok(())
     }
 
@@ -489,7 +612,6 @@ pub struct Batch<'a> {
     pending: Mutex<Vec<(Id, PathBuf)>>,
     seen: Mutex<HashSet<Id>>,
     new_bytes: AtomicU64,
-    seq: AtomicU64,
 }
 
 impl Batch<'_> {
@@ -512,10 +634,12 @@ impl Batch<'_> {
         if self.store.has(&id) && trusted(self.store) {
             return Ok(id);
         }
+        static BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
         let tmp = self.store.dir.join("tmp").join(format!(
-            "{}-{}",
+            "{}-{}-{}",
             id.hex(),
-            self.seq.fetch_add(1, Ordering::SeqCst)
+            std::process::id(),
+            BATCH_SEQ.fetch_add(1, Ordering::SeqCst)
         ));
         let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         f.write_all(&[ty as u8])?;

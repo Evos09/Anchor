@@ -17,7 +17,7 @@ use crate::object::{
     FileObj, Id, MAX_LINK_TARGET, Node, ObjType, SnapshotObj, TreeEntry, TreeObj, Untracked,
     valid_name,
 };
-use crate::store::{Batch, Store, unix_ms};
+use crate::store::{Batch, Root, Store, unix_ms};
 use crate::{Error, Result};
 
 /// Files at most this large are stored as one chunk without running the
@@ -40,6 +40,8 @@ pub struct SnapshotOptions {
     /// Ignore the change-detection index and re-hash every file (used to
     /// heal a damaged store).
     pub rehash_all: bool,
+    /// The workspace root being snapshotted or restored (main by default).
+    pub root: Root,
 }
 
 impl Default for SnapshotOptions {
@@ -51,6 +53,7 @@ impl Default for SnapshotOptions {
             threads: 0,
             racy_window_ns: RACY_NS,
             rehash_all: false,
+            root: Root::main(),
         }
     }
 }
@@ -270,7 +273,7 @@ pub fn snapshot(
     let index = if opts.rehash_all {
         Index::default()
     } else {
-        Index::load(&store.index_path())
+        Index::load(&store.index_path(&opts.root))
     };
     mark("index load", &t1);
     let mut report = SnapshotReport {
@@ -381,7 +384,7 @@ pub fn snapshot(
     let t3 = Instant::now();
     // Nothing re-hashed and no path gone: the saved index is still exact.
     if report.hashed_files > 0 || new_index.entries.len() != index.entries.len() {
-        let _ = new_index.save(&store.index_path());
+        let _ = new_index.save(&store.index_path(&opts.root));
     }
     mark("index save", &t3);
     report.id = Some(id);
@@ -390,7 +393,8 @@ pub fn snapshot(
     Ok(report)
 }
 
-/// Snapshot the workspace and point `ref_name` (and `HEAD`) at it.
+/// Snapshot the workspace and point `ref_name` (and the root's head ref)
+/// at it.
 pub fn take_snapshot(
     store: &Store,
     ws: &Workspace,
@@ -401,7 +405,7 @@ pub fn take_snapshot(
     let t = Instant::now();
     let mut r = snapshot(store, ws, opts, label)?;
     store.set_ref(ref_name, &r.id())?;
-    store.set_ref("HEAD", &r.id())?;
+    store.set_ref(&opts.root.head_ref(), &r.id())?;
     r.total_ms = r.total_ms.max(t.elapsed().as_millis() as u64);
     Ok(r)
 }

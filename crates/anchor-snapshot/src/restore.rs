@@ -9,7 +9,10 @@
 //!    still holds exactly what `pre` recorded (compare-and-swap), so a file
 //!    changed by someone else meanwhile is never clobbered.
 //! 4. Verify: snapshot again; it must equal the target.
-//! 5. Point `HEAD` at the result and delete the journal.
+//! 5. Point the root's head ref at the result and delete the journal.
+//!
+//! Journals, head refs and `restore` refs belong to the root being
+//! restored ([`crate::Root`], set in [`SnapshotOptions::root`]).
 //!
 //! If any step fails, the same machinery restores `pre`. If the process
 //! dies, the journal remains and [`recover`] (run before anything else uses
@@ -52,6 +55,8 @@ struct Ctx<'s, 'a, 'b> {
     ws: &'s Workspace,
     auth: &'b mut Authorize<'a>,
     report: &'b mut RestoreReport,
+    /// Test hook: abort the process after this many operations.
+    abort_after: Option<u64>,
 }
 
 /// Symlinks cannot be created on Windows without elevation; there they are
@@ -67,12 +72,8 @@ impl Ctx<'_, '_, '_> {
 
     fn tick(&mut self, line: String) {
         self.report.ops.push(line);
-        let n = self
-            .store
-            .restore_ops
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        if self.store.fault.restore_after.is_some_and(|k| n >= k) {
+        let n = self.report.ops.len() as u64;
+        if self.abort_after.is_some_and(|k| n >= k) {
             // Test hook: die between two restore operations.
             std::process::abort();
         }
@@ -306,6 +307,7 @@ fn apply(
     to: &Id,
     auth: &mut Authorize<'_>,
     report: &mut RestoreReport,
+    abort_after: Option<u64>,
 ) -> Result<()> {
     let cur = root_of(store, from)?;
     let tgt = root_of(store, to)?;
@@ -314,6 +316,7 @@ fn apply(
         ws,
         auth,
         report,
+        abort_after,
     };
     ctx.apply_dir(Path::new(""), &cur, &tgt)
 }
@@ -327,7 +330,7 @@ fn remaining(
     want: &Id,
 ) -> Result<(Id, Vec<Change>)> {
     let now = snapshot(store, ws, opts, "verify")?;
-    store.set_ref("HEAD", &now.id())?;
+    store.set_ref(&opts.root.head_ref(), &now.id())?;
     let a = store.snapshot(&now.id())?.root;
     let b = store.snapshot(want)?.root;
     let mut out = Vec::new();
@@ -337,6 +340,7 @@ fn remaining(
 
 /// Apply `from` → `to`, then verify. On failure, return to `from`. The
 /// journal must already be written.
+#[allow(clippy::too_many_arguments)]
 fn run_with_fallback(
     store: &Store,
     ws: &Workspace,
@@ -345,8 +349,9 @@ fn run_with_fallback(
     to: &Id,
     auth: &mut Authorize<'_>,
     report: &mut RestoreReport,
+    abort_after: Option<u64>,
 ) -> Result<Id> {
-    let attempt = apply(store, ws, from, to, auth, report).and_then(|()| {
+    let attempt = apply(store, ws, from, to, auth, report, abort_after).and_then(|()| {
         let (post, diff) = remaining(store, ws, opts, to)?;
         if diff.is_empty() {
             Ok(post)
@@ -363,9 +368,12 @@ fn run_with_fallback(
             let back_result = snapshot(store, ws, opts, "restore-failed").and_then(|mid| {
                 // Keep what the workspace held at the failure, so
                 // nothing written meanwhile by anyone is lost.
-                store.set_ref(&format!("restore/{}-mid", unix_ms()), &mid.id())?;
+                store.set_ref(
+                    &opts.root.ref_name("restore", &format!("{}-mid", unix_ms())),
+                    &mid.id(),
+                )?;
                 let mut rev = RestoreReport::default();
-                apply(store, ws, &mid.id(), from, auth, &mut rev)?;
+                apply(store, ws, &mid.id(), from, auth, &mut rev, None)?;
                 report
                     .ops
                     .extend(rev.ops.into_iter().map(|o| format!("(undo) {o}")));
@@ -373,7 +381,7 @@ fn run_with_fallback(
             });
             match back_result {
                 Ok((_, d)) if d.is_empty() => {
-                    store.clear_journal()?;
+                    store.clear_journal(&opts.root)?;
                     Err(Error::RestoreFailed {
                         cause: cause.to_string(),
                         reverted: true,
@@ -474,12 +482,62 @@ pub fn restore(
     target: &Id,
     auth: &mut Authorize<'_>,
 ) -> Result<RestoreReport> {
-    if store.journal()?.is_some() {
+    restore_inner(
+        store,
+        ws,
+        opts,
+        None,
+        target,
+        auth,
+        store.fault.restore_after,
+    )
+}
+
+/// Restore to `target` only if the workspace still equals `expected_pre`
+/// (otherwise [`Error::ConcurrentChange`], with nothing touched). The merge
+/// queue uses this so a merge never silently reverts edits made to the
+/// workspace after the merge was computed.
+pub fn restore_expect(
+    store: &Store,
+    ws: &Workspace,
+    opts: &SnapshotOptions,
+    expected_pre: &Id,
+    target: &Id,
+    auth: &mut Authorize<'_>,
+) -> Result<RestoreReport> {
+    restore_inner(
+        store,
+        ws,
+        opts,
+        Some(expected_pre),
+        target,
+        auth,
+        store.fault.merge_after,
+    )
+}
+
+fn restore_inner(
+    store: &Store,
+    ws: &Workspace,
+    opts: &SnapshotOptions,
+    expected_pre: Option<&Id>,
+    target: &Id,
+    auth: &mut Authorize<'_>,
+    abort_after: Option<u64>,
+) -> Result<RestoreReport> {
+    if store.journal(&opts.root)?.is_some() {
         return Err(Error::RecoveryPending);
     }
     // Fail before touching anything if the target is unreadable.
     root_of(store, target)?;
     let mut pre = snapshot(store, ws, opts, "pre-restore")?.id();
+    if let Some(want) = expected_pre
+        && store.snapshot(&pre)?.root != store.snapshot(want)?.root
+    {
+        return Err(Error::ConcurrentChange(
+            "the workspace changed since the operation was prepared".into(),
+        ));
+    }
     // Pre-flight, read-only: everything the forward pass writes must be
     // intact, and so must everything the undo pass would need. A damaged
     // pre-restore object (a dedup hit on a corrupted object) is healed by
@@ -499,15 +557,24 @@ pub fn restore(
             }
         }
     }
-    store.set_ref(&format!("restore/{}", unix_ms()), &pre)?;
-    store.write_journal(&pre, target)?;
+    store.set_ref(&opts.root.ref_name("restore", &unix_ms().to_string()), &pre)?;
+    store.write_journal(&opts.root, &pre, target)?;
     let mut report = RestoreReport {
         pre: Some(pre),
         target: Some(*target),
         ..Default::default()
     };
-    let post = run_with_fallback(store, ws, opts, &pre, target, auth, &mut report)?;
-    store.clear_journal()?;
+    let post = run_with_fallback(
+        store,
+        ws,
+        opts,
+        &pre,
+        target,
+        auth,
+        &mut report,
+        abort_after,
+    )?;
+    store.clear_journal(&opts.root)?;
     report.post = Some(post);
     Ok(report)
 }
@@ -520,7 +587,7 @@ pub fn recover(
     opts: &SnapshotOptions,
     auth: &mut Authorize<'_>,
 ) -> Result<Option<RestoreReport>> {
-    let Some(j) = store.journal()? else {
+    let Some(j) = store.journal(&opts.root)? else {
         return Ok(None);
     };
     let pre = Id::parse(&j.pre).ok_or_else(|| Error::Corrupt("journal".into()))?;
@@ -531,7 +598,7 @@ pub fn recover(
         target: Some(pre),
         ..Default::default()
     };
-    apply(store, ws, &now, &pre, auth, &mut report)?;
+    apply(store, ws, &now, &pre, auth, &mut report, None)?;
     let (post, diff) = remaining(store, ws, opts, &pre)?;
     if !diff.is_empty() {
         return Err(Error::VerifyFailed(
@@ -539,7 +606,7 @@ pub fn recover(
         ));
     }
     let _ = target;
-    store.clear_journal()?;
+    store.clear_journal(&opts.root)?;
     report.post = Some(post);
     Ok(Some(report))
 }
@@ -571,6 +638,7 @@ pub fn materialize(
         ws,
         auth,
         report: &mut report,
+        abort_after: None,
     };
     ctx.apply_dir(Path::new(""), &TreeObj::default(), &tgt)?;
     let (post, diff) = remaining(store, ws, opts, snap)?;
