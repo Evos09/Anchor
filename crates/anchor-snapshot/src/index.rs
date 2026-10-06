@@ -84,64 +84,33 @@ impl Index {
         if Sha256::digest(body).as_slice() != sum {
             return None;
         }
-        let mut r = &body[8..];
-        let take = |r: &mut &[u8], n: usize| -> Option<Vec<u8>> {
-            if r.len() < n {
-                return None;
-            }
-            let (a, rest) = r.split_at(n);
-            *r = rest;
-            Some(a.to_vec())
-        };
-        let u32_ = |r: &mut &[u8]| take(r, 4).map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
-        let u64_ = |r: &mut &[u8]| {
-            take(r, 8).map(|v| {
-                let mut a = [0u8; 8];
-                a.copy_from_slice(&v);
-                u64::from_le_bytes(a)
-            })
-        };
-        let i128_ = |r: &mut &[u8]| {
-            take(r, 16).map(|v| {
-                let mut a = [0u8; 16];
-                a.copy_from_slice(&v);
-                i128::from_le_bytes(a)
-            })
-        };
-        let n = u32_(&mut r)? as usize;
+        let mut r = Cursor { b: &body[8..] };
+        let n = r.u32()? as usize;
         let mut entries = HashMap::with_capacity(n.min(1 << 22));
         for _ in 0..n {
-            let plen = u32_(&mut r)? as usize;
-            let path = take(&mut r, plen)?;
+            let plen = r.u32()? as usize;
+            let path = r.take(plen)?.to_vec();
             let fp = Fingerprint {
-                len: u64_(&mut r)?,
-                mtime_ns: i128_(&mut r)?,
-                ctime_ns: i128_(&mut r)?,
-                dev: u64_(&mut r)?,
-                ino: u64_(&mut r)?,
-                mode: u32_(&mut r)?,
+                len: r.u64()?,
+                mtime_ns: r.i128()?,
+                ctime_ns: r.i128()?,
+                dev: r.u64()?,
+                ino: r.u64()?,
+                mode: r.u32()?,
             };
-            let mut id = [0u8; 32];
-            id.copy_from_slice(&take(&mut r, 32)?);
-            let racy = take(&mut r, 1)?[0] != 0;
-            entries.insert(
-                path,
-                IndexEntry {
-                    fp,
-                    file: Id(id),
-                    racy,
-                },
-            );
+            let file = Id(r.take(32)?.try_into().ok()?);
+            let racy = r.take(1)?[0] != 0;
+            entries.insert(path, IndexEntry { fp, file, racy });
         }
-        if !r.is_empty() {
+        if !r.b.is_empty() {
             return None;
         }
         Some(Index { entries })
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut keys: Vec<&Vec<u8>> = self.entries.keys().collect();
-        keys.sort();
+        // Order is irrelevant for a cache; skipping the sort saves time.
+        let keys: Vec<&Vec<u8>> = self.entries.keys().collect();
         let mut w = Vec::with_capacity(16 + self.entries.len() * 128);
         w.extend_from_slice(MAGIC);
         w.extend_from_slice(&(keys.len() as u32).to_le_bytes());
@@ -169,5 +138,30 @@ impl Index {
         let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
         std::fs::write(&tmp, self.encode())?;
         std::fs::rename(&tmp, path)
+    }
+}
+
+/// Allocation-free reader over the index bytes.
+struct Cursor<'a> {
+    b: &'a [u8],
+}
+
+impl<'a> Cursor<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        if self.b.len() < n {
+            return None;
+        }
+        let (a, rest) = self.b.split_at(n);
+        self.b = rest;
+        Some(a)
+    }
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+    fn i128(&mut self) -> Option<i128> {
+        Some(i128::from_le_bytes(self.take(16)?.try_into().ok()?))
     }
 }

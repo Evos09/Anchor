@@ -261,11 +261,18 @@ pub fn snapshot(
     let scan_ms = t0.elapsed().as_millis() as u64;
 
     let t1 = Instant::now();
+    let prof = std::env::var_os("ANCHOR_SNAPSHOT_PROFILE").is_some();
+    let mark = |what: &str, t: &Instant| {
+        if prof {
+            eprintln!("  [profile] {what}: {} ms", t.elapsed().as_millis());
+        }
+    };
     let index = if opts.rehash_all {
         Index::default()
     } else {
         Index::load(&store.index_path())
     };
+    mark("index load", &t1);
     let mut report = SnapshotReport {
         scan_ms,
         ..Default::default()
@@ -282,7 +289,12 @@ pub fn snapshot(
         &mut results,
     );
 
-    let batch = store.batch();
+    mark("index load + collect", &t1);
+    let mut batch = store.batch();
+    // Unchanged trees recur in every snapshot; re-verifying each existing
+    // one on every dedup hit costs a read per directory. Content objects are
+    // always verified; trees are verified on read and when healing.
+    batch.verify_existing_trees = opts.rehash_all;
     let threads = if opts.threads == 0 {
         std::thread::available_parallelism()
             .map(|n| n.get())
@@ -335,6 +347,7 @@ pub fn snapshot(
         }
     }
 
+    mark("hash + index build", &t1);
     let root = build_tree(
         ws,
         &batch,
@@ -356,6 +369,7 @@ pub fn snapshot(
         label,
     };
     let id = batch.put(ObjType::Snapshot, &snap.encode())?;
+    mark("trees", &t1);
     report.hash_ms = t1.elapsed().as_millis() as u64;
 
     let t2 = Instant::now();
@@ -364,7 +378,12 @@ pub fn snapshot(
     report.new_bytes = bytes;
     report.publish_ms = t2.elapsed().as_millis() as u64;
     // The index may only name published objects.
-    let _ = new_index.save(&store.index_path());
+    let t3 = Instant::now();
+    // Nothing re-hashed and no path gone: the saved index is still exact.
+    if report.hashed_files > 0 || new_index.entries.len() != index.entries.len() {
+        let _ = new_index.save(&store.index_path());
+    }
+    mark("index save", &t3);
     report.id = Some(id);
     report.root = Some(root);
     report.total_ms = t0.elapsed().as_millis() as u64;
@@ -401,9 +420,8 @@ fn collect(
             continue;
         };
         let k = join_key(key, &nb);
-        let r = rel.join(&e.name);
         match &e.node {
-            ScanNode::Dir(d) => collect(d, &k, &r, index, opts, jobs, results),
+            ScanNode::Dir(d) => collect(d, &k, &rel.join(&e.name), index, opts, jobs, results),
             ScanNode::File(m) => {
                 let fp = Fingerprint::of(m);
                 if m.nlink > 1 {
@@ -422,7 +440,7 @@ fn collect(
                 } else {
                     jobs.push(Job {
                         key: k,
-                        rel: r,
+                        rel: rel.join(&e.name),
                         meta: *m,
                     });
                 }

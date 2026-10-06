@@ -32,7 +32,7 @@ jobs:
           # its TLS dependency (ring) needs a C cross-compiler; it has no
           # platform-specific code of its own beyond the cfg-gated sandbox.
           for t in x86_64-pc-windows-gnu aarch64-apple-darwin; do
-            cargo check --tests --target "$t" -p anchor-fs -p anchor-exec -p anchor-backend -p anchor-policy -p anchor-guard -p anchor-checkpoint -p anchor-protocol
+            cargo check --tests --target "$t" -p anchor-fs -p anchor-exec -p anchor-backend -p anchor-policy -p anchor-guard -p anchor-checkpoint -p anchor-protocol -p anchor-snapshot
           done
 
   supply-chain:
@@ -62,3 +62,31 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace --no-fail-fast
+
+  snapshot-bench:
+    # Spec §14 Phase 3: "a 100k-file monorepo snapshots incrementally in
+    # < 2 s, measured and published". The gate is on Linux; macOS and
+    # Windows runner I/O varies too much for a hard bound, so their numbers
+    # are reported only (docs/benchmarks/snapshot.md).
+    name: snapshot benchmark (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            gate: "--max-incremental-ms 2000"
+          - os: macos-latest
+            gate: ""
+          - os: windows-latest
+            gate: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Build
+        run: cargo build --release -p anchor-snapshot --example bench
+      - name: 100k-file benchmark
+        shell: bash
+        run: cargo run --release -p anchor-snapshot --example bench -- --files 100000 --runs 5 --summary "$GITHUB_STEP_SUMMARY" ${{ matrix.gate }}

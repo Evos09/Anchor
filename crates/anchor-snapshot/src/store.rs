@@ -311,6 +311,7 @@ impl Store {
 
     pub fn batch(&self) -> Batch<'_> {
         Batch {
+            verify_existing_trees: true,
             store: self,
             pending: Mutex::new(Vec::new()),
             seen: Mutex::new(HashSet::new()),
@@ -478,6 +479,9 @@ impl Store {
 /// New objects staged for one publication.
 #[derive(Debug)]
 pub struct Batch<'a> {
+    /// Verify an existing tree object before reusing it (content objects
+    /// are always verified).
+    pub verify_existing_trees: bool,
     store: &'a Store,
     pending: Mutex<Vec<(Id, PathBuf)>>,
     seen: Mutex<HashSet<Id>>,
@@ -498,7 +502,11 @@ impl Batch<'_> {
         }
         // An existing object is trusted only if it still verifies; a
         // damaged one is replaced by this fresh copy on publish.
-        if self.store.has(&id) && self.store.read_raw(&id).is_ok_and(|(t, _)| t == ty) {
+        let trusted = |s: &Store| {
+            (ty == ObjType::Tree && !self.verify_existing_trees)
+                || s.read_raw(&id).is_ok_and(|(t, _)| t == ty)
+        };
+        if self.store.has(&id) && trusted(self.store) {
             return Ok(id);
         }
         let tmp = self.store.dir.join("tmp").join(format!(
