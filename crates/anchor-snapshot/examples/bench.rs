@@ -147,7 +147,10 @@ fn hardware() -> Vec<(String, String)> {
     ];
     if let Ok(c) = fs::read_to_string("/proc/cpuinfo") {
         if let Some(l) = c.lines().find(|l| l.starts_with("model name")) {
-            h.push(("cpu".into(), l.split(':').nth(1).unwrap_or("").trim().into()));
+            h.push((
+                "cpu".into(),
+                l.split(':').nth(1).unwrap_or("").trim().into(),
+            ));
         }
     }
     if let Ok(out) = std::process::Command::new("sysctl")
@@ -300,7 +303,11 @@ fn main() {
     rows.push(("incremental, 100 files changed".into(), hundred, d1));
     let pct = (a.files / 100).max(1);
     let (one_pct, d2) = measure("1% changed", pct, &mut rng);
-    rows.push((format!("incremental, {pct} files (1%) changed"), one_pct, d2));
+    rows.push((
+        format!("incremental, {pct} files (1%) changed"),
+        one_pct,
+        d2,
+    ));
 
     // Restore: undo 100 changed files.
     let mut rtimes = Vec::new();
