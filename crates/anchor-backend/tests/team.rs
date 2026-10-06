@@ -269,7 +269,8 @@ fn two_agents_of_different_families_collaborate() {
             .any(|e| e.kind == "decision" && e.data["agent"] == "beta")
     );
     // Isolated workspaces are gone once merged.
-    let base = iso::iso_base(&fx.state_base(), &fx.ws);
+    // Keyed by the canonical root (on Windows a `\\?\` path), as the runner does.
+    let base = iso::iso_base(&fx.state_base(), opened.mediator.workspace().root());
     assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
 }
 
@@ -395,7 +396,7 @@ fn iso_agent(q: &mut MergeQueue<'_>, fx: &Fx, name: &str, within: &[&str]) -> (i
         &store,
         main.snapshot_options(),
         main.engine(),
-        &iso::iso_base(&fx.state_base(), &fx.ws),
+        &iso::iso_base(&fx.state_base(), main.workspace().root()),
         iso::root_for(g.id),
         &base,
     )
