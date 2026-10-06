@@ -154,6 +154,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "anchor-verify"
+version = "0.1.0"
+dependencies = [
+ "anchor-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

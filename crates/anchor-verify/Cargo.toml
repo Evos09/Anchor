@@ -1,0 +1,15 @@
+[package]
+name = "anchor-verify"
+description = "Verification pipeline logic (spec §8): test-runner and coverage parsers, claim resolution, the rule-based reviewer and the merge decision. Pure: no I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anchor-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

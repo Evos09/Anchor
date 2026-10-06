@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 mod messages;
 pub use messages::*;
 pub mod roles;
+pub mod verify;
 
 /// Wire protocol version. Bump on any incompatible change.
 /// Version 2 (Phase 4) added hub tools ([`ToolRequest::Hub`]) and
