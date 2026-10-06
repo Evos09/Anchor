@@ -77,7 +77,7 @@ struct MatchDef {
 }
 
 /// A compiled rule. All specified conditions must hold (logical AND).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Rule {
     pub name: String,
     pub action: Action,
@@ -158,7 +158,7 @@ impl Rule {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Policy {
     default: Action,
     rules: Vec<Rule>,

@@ -4,9 +4,14 @@
 //! entry (`prev`) and its own hash (`hash`), computed over the canonical JSON
 //! encoding of `{seq, ts_ms, kind, data, prev}`. Editing, deleting or
 //! reordering any line breaks the chain, which [`AuditLog::verify`] detects.
+//!
+//! Several processes may append to one log (the Hub CLI next to a running
+//! team, ADR-0023). Each append holds an exclusive lock on `<log>.lock`,
+//! verifies and adopts any entries other processes appended since, then
+//! writes, so the chain stays linear.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -65,8 +70,17 @@ fn entry_hash(seq: u64, ts_ms: u64, kind: &str, data: &serde_json::Value, prev: 
 #[derive(Debug)]
 struct Tail {
     file: File,
+    lock: File,
+    /// Length of the log as of our last read or write.
+    len: u64,
     next_seq: u64,
     prev: String,
+}
+
+fn lock_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".lock");
+    PathBuf::from(s)
 }
 
 #[derive(Debug)]
@@ -92,11 +106,23 @@ impl AuditLog {
         } else {
             (0, GENESIS.to_string())
         };
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(path)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path(path))?;
+        let len = file.metadata()?.len();
         Ok(AuditLog {
             path: path.to_path_buf(),
             tail: Mutex::new(Tail {
                 file,
+                lock,
+                len,
                 next_seq,
                 prev,
             }),
@@ -109,6 +135,15 @@ impl AuditLog {
 
     /// Append an entry and fsync. Returns its sequence number.
     pub fn append(&self, kind: &str, data: serde_json::Value) -> Result<u64, AuditError> {
+        self.append_hashed(kind, data).map(|(seq, _)| seq)
+    }
+
+    /// Append an entry and fsync. Returns its sequence number and hash.
+    pub fn append_hashed(
+        &self,
+        kind: &str,
+        data: serde_json::Value,
+    ) -> Result<(u64, String), AuditError> {
         let mut tail = match self.tail.lock() {
             Ok(t) => t,
             Err(p) => p.into_inner(),
@@ -117,6 +152,19 @@ impl AuditLog {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        tail.lock.lock()?;
+        let r = Self::append_locked(&mut tail, ts_ms, kind, data);
+        let _ = tail.lock.unlock();
+        r
+    }
+
+    fn append_locked(
+        tail: &mut Tail,
+        ts_ms: u64,
+        kind: &str,
+        data: serde_json::Value,
+    ) -> Result<(u64, String), AuditError> {
+        Self::adopt_foreign(tail)?;
         let seq = tail.next_seq;
         let hash = entry_hash(seq, ts_ms, kind, &data, &tail.prev);
         let entry = AuditEntry {
@@ -132,9 +180,60 @@ impl AuditLog {
         line.push('\n');
         tail.file.write_all(line.as_bytes())?;
         tail.file.sync_data()?;
+        tail.len += line.len() as u64;
         tail.next_seq += 1;
-        tail.prev = hash;
-        Ok(seq)
+        tail.prev = hash.clone();
+        Ok((seq, hash))
+    }
+
+    /// Verify and adopt entries appended by other processes since our last
+    /// read or write. Called with the lock held.
+    fn adopt_foreign(tail: &mut Tail) -> Result<(), AuditError> {
+        let len = tail.file.metadata()?.len();
+        if len == tail.len {
+            return Ok(());
+        }
+        if len < tail.len {
+            return Err(AuditError::Corrupt {
+                line: tail.next_seq,
+                msg: "log shrank while open (truncated)".into(),
+            });
+        }
+        let mut buf = Vec::with_capacity((len - tail.len) as usize);
+        let mut f = &tail.file;
+        f.seek(SeekFrom::Start(tail.len))?;
+        f.take(len - tail.len).read_to_end(&mut buf)?;
+        let text = std::str::from_utf8(&buf).map_err(|_| AuditError::Corrupt {
+            line: tail.next_seq,
+            msg: "foreign append is not UTF-8".into(),
+        })?;
+        for l in text.lines() {
+            let line = tail.next_seq + 1;
+            let e: AuditEntry = serde_json::from_str(l).map_err(|e| AuditError::Corrupt {
+                line,
+                msg: e.to_string(),
+            })?;
+            let h = entry_hash(e.seq, e.ts_ms, &e.kind, &e.data, &e.prev);
+            if e.seq != tail.next_seq || e.prev != tail.prev || h != e.hash {
+                return Err(AuditError::Corrupt {
+                    line,
+                    msg: "foreign append does not extend the chain".into(),
+                });
+            }
+            tail.next_seq += 1;
+            tail.prev = e.hash;
+        }
+        tail.len = len;
+        Ok(())
+    }
+
+    /// The `(seq, hash)` of the last entry this handle knows about.
+    pub fn head(&self) -> (Option<u64>, String) {
+        let tail = match self.tail.lock() {
+            Ok(t) => t,
+            Err(p) => p.into_inner(),
+        };
+        (tail.next_seq.checked_sub(1), tail.prev.clone())
     }
 
     pub fn read_entries(path: &Path) -> Result<Vec<AuditEntry>, AuditError> {

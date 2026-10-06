@@ -19,8 +19,8 @@
 //! constructor is private to this crate, so no mutation can bypass the engine.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -212,6 +212,10 @@ pub enum Responder {
 pub enum UserAction {
     Rollback,
     MarkNotAppendOnly,
+    /// Integrate an agent's isolated work into the main workspace.
+    Merge,
+    /// Undo one merge (spec §7.3).
+    RevertMerge,
 }
 
 #[derive(Debug)]
@@ -227,8 +231,13 @@ pub struct Engine {
     policy_path: Option<PathBuf>,
     home: PathBuf,
     state: Mutex<PolicyState>,
-    audit: AuditLog,
-    next_decision: AtomicU64,
+    audit: Arc<AuditLog>,
+    /// Shared by every engine made with [`Engine::for_agent`], so decision
+    /// ids stay unique within one process's share of the chain.
+    next_decision: Arc<AtomicU64>,
+    /// The agent this engine decides for (multi-agent runs); recorded in
+    /// every audit entry it writes.
+    agent: Option<String>,
     /// Extra floor-protected directories (the backend's state directory,
     /// which lives outside the workspace). Canonical paths.
     protected: Vec<PathBuf>,
@@ -270,8 +279,9 @@ impl Engine {
                 source_hash: Some(hash.clone()),
                 last_failed_hash: None,
             }),
-            audit,
-            next_decision: AtomicU64::new(1),
+            audit: Arc::new(audit),
+            next_decision: Arc::new(AtomicU64::new(1)),
+            agent: None,
             protected: Vec::new(),
         };
         engine.audit.append(
@@ -291,10 +301,52 @@ impl Engine {
                 source_hash: None,
                 last_failed_hash: None,
             }),
-            audit,
-            next_decision: AtomicU64::new(1),
+            audit: Arc::new(audit),
+            next_decision: Arc::new(AtomicU64::new(1)),
+            agent: None,
             protected: Vec::new(),
         }
+    }
+
+    /// An engine for one agent of a multi-agent run. It shares this engine's
+    /// policy source, audit chain, decision counter and protected
+    /// directories, and tags its audit entries with `agent`.
+    pub fn for_agent(&self, agent: &str) -> Engine {
+        let state = match self.state.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        Engine {
+            policy_path: self.policy_path.clone(),
+            home: self.home.clone(),
+            state: Mutex::new(PolicyState {
+                policy: state.policy.clone(),
+                source_hash: state.source_hash.clone(),
+                last_failed_hash: state.last_failed_hash.clone(),
+            }),
+            audit: Arc::clone(&self.audit),
+            next_decision: Arc::clone(&self.next_decision),
+            agent: Some(agent.to_string()),
+            protected: self.protected.clone(),
+        }
+    }
+
+    pub fn agent(&self) -> Option<&str> {
+        self.agent.as_deref()
+    }
+
+    /// The shared audit log handle.
+    pub fn audit_arc(&self) -> Arc<AuditLog> {
+        Arc::clone(&self.audit)
+    }
+
+    /// Append to the audit log, adding the engine's agent (if any) to an
+    /// object payload.
+    pub fn log(&self, kind: &str, mut data: serde_json::Value) -> Result<u64, AuditError> {
+        if let (Some(a), Some(obj)) = (&self.agent, data.as_object_mut()) {
+            obj.insert("agent".into(), serde_json::Value::String(a.clone()));
+        }
+        self.audit.append(kind, data)
     }
 
     /// Add a directory that no request may target, for any tool (including
@@ -389,7 +441,7 @@ impl Engine {
             self.refresh(&mut state);
             self.eval(&state.policy, req)
         };
-        let logged = self.audit.append(
+        let logged = self.log(
             "decision",
             serde_json::json!({
                 "decision_id": decision_id,
@@ -451,7 +503,7 @@ impl Engine {
         response: UserResponse,
         responder: Responder,
     ) -> Result<Approved, Denial> {
-        let logged = self.audit.append(
+        let logged = self.log(
             "prompt_response",
             serde_json::json!({
                 "decision_id": prompt.decision_id,
@@ -487,7 +539,7 @@ impl Engine {
     ) -> Result<Approved, Denial> {
         let decision_id = self.next_decision.fetch_add(1, Ordering::SeqCst);
         let floor = capability_floor(req).or_else(|| self.protected_floor(req));
-        let logged = self.audit.append(
+        let logged = self.log(
             "user_initiated",
             serde_json::json!({
                 "decision_id": decision_id,

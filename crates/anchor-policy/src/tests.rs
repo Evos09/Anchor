@@ -480,6 +480,78 @@ fn audit_reopen_continues_chain() {
     assert_eq!(AuditLog::verify(&path).unwrap(), 2);
 }
 
+/// Two handles on one log (as two processes would hold) interleave appends
+/// without forking the chain.
+#[test]
+fn concurrent_handles_keep_one_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.jsonl");
+    let a = std::sync::Arc::new(AuditLog::open(&path).unwrap());
+    let b = std::sync::Arc::new(AuditLog::open(&path).unwrap());
+    let threads: Vec<_> = [a.clone(), b.clone()]
+        .into_iter()
+        .enumerate()
+        .map(|(i, log)| {
+            std::thread::spawn(move || {
+                for n in 0..50 {
+                    log.append("x", serde_json::json!({"h": i, "n": n}))
+                        .unwrap();
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    assert_eq!(AuditLog::verify(&path).unwrap(), 100);
+    // A handle opened earlier adopts the other's appends.
+    let (seq, _) = a.append_hashed("y", serde_json::json!({})).unwrap();
+    assert_eq!(seq, 100);
+    assert_eq!(a.head().0, Some(100));
+}
+
+#[test]
+fn foreign_truncation_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.jsonl");
+    let a = AuditLog::open(&path).unwrap();
+    a.append("x", serde_json::json!({"n": 1})).unwrap();
+    a.append("x", serde_json::json!({"n": 2})).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let first = text.lines().next().unwrap().len() + 1;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(first as u64)
+        .unwrap();
+    assert!(a.append("x", serde_json::json!({"n": 3})).is_err());
+}
+
+#[test]
+fn agent_engine_tags_entries_and_shares_counter() {
+    let (e, dir) = engine_with(DEFAULT_POLICY);
+    let a = e.for_agent("alpha");
+    let r = req(
+        Tool::ReadFile,
+        Operation::Read,
+        "/home/dev/project/src/x.rs",
+    );
+    let id1 = match e.decide(&r) {
+        Decision::Allow(ap) => ap.decision_id(),
+        other => panic!("{other:?}"),
+    };
+    let id2 = match a.decide(&r) {
+        Decision::Allow(ap) => ap.decision_id(),
+        other => panic!("{other:?}"),
+    };
+    assert_ne!(id1, id2);
+    let entries = AuditLog::read_entries(&dir.path().join("audit.jsonl")).unwrap();
+    let last = entries.last().unwrap();
+    assert_eq!(last.data["agent"], "alpha");
+    assert!(entries[entries.len() - 2].data.get("agent").is_none());
+}
+
 /// Spec §5.2(b), verified by instrumentation: the request schema contains no
 /// free-text field. If someone adds e.g. `user_prompt: String`, this test
 /// fails and forces a review.
