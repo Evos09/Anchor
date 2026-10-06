@@ -1,1 +1,56 @@
-fn main() {}
+//! `anchor-agent`: the Layer 2 runtime process. Spawned by the backend; talks
+//! NDJSON over stdin/stdout. Diagnostics go to stderr.
+
+use std::io::{BufReader, stdin, stdout};
+use std::process::ExitCode;
+use std::time::Duration;
+
+use anchor_runtime::agent::{StdioTransport, default_factory, run_session};
+use anchor_runtime::provider::detect_local_servers;
+use anchor_runtime::sandbox::{SandboxStatus, restrict_self};
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("--detect-local") => {
+            for s in detect_local_servers(Duration::from_millis(300)) {
+                println!("{}\t{}", s.base_url, s.models.join(","));
+            }
+            return ExitCode::SUCCESS;
+        }
+        Some("--selftest-fs-denied") => return selftest(),
+        Some(other) => {
+            eprintln!("anchor-agent: unknown argument {other:?}");
+            return ExitCode::from(2);
+        }
+        None => {}
+    }
+    let status = restrict_self();
+    eprintln!("anchor-agent: filesystem sandbox: {status:?}");
+    let mut t = StdioTransport::new(BufReader::new(stdin().lock()), stdout().lock());
+    let factory = default_factory();
+    match run_session(&mut t, &*factory) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("anchor-agent: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Apply the sandbox, then try to read and write a path given on stdin's
+/// first line. Prints `DENIED` or `ALLOWED` for each. Used by the backend's
+/// integration tests to verify the runtime has no filesystem authority.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+fn selftest() -> ExitCode {
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    let target = line.trim().to_string();
+    let status = restrict_self();
+    println!("sandbox {}", if status == SandboxStatus::FullyEnforced { "enforced" } else { "not-enforced" });
+    let read = std::fs::read(&target).is_ok();
+    let write = std::fs::write(format!("{target}.agent-write"), b"x").is_ok();
+    println!("read {}", if read { "ALLOWED" } else { "DENIED" });
+    println!("write {}", if write { "ALLOWED" } else { "DENIED" });
+    ExitCode::SUCCESS
+}

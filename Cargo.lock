@@ -110,6 +110,7 @@ dependencies = [
 name = "anchor-runtime"
 version = "0.1.0"
 dependencies = [
+ "anchor-checkpoint",
  "anchor-protocol",
  "landlock",
  "serde",

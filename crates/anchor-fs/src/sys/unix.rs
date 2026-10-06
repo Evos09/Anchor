@@ -27,6 +27,8 @@ fn io(e: Errno) -> FsError {
     FsError::Io(std::io::Error::from(e).to_string())
 }
 
+// Field widths differ between Linux and macOS; the casts are needed there.
+#[allow(clippy::unnecessary_cast)]
 fn meta_of(st: &rfs::Stat) -> Meta {
     let kind = match FileType::from_raw_mode(st.st_mode as _) {
         FileType::RegularFile => Kind::File,

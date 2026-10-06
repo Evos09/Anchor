@@ -1,0 +1,22 @@
+allow-unwrap-in-tests = true
+
+# The agent runtime has no filesystem or shell authority (spec §4, Layer 2).
+# Any direct use of these APIs in this crate is a CI failure.
+disallowed-methods = [
+  { path = "std::fs::read", reason = "Layer 2 has no filesystem authority" },
+  { path = "std::fs::read_to_string", reason = "Layer 2 has no filesystem authority" },
+  { path = "std::fs::write", reason = "Layer 2 has no filesystem authority" },
+  { path = "std::fs::remove_file", reason = "Layer 2 has no filesystem authority" },
+  { path = "std::fs::remove_dir_all", reason = "Layer 2 has no filesystem authority" },
+  { path = "std::fs::create_dir_all", reason = "Layer 2 has no filesystem authority" },
+  { path = "std::fs::rename", reason = "Layer 2 has no filesystem authority" },
+  { path = "std::fs::copy", reason = "Layer 2 has no filesystem authority" },
+  { path = "std::fs::read_dir", reason = "Layer 2 has no filesystem authority" },
+  { path = "std::fs::OpenOptions::open", reason = "Layer 2 has no filesystem authority" },
+  { path = "std::fs::File::open", reason = "Layer 2 has no filesystem authority" },
+  { path = "std::fs::File::create", reason = "Layer 2 has no filesystem authority" },
+  { path = "std::process::Command::new", reason = "Layer 2 has no shell authority" },
+]
+disallowed-types = [
+  { path = "std::process::Command", reason = "Layer 2 has no shell authority" },
+]
