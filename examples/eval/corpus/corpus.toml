@@ -1,0 +1,12 @@
+# The seeded-bug corpus (spec §8.5): what every task's changes are verified
+# with. Same keys as a team's [verify]; the reviewer is chosen on the
+# command line (`anchor eval run --reviewer ...`).
+[verify]
+build = ["python3", "-I", "-m", "compileall", "-q", "."]
+test = ["python3", "-I", "-m", "unittest", "discover", "-v"]
+coverage = ["python3", "-I", "-m", "trace", "--count", "--missing",
+            "--coverdir", "{coverdir}",
+            "--ignore-dir", "$prefix", "--ignore-dir", "$exec_prefix",
+            "--module", "unittest", "discover"]
+protected = ["tests/**"]
+timeout_secs = 120

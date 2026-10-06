@@ -1,0 +1,17 @@
+instruction = "Implement clamp(x, lo, hi) in numeric.py: return x limited to [lo, hi]; raise ValueError if lo > hi."
+
+[[bug]]
+name = "high_returns_lo"
+category = "visible_test_failure"
+
+[[bug]]
+name = "equal_bounds_unchecked"
+category = "uncovered_branch"
+
+[[bug]]
+name = "vacuous_tests_off_by_one"
+category = "vacuous_test"
+
+[[bug]]
+name = "boundary_semantic"
+category = "semantic"

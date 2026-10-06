@@ -981,7 +981,7 @@ impl MergeGate for VerifyGate {
 }
 
 /// Model usage of review sessions.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct ReviewUsage {
     pub sessions: u64,
     pub tokens_in: u64,

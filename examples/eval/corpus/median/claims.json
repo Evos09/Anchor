@@ -1,0 +1,14 @@
+[
+  {
+    "id": "c1",
+    "text": "Implement median(values) in stats.py: the middle value of the sorted values (the mean of the two middle ones for an even count); raise ValueError for no values.",
+    "files": [
+      "stats.py"
+    ],
+    "tests": [
+      "tests.test_median.TargetTest.test_odd",
+      "tests.test_median.TargetTest.test_even",
+      "tests.test_median.TargetTest.test_empty"
+    ]
+  }
+]

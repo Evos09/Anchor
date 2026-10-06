@@ -1,0 +1,13 @@
+[
+  {
+    "id": "c1",
+    "text": "Implement gcd(a, b) in arith.py: the greatest common divisor of two integers, always non-negative; gcd(0, 0) is 0.",
+    "files": [
+      "arith.py"
+    ],
+    "tests": [
+      "tests.test_gcd.TargetTest.test_basic",
+      "tests.test_gcd.TargetTest.test_signs_and_zero"
+    ]
+  }
+]

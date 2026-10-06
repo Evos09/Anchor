@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod evalcli;
 mod hubcli;
 
 use anchor_backend::interact::{Interaction, Scripted, Terminal};
@@ -53,6 +54,15 @@ USAGE:
   anchor hub log | verify --workspace DIR
   anchor hub artifacts [--prefix GROUP] --workspace DIR   verification evidence
   anchor hub show EVIDENCE_PATH --workspace DIR          print one evidence file
+
+  anchor eval run --corpus DIR [options]   seeded-bug harness (spec §8.5)
+      --reviewer R           rule (default), model, accept-all or oracle
+      --reviewer-roles FILE  roles of the model reviewer (review route)
+      --executor-roles FILE  refuse a model reviewer of these families
+      --mock-reviewer FILE   scripted reviewer model (tests, demos)
+      --only T1,T2           only these tasks
+      --json FILE | --md FILE  write the report
+      --max-fn-rate X        exit 1 if the false-negative rate exceeds X (0..1)
 
 Per-workspace state (policy, audit log, checkpoints, snapshots) lives outside
 the workspace, under $ANCHOR_STATE_DIR or the per-user state directory.
@@ -491,6 +501,7 @@ fn main() -> ExitCode {
         Some("team") => hubcli::cmd_team(&a),
         Some("hub") => hubcli::cmd_hub(&a),
         Some("queue") => hubcli::cmd_queue(&a),
+        Some("eval") => evalcli::cmd_eval(&a),
         _ => {
             print!("{USAGE}");
             return ExitCode::from(2);

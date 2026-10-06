@@ -1,0 +1,13 @@
+[
+  {
+    "id": "c1",
+    "text": "Implement binary_search(items, target) in search.py: the index of target in the sorted list items, or -1.",
+    "files": [
+      "search.py"
+    ],
+    "tests": [
+      "tests.test_binary_search.TargetTest.test_found",
+      "tests.test_binary_search.TargetTest.test_missing"
+    ]
+  }
+]

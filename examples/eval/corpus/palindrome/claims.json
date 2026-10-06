@@ -1,0 +1,13 @@
+[
+  {
+    "id": "c1",
+    "text": "Implement is_palindrome(s) in strings.py: True if s reads the same backwards, ignoring case and anything that is not a letter or digit.",
+    "files": [
+      "strings.py"
+    ],
+    "tests": [
+      "tests.test_is_palindrome.TargetTest.test_simple",
+      "tests.test_is_palindrome.TargetTest.test_ignores_case_and_punctuation"
+    ]
+  }
+]

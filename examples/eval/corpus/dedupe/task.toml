@@ -1,0 +1,17 @@
+instruction = "Implement dedupe(items) in seqs.py: the items without repeats, keeping the first occurrence of each, in order."
+
+[[bug]]
+name = "sorted_output"
+category = "visible_test_failure"
+
+[[bug]]
+name = "keeps_last"
+category = "vacuous_test"
+
+[[bug]]
+name = "unclaimed_helper"
+category = "unclaimed_file"
+
+[[bug]]
+name = "long_input_branch"
+category = "uncovered_branch"

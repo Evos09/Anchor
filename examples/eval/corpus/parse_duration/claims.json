@@ -1,0 +1,13 @@
+[
+  {
+    "id": "c1",
+    "text": "Implement parse_duration(s) in durations.py: seconds in strings like '1h30m', '45s', '2h5s' (units h, m, s, each at most once, in that order); raise ValueError for anything else.",
+    "files": [
+      "durations.py"
+    ],
+    "tests": [
+      "tests.test_parse_duration.TargetTest.test_parse",
+      "tests.test_parse_duration.TargetTest.test_invalid"
+    ]
+  }
+]

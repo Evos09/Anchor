@@ -1,0 +1,17 @@
+instruction = "Implement to_roman(n) in roman.py for 1 <= n <= 3999 (subtractive notation); raise ValueError outside that range."
+
+[[bug]]
+name = "no_subtractive"
+category = "visible_test_failure"
+
+[[bug]]
+name = "upper_bound_branch"
+category = "uncovered_branch"
+
+[[bug]]
+name = "skip_existing_test"
+category = "test_tampering"
+
+[[bug]]
+name = "forty_four"
+category = "semantic"

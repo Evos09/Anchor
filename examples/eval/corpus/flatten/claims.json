@@ -1,0 +1,13 @@
+[
+  {
+    "id": "c1",
+    "text": "Implement flatten(items) in lists.py: a flat list of all non-list elements of arbitrarily nested lists, in order.",
+    "files": [
+      "lists.py"
+    ],
+    "tests": [
+      "tests.test_flatten.TargetTest.test_flat",
+      "tests.test_flatten.TargetTest.test_nested"
+    ]
+  }
+]

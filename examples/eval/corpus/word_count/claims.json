@@ -1,0 +1,13 @@
+[
+  {
+    "id": "c1",
+    "text": "Implement word_count(text) in text.py: a dict of lower-cased words (runs of letters, digits or apostrophes) to their counts.",
+    "files": [
+      "text.py"
+    ],
+    "tests": [
+      "tests.test_word_count.TargetTest.test_simple",
+      "tests.test_word_count.TargetTest.test_case_and_punctuation"
+    ]
+  }
+]

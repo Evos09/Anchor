@@ -1,0 +1,15 @@
+[
+  {
+    "id": "c1",
+    "text": "Implement clamp(x, lo, hi) in numeric.py: return x limited to [lo, hi]; raise ValueError if lo > hi.",
+    "files": [
+      "numeric.py"
+    ],
+    "tests": [
+      "tests.test_clamp.TargetTest.test_inside",
+      "tests.test_clamp.TargetTest.test_low",
+      "tests.test_clamp.TargetTest.test_high",
+      "tests.test_clamp.TargetTest.test_bad_range"
+    ]
+  }
+]

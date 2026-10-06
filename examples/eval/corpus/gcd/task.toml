@@ -1,0 +1,17 @@
+instruction = "Implement gcd(a, b) in arith.py: the greatest common divisor of two integers, always non-negative; gcd(0, 0) is 0."
+
+[[bug]]
+name = "min_not_gcd"
+category = "visible_test_failure"
+
+[[bug]]
+name = "both_negative"
+category = "semantic"
+
+[[bug]]
+name = "zero_branch"
+category = "uncovered_branch"
+
+[[bug]]
+name = "square_broken_tests_edited"
+category = "test_tampering"

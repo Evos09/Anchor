@@ -1,0 +1,14 @@
+[
+  {
+    "id": "c1",
+    "text": "Implement fizzbuzz(n) in fizz.py: 'Fizz' for multiples of 3, 'Buzz' for 5, 'FizzBuzz' for both, else str(n). Raise ValueError for n < 1.",
+    "files": [
+      "fizz.py"
+    ],
+    "tests": [
+      "tests.test_fizzbuzz.TargetTest.test_numbers",
+      "tests.test_fizzbuzz.TargetTest.test_fizz_buzz",
+      "tests.test_fizzbuzz.TargetTest.test_invalid"
+    ]
+  }
+]

@@ -1,0 +1,17 @@
+instruction = "Implement word_count(text) in text.py: a dict of lower-cased words (runs of letters, digits or apostrophes) to their counts."
+
+[[bug]]
+name = "case_sensitive"
+category = "visible_test_failure"
+
+[[bug]]
+name = "tokenizer_unclaimed"
+category = "unclaimed_file"
+
+[[bug]]
+name = "digits_dropped"
+category = "semantic"
+
+[[bug]]
+name = "exit_in_module"
+category = "spoofed_exit"

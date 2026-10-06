@@ -1,0 +1,17 @@
+instruction = "Implement is_palindrome(s) in strings.py: True if s reads the same backwards, ignoring case and anything that is not a letter or digit."
+
+[[bug]]
+name = "case_sensitive"
+category = "visible_test_failure"
+
+[[bug]]
+name = "short_string_branch"
+category = "uncovered_branch"
+
+[[bug]]
+name = "digits_ignored"
+category = "semantic"
+
+[[bug]]
+name = "existing_test_edited"
+category = "test_tampering"

@@ -1,0 +1,17 @@
+instruction = "Implement fizzbuzz(n) in fizz.py: 'Fizz' for multiples of 3, 'Buzz' for 5, 'FizzBuzz' for both, else str(n). Raise ValueError for n < 1."
+
+[[bug]]
+name = "order_wrong"
+category = "visible_test_failure"
+
+[[bug]]
+name = "helper_in_unclaimed_file"
+category = "unclaimed_file"
+
+[[bug]]
+name = "exit_before_tests"
+category = "spoofed_exit"
+
+[[bug]]
+name = "fizzbuzz_45"
+category = "semantic"
