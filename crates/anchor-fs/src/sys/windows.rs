@@ -29,11 +29,12 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
     FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, GetFinalPathNameByHandleW,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, REPLACEFILE_WRITE_THROUGH, ReplaceFileW,
-    VOLUME_NAME_DOS,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, REPLACEFILE_WRITE_THROUGH,
+    RemoveDirectoryW, ReplaceFileW, VOLUME_NAME_DOS,
 };
 
-use crate::{DirEntryInfo, Expect, FileId, FsError, Kind, MAX_READ_BYTES, Meta};
+use crate::scan::{ScanDir, ScanEntry, ScanNode, ScanOptions, child, same_scanned_version};
+use crate::{DirEntryInfo, Expect, FileId, FsError, Kind, MAX_READ_BYTES, MAX_SCAN_DEPTH, Meta};
 
 #[derive(Debug)]
 pub(crate) struct Root {
@@ -118,7 +119,7 @@ fn final_path(h: &OwnedHandle) -> Result<PathBuf, FsError> {
     Ok(PathBuf::from(stripped))
 }
 
-fn info(h: &OwnedHandle) -> Result<(Meta, u32), FsError> {
+fn info(h: &impl AsRawHandle) -> Result<(Meta, u32), FsError> {
     // SAFETY: zeroed is a valid bit pattern for this plain-data struct.
     let mut i: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: `i` is a valid out-pointer.
@@ -127,7 +128,7 @@ fn info(h: &OwnedHandle) -> Result<(Meta, u32), FsError> {
     }
     let attrs = i.dwFileAttributes;
     let kind = if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        Kind::Other
+        Kind::Symlink
     } else if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
         Kind::Dir
     } else {
@@ -142,13 +143,24 @@ fn info(h: &OwnedHandle) -> Result<(Meta, u32), FsError> {
             kind,
             nlink: i.nNumberOfLinks as u64,
             len: ((i.nFileSizeHigh as u64) << 32) | i.nFileSizeLow as u64,
-            ctime_ns: ((((i.ftLastWriteTime.dwHighDateTime as u64) << 32)
-                | i.ftLastWriteTime.dwLowDateTime as u64) as i128)
-                * 100,
+            ctime_ns: filetime_ns(
+                ((i.ftLastWriteTime.dwHighDateTime as u64) << 32)
+                    | i.ftLastWriteTime.dwLowDateTime as u64,
+            ),
+            mtime_ns: filetime_ns(
+                ((i.ftLastWriteTime.dwHighDateTime as u64) << 32)
+                    | i.ftLastWriteTime.dwLowDateTime as u64,
+            ),
             mode: 0,
         },
         attrs,
     ))
+}
+
+/// FILETIME (100 ns ticks) to ns. Windows has no inode change time; the
+/// last-write time stands in for both ctime and mtime.
+fn filetime_ns(t: u64) -> i128 {
+    t as i128 * 100
 }
 
 pub(crate) fn names_equivalent(a: &OsStr, b: &OsStr) -> bool {
@@ -308,6 +320,7 @@ pub(crate) fn write_atomic(
     name: &OsStr,
     content: &[u8],
     expect: &Expect,
+    _mode: Option<u32>,
 ) -> Result<(), FsError> {
     let (_dir, dmeta) = open_strict(root_path, base_rel, FILE_READ_ATTRIBUTES)?;
     if dmeta.kind != Kind::Dir {
@@ -458,11 +471,22 @@ pub(crate) fn remove_strict(
     expected: &Meta,
 ) -> Result<(), FsError> {
     let rel = parent_rel.join(name);
-    let (h, meta) = open_strict(root_path, &rel, FILE_READ_ATTRIBUTES)?;
-    if meta.kind != Kind::File {
+    let (h, meta) = if expected.kind == Kind::Symlink {
+        let h = open_handle(
+            &root_path.join(&rel),
+            FILE_READ_ATTRIBUTES,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            OPEN_EXISTING,
+        )?;
+        let (m, _) = info(&h)?;
+        (h, m)
+    } else {
+        open_strict(root_path, &rel, FILE_READ_ATTRIBUTES)?
+    };
+    if !matches!(meta.kind, Kind::File | Kind::Symlink) {
         return Err(FsError::NotAFile);
     }
-    if !meta.same_version(expected) {
+    if meta.kind != expected.kind || !meta.same_version(expected) {
         return Err(FsError::Changed);
     }
     drop(h);
@@ -470,6 +494,227 @@ pub(crate) fn remove_strict(
     // SAFETY: NUL-terminated wide string.
     if unsafe { DeleteFileW(w.as_ptr()) } == 0 {
         return Err(FsError::Io(last_err().to_string()));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot support: scanning and exact (no-follow) operations.
+// ---------------------------------------------------------------------------
+
+fn meta_of_std(m: &std::fs::Metadata) -> Meta {
+    use std::os::windows::fs::MetadataExt;
+    let ft = m.file_type();
+    let kind = if ft.is_symlink() || m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        Kind::Symlink
+    } else if ft.is_dir() {
+        Kind::Dir
+    } else if ft.is_file() {
+        Kind::File
+    } else {
+        Kind::Other
+    };
+    let t = filetime_ns(m.last_write_time());
+    Meta {
+        // The stable std API exposes no file index; the scan compares
+        // size and times instead, and `open_scanned` reads the real id.
+        id: FileId { dev: 0, ino: 0 },
+        kind,
+        nlink: 1,
+        len: m.file_size(),
+        ctime_ns: t,
+        mtime_ns: t,
+        mode: 0,
+    }
+}
+
+pub(crate) fn scan(
+    _root: &Root,
+    root_path: &Path,
+    opts: &ScanOptions<'_>,
+    count: &mut usize,
+) -> Result<ScanDir, FsError> {
+    let (_h, meta) = open_strict(root_path, Path::new(""), FILE_READ_ATTRIBUTES)?;
+    scan_dir(root_path, Path::new(""), meta, 0, opts, count)
+}
+
+fn scan_dir(
+    root_path: &Path,
+    rel: &Path,
+    meta: Meta,
+    depth: usize,
+    opts: &ScanOptions<'_>,
+    count: &mut usize,
+) -> Result<ScanDir, FsError> {
+    if depth >= MAX_SCAN_DEPTH {
+        return Err(FsError::TooDeep);
+    }
+    // Hold a strict handle on the directory and re-verify it afterwards, as
+    // `list_strict` does: a junction swapped in is detected, not followed.
+    let (_h, dmeta) = open_strict(root_path, rel, FILE_READ_ATTRIBUTES)?;
+    if dmeta.kind != Kind::Dir {
+        return Err(FsError::Changed);
+    }
+    let mut items: Vec<(OsString, std::fs::Metadata)> = Vec::new();
+    for ent in std::fs::read_dir(root_path.join(rel))? {
+        let ent = ent?;
+        match std::fs::symlink_metadata(ent.path()) {
+            Ok(m) => items.push((ent.file_name(), m)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    items.sort_by(|a, b| a.0.as_encoded_bytes().cmp(b.0.as_encoded_bytes()));
+    let mut entries = Vec::with_capacity(items.len());
+    for (name, m) in items {
+        *count += 1;
+        if *count > opts.max_entries {
+            return Err(FsError::TooManyEntries(opts.max_entries));
+        }
+        let m = meta_of_std(&m);
+        let child_rel = child(rel, &name);
+        if (opts.skip)(&child_rel, m.kind) {
+            continue;
+        }
+        let node = match m.kind {
+            Kind::Dir => ScanNode::Dir(scan_dir(root_path, &child_rel, m, depth + 1, opts, count)?),
+            Kind::File => ScanNode::File(m),
+            Kind::Symlink => ScanNode::Symlink(m),
+            Kind::Other => ScanNode::Other(m),
+        };
+        entries.push(ScanEntry { name, node });
+    }
+    let (_h2, after) = open_strict(root_path, rel, FILE_READ_ATTRIBUTES)?;
+    if after.id != dmeta.id {
+        return Err(FsError::Changed);
+    }
+    Ok(ScanDir { meta, entries })
+}
+
+pub(crate) fn open_read_strict(
+    _root: &Root,
+    root_path: &Path,
+    rel: &Path,
+) -> Result<std::fs::File, FsError> {
+    let (h, _) = open_strict(root_path, rel, GENERIC_READ)?;
+    Ok(std::fs::File::from(h))
+}
+
+pub(crate) fn file_meta(f: &std::fs::File) -> Result<Meta, FsError> {
+    Ok(info(f)?.0)
+}
+
+pub(crate) fn read_link_strict(
+    _root: &Root,
+    root_path: &Path,
+    parent_rel: &Path,
+    name: &OsStr,
+    expected: &Meta,
+) -> Result<OsString, FsError> {
+    let (_d, dmeta) = open_strict(root_path, parent_rel, FILE_READ_ATTRIBUTES)?;
+    if dmeta.kind != Kind::Dir {
+        return Err(FsError::NotADirectory);
+    }
+    let full = root_path.join(parent_rel).join(name);
+    let before = meta_of_std(&std::fs::symlink_metadata(&full)?);
+    if before.kind != Kind::Symlink || !same_scanned_version(expected, &before) {
+        return Err(FsError::Changed);
+    }
+    let target = std::fs::read_link(&full)?;
+    Ok(target.into_os_string())
+}
+
+pub(crate) fn lstat_strict(
+    _root: &Root,
+    root_path: &Path,
+    parent_rel: &Path,
+    name: &OsStr,
+) -> Result<Option<Meta>, FsError> {
+    let (_d, dmeta) = open_strict(root_path, parent_rel, FILE_READ_ATTRIBUTES)?;
+    if dmeta.kind != Kind::Dir {
+        return Err(FsError::NotADirectory);
+    }
+    match open_handle(
+        &root_path.join(parent_rel).join(name),
+        FILE_READ_ATTRIBUTES,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        OPEN_EXISTING,
+    ) {
+        Ok(h) => Ok(Some(info(&h)?.0)),
+        Err(FsError::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+pub(crate) fn mkdir_strict(
+    _root: &Root,
+    root_path: &Path,
+    parent_rel: &Path,
+    name: &OsStr,
+    _mode: u32,
+) -> Result<(), FsError> {
+    let (_d, dmeta) = open_strict(root_path, parent_rel, FILE_READ_ATTRIBUTES)?;
+    if dmeta.kind != Kind::Dir {
+        return Err(FsError::NotADirectory);
+    }
+    let w = wide(&root_path.join(parent_rel).join(name));
+    // SAFETY: NUL-terminated wide string; null security attributes.
+    if unsafe { CreateDirectoryW(w.as_ptr(), std::ptr::null()) } == 0 {
+        let e = last_err();
+        return Err(match e.raw_os_error().map(|c| c as u32) {
+            Some(ERROR_ALREADY_EXISTS) => FsError::Changed,
+            _ => FsError::Io(e.to_string()),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn rmdir_strict(
+    _root: &Root,
+    root_path: &Path,
+    parent_rel: &Path,
+    name: &OsStr,
+    expected: &Meta,
+) -> Result<(), FsError> {
+    let rel = parent_rel.join(name);
+    let (h, meta) = open_strict(root_path, &rel, FILE_READ_ATTRIBUTES)?;
+    if meta.kind != Kind::Dir {
+        return Err(FsError::NotADirectory);
+    }
+    if meta.id != expected.id {
+        return Err(FsError::Changed);
+    }
+    drop(h);
+    let w = wide(&root_path.join(&rel));
+    // SAFETY: NUL-terminated wide string.
+    if unsafe { RemoveDirectoryW(w.as_ptr()) } == 0 {
+        return Err(FsError::Io(last_err().to_string()));
+    }
+    Ok(())
+}
+
+pub(crate) fn symlink_strict(
+    _root: &Root,
+    _root_path: &Path,
+    _parent_rel: &Path,
+    _name: &OsStr,
+    _target: &OsStr,
+) -> Result<(), FsError> {
+    Err(FsError::Unsupported(
+        "creating symlinks (needs Developer Mode or elevation on Windows)",
+    ))
+}
+
+pub(crate) fn chmod_strict(
+    _root: &Root,
+    root_path: &Path,
+    rel: &Path,
+    expected: &Meta,
+    _mode: u32,
+) -> Result<(), FsError> {
+    let (_h, now) = open_strict(root_path, rel, FILE_READ_ATTRIBUTES)?;
+    if now.id != expected.id {
+        return Err(FsError::Changed);
     }
     Ok(())
 }

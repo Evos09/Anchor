@@ -36,6 +36,12 @@ mod sys;
 /// Largest file `read` will load.
 pub const MAX_READ_BYTES: u64 = 64 << 20;
 
+/// Deepest directory nesting [`Workspace::scan`] descends into.
+pub const MAX_SCAN_DEPTH: usize = 256;
+
+mod scan;
+pub use scan::{ScanDir, ScanEntry, ScanNode, ScanOptions, ScannedFile};
+
 /// Identity of a file independent of its name (device + inode, or volume
 /// serial + file index). Two names are the same file iff their ids match;
 /// this is how case- and Unicode-normalisation aliases are unified.
@@ -49,6 +55,9 @@ pub struct FileId {
 pub enum Kind {
     File,
     Dir,
+    /// Only reported by operations that do not follow the final component
+    /// ([`Workspace::scan`], [`Workspace::resolve_exact`]).
+    Symlink,
     Other,
 }
 
@@ -62,8 +71,10 @@ pub struct Meta {
     /// Inode numbers are reused quickly after deletion, so identity checks
     /// compare `(id, ctime)` rather than `id` alone.
     pub ctime_ns: i128,
-    #[cfg_attr(windows, allow(dead_code))]
-    pub(crate) mode: u32,
+    /// Content modification time in ns (Windows: last-write time).
+    pub mtime_ns: i128,
+    /// Permission bits (`0o7777`); always 0 on Windows.
+    pub mode: u32,
 }
 
 impl Meta {
@@ -136,6 +147,12 @@ pub enum FsError {
     AppendVerificationFailed,
     #[error("the filesystem does not support atomic exchange; refusing to replace non-atomically")]
     AtomicReplaceUnsupported,
+    #[error("workspace has more than {0} entries; refusing to scan")]
+    TooManyEntries(usize),
+    #[error("directory nesting deeper than {MAX_SCAN_DEPTH}; refusing to scan")]
+    TooDeep,
+    #[error("not supported on this platform: {0}")]
+    Unsupported(&'static str),
     #[error("i/o error: {0}")]
     Io(String),
 }
@@ -218,7 +235,15 @@ impl Workspace {
         if param.is_empty() || param.contains('\0') {
             return Err(FsError::InvalidParam);
         }
-        let normalized = normalize_verbatim(Path::new(param));
+        self.confine_path(Path::new(param))
+    }
+
+    /// [`Workspace::confine`] for a path that need not be UTF-8.
+    pub fn confine_path(&self, param: &Path) -> Result<PathBuf, FsError> {
+        if param.as_os_str().is_empty() || param.as_os_str().as_encoded_bytes().contains(&0) {
+            return Err(FsError::InvalidParam);
+        }
+        let normalized = normalize_verbatim(param);
         let p = normalized.as_path();
         let rel_input: &Path = if p.is_absolute() || p.has_root() {
             match strip_root_prefix(p, &self.root) {
@@ -367,6 +392,20 @@ impl Workspace {
         expect: Expect,
         approval: Approved,
     ) -> Result<WriteReceipt, FsError> {
+        self.write_with_mode(r, content, expect, None, approval)
+    }
+
+    /// [`Workspace::write`], setting the file's permission bits to `mode`
+    /// (Unix; ignored on Windows). With `None`, a replaced file keeps its
+    /// mode and a new file gets `0o644` less the umask.
+    pub fn write_with_mode(
+        &self,
+        r: &Resolved,
+        content: &[u8],
+        expect: Expect,
+        mode: Option<u32>,
+        approval: Approved,
+    ) -> Result<WriteReceipt, FsError> {
         check_approval(&approval, r)?;
         match (&expect, &r.meta) {
             (Expect::Absent, None) => {}
@@ -398,6 +437,7 @@ impl Workspace {
             &name,
             content,
             &expect,
+            mode,
         )?;
         MUTATIONS.fetch_add(1, Ordering::SeqCst);
         Ok(WriteReceipt {
@@ -408,7 +448,8 @@ impl Workspace {
         })
     }
 
-    /// Remove a resolved regular file, verifying it is still the approved
+    /// Remove a resolved regular file (or a symlink resolved with
+    /// [`Workspace::resolve_exact`]), verifying it is still the approved
     /// file (same identity) before unlinking it.
     pub fn remove(&self, r: &Resolved, approval: Approved) -> Result<(), FsError> {
         check_approval(&approval, r)?;
@@ -416,11 +457,100 @@ impl Workspace {
             return Err(FsError::ApprovalMismatch);
         }
         let meta = r.meta.ok_or(FsError::NotFound)?;
-        if meta.kind != Kind::File {
+        if !matches!(meta.kind, Kind::File | Kind::Symlink) {
             return Err(FsError::NotAFile);
         }
         let (parent_rel, name) = split_parent(&r.rel)?;
         sys::remove_strict(&self.handle, &self.root, &parent_rel, &name, &meta)?;
+        MUTATIONS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Resolve a workspace-relative path **without following any symlink**,
+    /// including the final component: every parent must be a real
+    /// directory, and the target is reported as it is (a symlink is
+    /// [`Kind::Symlink`]). The parent must exist. Used by restore, which
+    /// must act on names, never on what they point to.
+    pub fn resolve_exact(&self, rel: &Path) -> Result<Resolved, FsError> {
+        let rel = self.confine_path(rel)?;
+        let (parent, name) = split_parent(&rel)?;
+        let meta = sys::lstat_strict(&self.handle, &self.root, &parent, &name)?;
+        Ok(Resolved {
+            canonical: self.root.join(&rel),
+            rel,
+            meta,
+            missing_dirs: Vec::new(),
+        })
+    }
+
+    /// Create the directory `r` (which must not exist; its parent must)
+    /// with permission bits `mode` (Unix).
+    pub fn create_dir(&self, r: &Resolved, mode: u32, approval: Approved) -> Result<(), FsError> {
+        check_approval(&approval, r)?;
+        if approval.operation() != Operation::Create {
+            return Err(FsError::ApprovalMismatch);
+        }
+        if r.meta.is_some() || !r.missing_dirs.is_empty() {
+            return Err(FsError::Changed);
+        }
+        let (parent, name) = split_parent(&r.rel)?;
+        sys::mkdir_strict(&self.handle, &self.root, &parent, &name, mode)?;
+        MUTATIONS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Remove the empty directory `r`, verifying its identity first.
+    pub fn remove_dir(&self, r: &Resolved, approval: Approved) -> Result<(), FsError> {
+        check_approval(&approval, r)?;
+        if approval.operation() != Operation::Delete {
+            return Err(FsError::ApprovalMismatch);
+        }
+        let meta = r.meta.ok_or(FsError::NotFound)?;
+        if meta.kind != Kind::Dir || r.rel.as_os_str().is_empty() {
+            return Err(FsError::NotADirectory);
+        }
+        let (parent, name) = split_parent(&r.rel)?;
+        sys::rmdir_strict(&self.handle, &self.root, &parent, &name, &meta)?;
+        MUTATIONS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Create a symlink at `r` (which must not exist) pointing to `target`.
+    /// The target is stored verbatim and never followed here. Unix only.
+    pub fn create_symlink(
+        &self,
+        r: &Resolved,
+        target: &std::ffi::OsStr,
+        approval: Approved,
+    ) -> Result<(), FsError> {
+        check_approval(&approval, r)?;
+        if approval.operation() != Operation::Create {
+            return Err(FsError::ApprovalMismatch);
+        }
+        if r.meta.is_some() || !r.missing_dirs.is_empty() {
+            return Err(FsError::Changed);
+        }
+        if target.is_empty() || target.as_encoded_bytes().contains(&0) {
+            return Err(FsError::InvalidParam);
+        }
+        let (parent, name) = split_parent(&r.rel)?;
+        sys::symlink_strict(&self.handle, &self.root, &parent, &name, target)?;
+        MUTATIONS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Set the permission bits of the existing file or directory `r`
+    /// (Unix; a no-op on Windows), verifying its identity first.
+    pub fn set_mode(&self, r: &Resolved, mode: u32, approval: Approved) -> Result<(), FsError> {
+        check_approval(&approval, r)?;
+        if approval.operation() != Operation::Write {
+            return Err(FsError::ApprovalMismatch);
+        }
+        let meta = r.meta.ok_or(FsError::NotFound)?;
+        if !matches!(meta.kind, Kind::File | Kind::Dir) {
+            return Err(FsError::NotAFile);
+        }
+        sys::chmod_strict(&self.handle, &self.root, &r.rel, &meta, mode)?;
         MUTATIONS.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

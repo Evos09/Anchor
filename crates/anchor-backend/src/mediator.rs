@@ -310,7 +310,7 @@ impl Mediator {
                     .map(|e| match e.kind {
                         Kind::Dir => format!("{}/", e.name),
                         Kind::File => e.name.clone(),
-                        Kind::Other => format!("{} (special)", e.name),
+                        Kind::Symlink | Kind::Other => format!("{} (special)", e.name),
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),

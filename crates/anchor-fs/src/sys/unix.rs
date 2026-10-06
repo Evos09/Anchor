@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rustix::fs::{self as rfs, AtFlags, FileType, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 
-use crate::{DirEntryInfo, Expect, FileId, FsError, Kind, MAX_READ_BYTES, Meta};
+use crate::scan::{ScanDir, ScanEntry, ScanNode, ScanOptions, child, same_scanned_version};
+use crate::{DirEntryInfo, Expect, FileId, FsError, Kind, MAX_READ_BYTES, MAX_SCAN_DEPTH, Meta};
 
 #[derive(Debug)]
 pub(crate) struct Root {
@@ -33,6 +34,7 @@ fn meta_of(st: &rfs::Stat) -> Meta {
     let kind = match FileType::from_raw_mode(st.st_mode as _) {
         FileType::RegularFile => Kind::File,
         FileType::Directory => Kind::Dir,
+        FileType::Symlink => Kind::Symlink,
         _ => Kind::Other,
     };
     Meta {
@@ -44,6 +46,7 @@ fn meta_of(st: &rfs::Stat) -> Meta {
         nlink: st.st_nlink as u64,
         len: st.st_size as u64,
         ctime_ns: st.st_ctime as i128 * 1_000_000_000 + st.st_ctime_nsec as i128,
+        mtime_ns: st.st_mtime as i128 * 1_000_000_000 + st.st_mtime_nsec as i128,
         mode: (st.st_mode as u32) & 0o7777,
     }
 }
@@ -386,6 +389,7 @@ pub(crate) fn write_atomic(
     name: &OsStr,
     content: &[u8],
     expect: &Expect,
+    want_mode: Option<u32>,
 ) -> Result<(), FsError> {
     let mut dir = open_strict(
         root,
@@ -452,6 +456,13 @@ pub(crate) fn write_atomic(
     let cleanup = |dir: &OwnedFd| {
         let _ = rfs::unlinkat(dir, tmp.as_os_str(), AtFlags::empty());
     };
+    if let Some(m) = want_mode {
+        // The creation mode above is subject to the umask; set it exactly.
+        if let Err(e) = rfs::fchmod(&tmp_fd, Mode::from_bits_truncate(m as _)) {
+            cleanup(&dir);
+            return Err(io(e));
+        }
+    }
     let mut f = std::fs::File::from(tmp_fd);
     if let Err(e) = f.write_all(content).and_then(|_| f.sync_all()) {
         cleanup(&dir);
@@ -531,13 +542,234 @@ pub(crate) fn remove_strict(
     )?;
     let st = rfs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW).map_err(strict_err)?;
     let meta = meta_of(&st);
-    if meta.kind != Kind::File {
+    if !matches!(meta.kind, Kind::File | Kind::Symlink) {
         return Err(FsError::NotAFile);
     }
-    if !meta.same_version(expected) {
+    if meta.kind != expected.kind || !meta.same_version(expected) {
         return Err(FsError::Changed);
     }
     rfs::unlinkat(&dir, name, AtFlags::empty()).map_err(io)?;
     rfs::fsync(&dir).map_err(io)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot support: scanning and exact (no-follow) operations.
+// ---------------------------------------------------------------------------
+
+fn open_dir_strict(root: &Root, root_path: &Path, rel: &Path) -> Result<OwnedFd, FsError> {
+    open_strict(root, root_path, rel, OFlags::RDONLY | OFlags::DIRECTORY)
+}
+
+pub(crate) fn scan(
+    root: &Root,
+    root_path: &Path,
+    opts: &ScanOptions<'_>,
+    count: &mut usize,
+) -> Result<ScanDir, FsError> {
+    let fd = open_dir_strict(root, root_path, Path::new(""))?;
+    let meta = meta_of(&rfs::fstat(&fd).map_err(io)?);
+    scan_dir(&fd, meta, Path::new(""), 0, opts, count)
+}
+
+fn scan_dir(
+    fd: &OwnedFd,
+    meta: Meta,
+    rel: &Path,
+    depth: usize,
+    opts: &ScanOptions<'_>,
+    count: &mut usize,
+) -> Result<ScanDir, FsError> {
+    if depth >= MAX_SCAN_DEPTH {
+        return Err(FsError::TooDeep);
+    }
+    let mut names: Vec<OsString> = Vec::new();
+    let mut dir = rfs::Dir::read_from(fd).map_err(io)?;
+    while let Some(ent) = dir.read() {
+        let ent = ent.map_err(io)?;
+        let b = ent.file_name().to_bytes();
+        if b == b"." || b == b".." {
+            continue;
+        }
+        use std::os::unix::ffi::OsStrExt;
+        names.push(OsStr::from_bytes(b).to_os_string());
+    }
+    drop(dir);
+    names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
+    let mut entries = Vec::with_capacity(names.len());
+    for name in names {
+        *count += 1;
+        if *count > opts.max_entries {
+            return Err(FsError::TooManyEntries(opts.max_entries));
+        }
+        let st = match rfs::statat(fd, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(st) => st,
+            // Deleted while we scanned: it is simply not in this snapshot.
+            Err(Errno::NOENT) => continue,
+            Err(e) => return Err(io(e)),
+        };
+        let m = meta_of(&st);
+        let child_rel = child(rel, &name);
+        if (opts.skip)(&child_rel, m.kind) {
+            continue;
+        }
+        let node = match m.kind {
+            Kind::Dir => {
+                let cfd = rfs::openat(
+                    fd,
+                    name.as_os_str(),
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|e| match e {
+                    // Replaced by a symlink or a file after the stat.
+                    Errno::LOOP | Errno::NOTDIR | Errno::NOENT => FsError::Changed,
+                    e => io(e),
+                })?;
+                let now = meta_of(&rfs::fstat(&cfd).map_err(io)?);
+                if now.id != m.id {
+                    return Err(FsError::Changed);
+                }
+                ScanNode::Dir(scan_dir(&cfd, now, &child_rel, depth + 1, opts, count)?)
+            }
+            Kind::File => ScanNode::File(m),
+            Kind::Symlink => ScanNode::Symlink(m),
+            Kind::Other => ScanNode::Other(m),
+        };
+        entries.push(ScanEntry { name, node });
+    }
+    Ok(ScanDir { meta, entries })
+}
+
+pub(crate) fn open_read_strict(
+    root: &Root,
+    root_path: &Path,
+    rel: &Path,
+) -> Result<std::fs::File, FsError> {
+    let fd = open_strict(root, root_path, rel, OFlags::RDONLY | OFlags::NONBLOCK)?;
+    Ok(std::fs::File::from(fd))
+}
+
+pub(crate) fn file_meta(f: &std::fs::File) -> Result<Meta, FsError> {
+    Ok(meta_of(&rfs::fstat(f).map_err(io)?))
+}
+
+pub(crate) fn read_link_strict(
+    root: &Root,
+    root_path: &Path,
+    parent_rel: &Path,
+    name: &OsStr,
+    expected: &Meta,
+) -> Result<OsString, FsError> {
+    let dir = open_dir_strict(root, root_path, parent_rel)?;
+    let before = meta_of(&rfs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW).map_err(strict_err)?);
+    if before.kind != Kind::Symlink || !same_scanned_version(expected, &before) {
+        return Err(FsError::Changed);
+    }
+    let target = rfs::readlinkat(&dir, name, Vec::new()).map_err(io)?;
+    let after = meta_of(&rfs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW).map_err(strict_err)?);
+    if !same_scanned_version(&before, &after) {
+        return Err(FsError::Changed);
+    }
+    use std::os::unix::ffi::OsStringExt;
+    Ok(OsString::from_vec(target.into_bytes()))
+}
+
+pub(crate) fn lstat_strict(
+    root: &Root,
+    root_path: &Path,
+    parent_rel: &Path,
+    name: &OsStr,
+) -> Result<Option<Meta>, FsError> {
+    let dir = open_dir_strict(root, root_path, parent_rel)?;
+    match rfs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) => Ok(Some(meta_of(&st))),
+        Err(Errno::NOENT) => Ok(None),
+        Err(e) => Err(strict_err(e)),
+    }
+}
+
+pub(crate) fn mkdir_strict(
+    root: &Root,
+    root_path: &Path,
+    parent_rel: &Path,
+    name: &OsStr,
+    mode: u32,
+) -> Result<(), FsError> {
+    let dir = open_dir_strict(root, root_path, parent_rel)?;
+    rfs::mkdirat(&dir, name, Mode::from_bits_truncate(0o700)).map_err(|e| match e {
+        Errno::EXIST => FsError::Changed,
+        e => io(e),
+    })?;
+    let created = rfs::openat(
+        &dir,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(strict_err)?;
+    rfs::fchmod(&created, Mode::from_bits_truncate(mode as _)).map_err(io)?;
+    rfs::fsync(&dir).map_err(io)?;
+    Ok(())
+}
+
+pub(crate) fn rmdir_strict(
+    root: &Root,
+    root_path: &Path,
+    parent_rel: &Path,
+    name: &OsStr,
+    expected: &Meta,
+) -> Result<(), FsError> {
+    let dir = open_dir_strict(root, root_path, parent_rel)?;
+    let meta = meta_of(&rfs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW).map_err(strict_err)?);
+    if meta.kind != Kind::Dir {
+        return Err(FsError::NotADirectory);
+    }
+    if meta.id != expected.id {
+        return Err(FsError::Changed);
+    }
+    rfs::unlinkat(&dir, name, AtFlags::REMOVEDIR).map_err(io)?;
+    rfs::fsync(&dir).map_err(io)?;
+    Ok(())
+}
+
+pub(crate) fn symlink_strict(
+    root: &Root,
+    root_path: &Path,
+    parent_rel: &Path,
+    name: &OsStr,
+    target: &OsStr,
+) -> Result<(), FsError> {
+    let dir = open_dir_strict(root, root_path, parent_rel)?;
+    // symlinkat fails if anything exists at `name`; it never follows it.
+    rfs::symlinkat(target, &dir, name).map_err(|e| match e {
+        Errno::EXIST => FsError::Changed,
+        e => io(e),
+    })?;
+    rfs::fsync(&dir).map_err(io)?;
+    Ok(())
+}
+
+pub(crate) fn chmod_strict(
+    root: &Root,
+    root_path: &Path,
+    rel: &Path,
+    expected: &Meta,
+    mode: u32,
+) -> Result<(), FsError> {
+    let flags = if expected.kind == Kind::Dir {
+        OFlags::RDONLY | OFlags::DIRECTORY
+    } else {
+        OFlags::RDONLY | OFlags::NONBLOCK
+    };
+    let fd = open_strict(root, root_path, rel, flags)?;
+    let now = meta_of(&rfs::fstat(&fd).map_err(io)?);
+    if now.id != expected.id || now.kind != expected.kind {
+        return Err(FsError::Changed);
+    }
+    if now.kind == Kind::File && now.nlink > 1 {
+        return Err(FsError::HardlinkRefused(now.nlink));
+    }
+    rfs::fchmod(&fd, Mode::from_bits_truncate(mode as _)).map_err(io)?;
     Ok(())
 }

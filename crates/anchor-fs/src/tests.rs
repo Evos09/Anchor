@@ -631,3 +631,250 @@ fn identity_is_filesystem_defined_on_linux() {
     let nfd = w.resolve("cafe\u{301}").unwrap();
     assert_ne!(nfc.canonical, nfd.canonical);
 }
+
+// ---------------------------------------------------------------------------
+// Snapshot support (§5.5): scan, exact resolution, restore primitives.
+// ---------------------------------------------------------------------------
+
+fn scan_all(w: &Workspace) -> ScanDir {
+    w.scan(&ScanOptions {
+        max_entries: 1_000_000,
+        skip: &|_, _| false,
+    })
+    .unwrap()
+}
+
+fn names(d: &ScanDir) -> Vec<String> {
+    d.entries
+        .iter()
+        .map(|e| e.name.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn find<'a>(d: &'a ScanDir, name: &str) -> &'a ScanNode {
+    &d.entries
+        .iter()
+        .find(|e| e.name == name)
+        .unwrap_or_else(|| panic!("{name} not in scan"))
+        .node
+}
+
+#[test]
+fn scan_is_sorted_recursive_and_skippable() {
+    let f = fixture();
+    fs::create_dir_all(f.ws.join("b/inner")).unwrap();
+    fs::write(f.ws.join("b/inner/x"), b"x").unwrap();
+    fs::write(f.ws.join("a"), b"aa").unwrap();
+    fs::create_dir(f.ws.join("skipme")).unwrap();
+    fs::write(f.ws.join("skipme/y"), b"y").unwrap();
+    let w = Workspace::open(&f.ws).unwrap();
+    let d = w
+        .scan(&ScanOptions {
+            max_entries: 100,
+            skip: &|p, _| p == Path::new("skipme"),
+        })
+        .unwrap();
+    assert_eq!(names(&d), ["a", "b"]);
+    match find(&d, "a") {
+        ScanNode::File(m) => assert_eq!(m.len, 2),
+        n => panic!("{n:?}"),
+    }
+    let ScanNode::Dir(b) = find(&d, "b") else {
+        panic!()
+    };
+    let ScanNode::Dir(inner) = find(b, "inner") else {
+        panic!()
+    };
+    assert_eq!(names(inner), ["x"]);
+    // Entry limit fails closed.
+    let e = w.scan(&ScanOptions {
+        max_entries: 2,
+        skip: &|_, _| false,
+    });
+    assert_eq!(e.unwrap_err(), FsError::TooManyEntries(2));
+}
+
+#[test]
+fn open_scanned_detects_changes() {
+    let f = fixture();
+    fs::write(f.ws.join("f"), b"one").unwrap();
+    let w = Workspace::open(&f.ws).unwrap();
+    let d = scan_all(&w);
+    let m = *find(&d, "f").meta();
+    let mut s = w.open_scanned(Path::new("f"), &m).unwrap();
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut s, &mut buf).unwrap();
+    assert_eq!(buf, b"one");
+    s.finish().unwrap();
+
+    // Modified after the scan: refused at open.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(f.ws.join("f"), b"two!").unwrap();
+    assert_eq!(
+        w.open_scanned(Path::new("f"), &m).unwrap_err(),
+        FsError::Changed
+    );
+    // Modified while being read: refused at finish.
+    let m2 = *find(&scan_all(&w), "f").meta();
+    let s = w.open_scanned(Path::new("f"), &m2).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(f.ws.join("f"), b"three").unwrap();
+    assert_eq!(s.finish().unwrap_err(), FsError::Changed);
+}
+
+#[test]
+fn create_and_remove_dir_exactly() {
+    let f = fixture();
+    let w = Workspace::open(&f.ws).unwrap();
+    let r = w.resolve_exact(Path::new("d")).unwrap();
+    assert!(!r.exists());
+    let a = approve(&f, &w, &r, Operation::Create);
+    w.create_dir(&r, 0o750, a).unwrap();
+    assert!(f.ws.join("d").is_dir());
+    let r = w.resolve_exact(Path::new("d")).unwrap();
+    assert_eq!(r.meta.unwrap().kind, Kind::Dir);
+    #[cfg(unix)]
+    assert_eq!(r.meta.unwrap().mode, 0o750);
+    // Creating again is refused (the precondition is "absent").
+    let a = approve(&f, &w, &r, Operation::Create);
+    assert_eq!(w.create_dir(&r, 0o755, a).unwrap_err(), FsError::Changed);
+    // Non-empty directories are not removed.
+    fs::write(f.ws.join("d/x"), b"x").unwrap();
+    let a = approve(&f, &w, &r, Operation::Delete);
+    assert!(w.remove_dir(&r, a).is_err());
+    fs::remove_file(f.ws.join("d/x")).unwrap();
+    // Wrong operation in the approval.
+    let a = approve(&f, &w, &r, Operation::Write);
+    assert_eq!(w.remove_dir(&r, a).unwrap_err(), FsError::ApprovalMismatch);
+    let a = approve(&f, &w, &r, Operation::Delete);
+    w.remove_dir(&r, a).unwrap();
+    assert!(!f.ws.join("d").exists());
+}
+
+#[cfg(unix)]
+mod snapshot_unix {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    use super::*;
+
+    /// §5.5 "a symlink loop doesn't hang": self-loops, directory cycles and
+    /// dangling links are recorded as symlinks and never followed.
+    #[test]
+    fn scan_never_follows_symlinks_or_loops() {
+        let f = fixture();
+        fs::create_dir_all(f.ws.join("a")).unwrap();
+        symlink("self", f.ws.join("self")).unwrap();
+        symlink("..", f.ws.join("a/up")).unwrap();
+        symlink(f.ws.join("a"), f.ws.join("a/cycle")).unwrap();
+        symlink("nowhere", f.ws.join("dangling")).unwrap();
+        symlink(&f.outside, f.ws.join("out")).unwrap();
+        let w = Workspace::open(&f.ws).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let root = f.ws.clone();
+        std::thread::spawn(move || {
+            let w = Workspace::open(&root).unwrap();
+            let _ = tx.send(scan_all(&w));
+        });
+        let d = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("scan hung on a symlink loop");
+        for n in ["self", "dangling", "out"] {
+            assert!(matches!(find(&d, n), ScanNode::Symlink(_)), "{n}");
+        }
+        let ScanNode::Dir(a) = find(&d, "a") else {
+            panic!()
+        };
+        assert!(matches!(find(a, "up"), ScanNode::Symlink(_)));
+        assert!(matches!(find(a, "cycle"), ScanNode::Symlink(_)));
+        let m = *find(&d, "out").meta();
+        assert_eq!(
+            w.read_link_scanned(Path::new("out"), &m).unwrap(),
+            f.outside.as_os_str()
+        );
+    }
+
+    #[test]
+    fn open_scanned_refuses_hardlinks_and_symlinks() {
+        let f = fixture();
+        fs::hard_link(f.outside.join("secret"), f.ws.join("hl")).unwrap();
+        symlink(f.outside.join("secret"), f.ws.join("sl")).unwrap();
+        let w = Workspace::open(&f.ws).unwrap();
+        let d = scan_all(&w);
+        let hl = *find(&d, "hl").meta();
+        assert_eq!(hl.nlink, 2);
+        assert_eq!(
+            w.open_scanned(Path::new("hl"), &hl).unwrap_err(),
+            FsError::HardlinkRefused(2)
+        );
+        let sl = *find(&d, "sl").meta();
+        assert_eq!(
+            w.open_scanned(Path::new("sl"), &sl).unwrap_err(),
+            FsError::SymlinkInStrictPath
+        );
+    }
+
+    /// Restore acts on names: removing a symlink removes the link, never
+    /// what it points to, and a symlinked parent is refused.
+    #[test]
+    fn exact_resolution_never_follows() {
+        let f = fixture();
+        fs::write(f.ws.join("target"), b"keep").unwrap();
+        symlink("target", f.ws.join("link")).unwrap();
+        symlink(&f.outside, f.ws.join("outdir")).unwrap();
+        let w = Workspace::open(&f.ws).unwrap();
+        let r = w.resolve_exact(Path::new("link")).unwrap();
+        assert_eq!(r.meta.unwrap().kind, Kind::Symlink);
+        assert_eq!(r.canonical, f.ws.join("link"));
+        let a = approve(&f, &w, &r, Operation::Delete);
+        w.remove(&r, a).unwrap();
+        assert!(fs::symlink_metadata(f.ws.join("link")).is_err());
+        assert_eq!(fs::read(f.ws.join("target")).unwrap(), b"keep");
+        assert_eq!(
+            w.resolve_exact(Path::new("outdir/secret")).unwrap_err(),
+            FsError::SymlinkInStrictPath
+        );
+        assert_eq!(
+            w.resolve_exact(Path::new("../outside/secret")).unwrap_err(),
+            FsError::TraversalEscapesRoot
+        );
+        assert_outside_untouched(&f);
+    }
+
+    #[test]
+    fn symlinks_and_modes_are_restorable() {
+        let f = fixture();
+        let w = Workspace::open(&f.ws).unwrap();
+        let r = w.resolve_exact(Path::new("ln")).unwrap();
+        let a = approve(&f, &w, &r, Operation::Create);
+        w.create_symlink(&r, std::ffi::OsStr::new("../outside/secret"), a)
+            .unwrap();
+        assert_eq!(
+            fs::read_link(f.ws.join("ln")).unwrap(),
+            Path::new("../outside/secret")
+        );
+        // Not over an existing entry.
+        let a = approve(&f, &w, &r, Operation::Create);
+        assert_eq!(
+            w.create_symlink(&r, std::ffi::OsStr::new("x"), a)
+                .unwrap_err(),
+            FsError::Changed
+        );
+
+        // Exact mode on create (not subject to the umask) and on replace.
+        let r = w.resolve_exact(Path::new("exe")).unwrap();
+        let a = approve(&f, &w, &r, Operation::Create);
+        w.write_with_mode(&r, b"#!/bin/sh\n", Expect::Absent, Some(0o751), a)
+            .unwrap();
+        let mode = |p: &str| fs::metadata(f.ws.join(p)).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode("exe"), 0o751);
+        let r = w.resolve_exact(Path::new("exe")).unwrap();
+        let a = approve(&f, &w, &r, Operation::Write);
+        w.set_mode(&r, 0o600, a).unwrap();
+        assert_eq!(mode("exe"), 0o600);
+        // set_mode never follows a symlink.
+        let r = w.resolve_exact(Path::new("ln")).unwrap();
+        let a = approve(&f, &w, &r, Operation::Write);
+        assert!(w.set_mode(&r, 0o777, a).is_err());
+        assert_outside_untouched(&f);
+    }
+}
