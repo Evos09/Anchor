@@ -19,6 +19,7 @@ mod merge;
 pub mod object;
 mod restore;
 mod store;
+pub mod textdiff;
 
 pub use engine::{SnapshotOptions, SnapshotReport, snapshot, take_snapshot};
 pub use maint::{GcReport, VerifyReport, gc, verify};

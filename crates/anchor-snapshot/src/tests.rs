@@ -1062,3 +1062,204 @@ fn restore_expect_refuses_when_the_workspace_drifted() {
     assert_eq!(fs::read_to_string(e.ws.join("f")).unwrap(), "1");
     assert!(!e.ws.join("g").exists());
 }
+
+// ---------------------------------------------------------------------------
+// Line diffs (Phase 5 evidence)
+// ---------------------------------------------------------------------------
+
+/// Apply hunks to `old`, as `patch` would; panics on a context mismatch.
+fn apply_hunks(old: &[u8], hunks: &[textdiff::Hunk]) -> Vec<u8> {
+    use textdiff::LineKind;
+    let mut lines: Vec<(String, bool)> = Vec::new();
+    if !old.is_empty() {
+        let mut v: Vec<(String, bool)> = old
+            .split(|&c| c == b'\n')
+            .map(|l| (String::from_utf8_lossy(l).into_owned(), false))
+            .collect();
+        if old.last() == Some(&b'\n') {
+            v.pop();
+        } else if let Some(l) = v.last_mut() {
+            l.1 = true;
+        }
+        lines = v;
+    }
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut pos = 0; // next old line (0-based)
+    for h in hunks {
+        let start = if h.old_lines == 0 {
+            h.old_start
+        } else {
+            h.old_start - 1
+        };
+        out.extend_from_slice(&lines[pos..start]);
+        pos = start;
+        for l in &h.lines {
+            match l.kind {
+                LineKind::Context => {
+                    assert_eq!(lines[pos], (l.text.clone(), l.no_eol), "context mismatch");
+                    out.push(lines[pos].clone());
+                    pos += 1;
+                }
+                LineKind::Removed => {
+                    assert_eq!(lines[pos], (l.text.clone(), l.no_eol), "removal mismatch");
+                    pos += 1;
+                }
+                LineKind::Added => out.push((l.text.clone(), l.no_eol)),
+            }
+        }
+    }
+    out.extend_from_slice(&lines[pos..]);
+    let mut b = Vec::new();
+    for (t, no_eol) in out {
+        b.extend_from_slice(t.as_bytes());
+        if !no_eol {
+            b.push(b'\n');
+        }
+    }
+    b
+}
+
+fn hunks_of(old: &str, new: &str) -> Vec<textdiff::Hunk> {
+    match textdiff::diff_text(old.as_bytes(), new.as_bytes(), textdiff::CONTEXT) {
+        textdiff::TextDiff::Text(h) => h,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn text_diff_round_trips() {
+    // Hand-picked edge cases, including the final newline appearing or
+    // disappearing and CRLF lines.
+    let cases = [
+        ("", ""),
+        ("", "a\n"),
+        ("a\n", ""),
+        ("a\nb\nc\n", "a\nB\nc\n"),
+        ("x\ny\n", "x"),
+        ("x", "x\n"),
+        ("x", "y"),
+        ("a\r\nb\r\n", "a\r\nc\r\n"),
+        (
+            "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n",
+            "0\n1\n2\n3\n4\n5\n6\n7\nX\n9\n10\n11\n12\n13\n",
+        ),
+    ];
+    for (old, new) in cases {
+        let h = hunks_of(old, new);
+        assert_eq!(
+            String::from_utf8(apply_hunks(old.as_bytes(), &h)).unwrap(),
+            new,
+            "{old:?} -> {new:?}: {h:?}"
+        );
+        assert_eq!(h.is_empty(), old == new);
+    }
+    // Seeded random edits of small-alphabet texts (many repeated lines,
+    // the hard case for diff alignment).
+    let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut rnd = move |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    for _ in 0..500 {
+        let len = rnd(30) as usize;
+        let old: Vec<String> = (0..len).map(|_| format!("l{}", rnd(5))).collect();
+        let mut new = old.clone();
+        for _ in 0..rnd(6) {
+            match rnd(3) {
+                0 if !new.is_empty() => {
+                    let i = rnd(new.len() as u64) as usize;
+                    new.remove(i);
+                }
+                1 => {
+                    let i = rnd(new.len() as u64 + 1) as usize;
+                    new.insert(i, format!("n{}", rnd(5)));
+                }
+                _ if !new.is_empty() => {
+                    let i = rnd(new.len() as u64) as usize;
+                    new[i] = format!("m{}", rnd(5));
+                }
+                _ => {}
+            }
+        }
+        let join = |v: &[String], eol: bool| {
+            let mut s = v.join("\n");
+            if eol && !s.is_empty() {
+                s.push('\n');
+            }
+            s
+        };
+        let (o, n) = (join(&old, rnd(4) != 0), join(&new, rnd(4) != 0));
+        let h = hunks_of(&o, &n);
+        assert_eq!(
+            String::from_utf8(apply_hunks(o.as_bytes(), &h)).unwrap(),
+            n,
+            "{o:?} -> {n:?}"
+        );
+    }
+}
+
+#[test]
+fn text_diff_line_numbers_match_trace_numbering() {
+    // trace numbers lines from 1 in file order; added_lines must name the
+    // new side's lines exactly.
+    let old = "def f(x):\n    return x\n";
+    let new = "def f(x):\n    if x < 0:\n        return 0\n    return x\n";
+    let h = hunks_of(old, new);
+    assert_eq!(h.len(), 1);
+    assert_eq!(h[0].added_lines(), vec![2, 3]);
+    let r = textdiff::render("m.py", &h);
+    assert!(r.contains("@@ -1,2 +1,4 @@"), "{r}");
+    assert!(r.contains("+    if x < 0:"), "{r}");
+    // Binary and oversized contents are not diffed.
+    assert_eq!(
+        textdiff::diff_text(b"a\0b", b"a", 3),
+        textdiff::TextDiff::Binary
+    );
+    let big = vec![b'a'; textdiff::MAX_DIFF_BYTES + 1];
+    assert_eq!(
+        textdiff::diff_text(&big, b"a", 3),
+        textdiff::TextDiff::TooLarge
+    );
+}
+
+#[test]
+fn file_diff_between_snapshots() {
+    let e = env();
+    fs::create_dir(e.ws.join("src")).unwrap();
+    fs::write(e.ws.join("src/m.py"), "a = 1\n").unwrap();
+    let store = Store::open(&e.store_dir).unwrap();
+    let ws = Workspace::open(&e.ws).unwrap();
+    let a = snap(&store, &ws, "turns/1").id();
+    tick();
+    fs::write(e.ws.join("src/m.py"), "a = 2\n").unwrap();
+    fs::write(e.ws.join("new.py"), "b = 1\n").unwrap();
+    let b = snap(&store, &ws, "turns/2").id();
+    let p = Path::new("src/m.py");
+    assert_eq!(
+        textdiff::file_at(&store, &b, p).unwrap().unwrap(),
+        b"a = 2\n"
+    );
+    assert!(
+        textdiff::file_at(&store, &a, Path::new("new.py"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        textdiff::file_at(&store, &a, Path::new("src"))
+            .unwrap()
+            .is_none()
+    );
+    let textdiff::TextDiff::Text(h) = textdiff::file_diff(&store, &a, &b, p).unwrap() else {
+        panic!()
+    };
+    assert_eq!(h[0].added_lines(), vec![1]);
+    // An added file diffs against empty content.
+    let textdiff::TextDiff::Text(h) =
+        textdiff::file_diff(&store, &a, &b, Path::new("new.py")).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!((h[0].old_start, h[0].old_lines, h[0].new_lines), (0, 0, 1));
+}
