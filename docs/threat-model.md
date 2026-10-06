@@ -51,7 +51,7 @@ legend:
 | 5.4 fresh session from checkpoint | `fresh_session_seeded_from_checkpoint_resumes`, e2e | ✅ |
 | 5.4 kill mid-turn leaves valid checkpoint | `kill_mid_write_leaves_valid_checkpoint` (SIGKILL during 2 MiB writes), e2e `kill_mid_turn_leaves_valid_checkpoint_and_resumes` | ✅ |
 | 5.5(a) snapshot before every mutating turn | mediator `ensure_turn_snapshot`; e2e `end_to_end_session_enforces_every_primitive` (snapshot audit entries), `rollback_after_command_restores_gitignored_and_dotgit` | ✅ Linux, macOS |
-| 5.5 100k files within target | `examples/bench.rs`, CI `snapshot-bench` (Linux gate: 2 s); [benchmark](benchmarks/snapshot.md) | ✅ Linux (CI runner: 0.40 s / 0.67 s; container: 0.77 s / 1.10 s) · ❌ macOS runner (2.53 s / 2.59 s; scan-bound) · Windows reported |
+| 5.5 100k files within target | `examples/bench.rs`, CI `snapshot-bench` (Linux gate: 2 s); [benchmark](benchmarks/snapshot.md) | ✅ Linux (CI runner: 0.40 s / 0.67 s; container: 0.77 s / 1.10 s) · ❌ macOS runner (2.53 s / 2.59 s; scan-bound) · ❌ Windows runner (3.95 s / 5.56 s; scan-bound, Defender) |
 | 5.5 kill mid-snapshot → no partial snapshot | `kill_mid_snapshot_leaves_no_partial_snapshot` (child process aborted after 50 objects published), e2e `kill_mid_turn_…` (store `verify` after SIGKILL) | ✅ Linux, macOS, Windows |
 | 5.5 kill mid-restore → workspace pre-restore | `kill_mid_restore_recovers_to_pre_restore_state` (child aborted after 4 operations; `recover()` on next open), `failed_restore_reverts_to_pre_restore_state` | ✅ Linux, macOS, Windows |
 | 5.5 symlink loop doesn't hang | `scan_never_follows_symlinks_or_loops` (anchor-fs), `symlink_loops_snapshot_and_restore` | ✅ Linux, macOS |
@@ -85,7 +85,9 @@ legend:
   bug: FILETIME was not converted to the Unix epoch, so every file looked
   racy and was re-hashed on every snapshot.
 - Run 37456108695: all test jobs green on Linux, macOS and Windows. The
-  Linux snapshot benchmark passed the 2 s gate.
+  Linux snapshot benchmark passed the 2 s gate. The macOS and Windows
+  benchmarks (reported only) missed it.
+- Run 37458112407: all jobs green on Linux, macOS and Windows.
 
 ## Out of scope for this push
 

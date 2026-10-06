@@ -80,7 +80,8 @@ jobs:
           - os: windows-latest
             gate: ""
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # Windows takes about 40 minutes (Defender scans every file written).
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v5
       - name: Toolchain

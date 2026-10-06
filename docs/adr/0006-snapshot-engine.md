@@ -214,9 +214,13 @@ See [`docs/benchmarks/snapshot.md`](../benchmarks/snapshot.md). On
 | Dev container (4 vCPU Xeon, ext4) | 0.77 s | 1.10 s | met |
 | GitHub `ubuntu-latest` (2 vCPU EPYC, ext4; CI-gated at 2 s) | 0.40 s | 0.67 s | met |
 | GitHub `macos-latest` (3 vCPU virtual M1, APFS) | 2.53 s | 2.59 s | **not met** |
+| GitHub `windows-latest` (2 vCPU EPYC, NTFS, Defender on) | 3.95 s | 5.56 s | **not met** |
 
-On macOS the scan alone takes 1.8–2.8 s. The next step is a parallel walk,
-then FSEvents-driven scanning.
+On macOS and Windows the per-file metadata scan dominates: 1.8–2.8 s on
+macOS and 3.5–4.0 s on Windows. The next step is a parallel walk. After
+that come large-fetch directory listings on Windows, and then
+change-journal-driven scanning (FSEvents on macOS, the USN journal on
+Windows).
 
 ## Consequences and limits
 

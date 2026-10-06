@@ -136,11 +136,42 @@ Until then, Anchor on macOS meets the 2 s target only for smaller
 workspaces (cost is roughly linear in the file count, so about 50k files
 on this runner).
 
-#### GitHub `windows-latest`
+#### GitHub `windows-latest`: run 37456108695 (reported)
 
-The job runs on every push and reports only. Results will be recorded
-here; creating 100k files under Defender real-time scanning dominates the
-job time.
+Environment: AMD EPYC (family 25), 2 logical CPUs, Windows Server, NTFS
+with Defender real-time scanning on.
+
+| Measurement | Median | Detail |
+|---|---:|---|
+| Initial snapshot | 1,091,708 ms | 584 MiB stored, scan 3,651 ms |
+| Incremental, no change | **3,954 ms** | scan 3,918 ms |
+| Incremental, 100 files changed | **5,555 ms** | scan 3,539 ms, 200 re-hashed |
+| Incremental, 1% changed | 11,434 ms | scan 4,006 ms, 1,982 re-hashed |
+| Restore undoing 100 files | 14,195 ms | |
+| Verify whole store | 207,497 ms | |
+
+**The target is not met on this runner.** Details:
+
+- No-change runs were 3,951, 3,886, 3,954, 3,961 and 4,480 ms. The scan
+  is almost the whole cost: `read_dir` plus `symlink_metadata` per entry
+  costs about 40 µs per file on NTFS, roughly 20× ext4.
+- Every file write and open goes through Defender, so the phases that
+  create files are also slow. Each new object is a new file with its own
+  `fsync`, which is why the initial snapshot takes 18 minutes and restore
+  takes 14 s.
+- The whole job takes about 40 minutes, so its timeout is 75 minutes.
+
+The planned fixes, in order:
+
+1. The parallel walk described below.
+2. `FindFirstFileExW` with `FIND_FIRST_EX_LARGE_FETCH`, which returns the
+   size and times with the directory listing and so avoids a metadata
+   call per file.
+3. The USN change journal.
+
+Packing small objects into pack files would cut the per-file cost of
+initial snapshots and restores; it changes the store format and needs its
+own ADR.
 
 ## Where the time goes next
 
