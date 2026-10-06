@@ -29,13 +29,14 @@ const ROLES: &str = include_str!("../../../examples/demo/roles.mock.toml");
 
 /// Roles whose agentic route (executor) is family A.
 fn roles_a() -> String {
-    ROLES.to_string()
+    // Normalized: Windows checkouts may have CRLF line endings.
+    ROLES.replace("\r\n", "\n")
 }
 
 /// Roles whose agentic route is family B (the reviewer moves to A, so
 /// review stays cross-family).
 fn roles_b() -> String {
-    ROLES
+    let b = roles_a()
         .replace(
             "[roles.executor]\nprovider = \"mock_a\"",
             "[roles.executor]\nprovider = \"mock_b\"",
@@ -43,7 +44,9 @@ fn roles_b() -> String {
         .replace(
             "[roles.reviewer]\nprovider = \"mock_b\"",
             "[roles.reviewer]\nprovider = \"mock_a\"",
-        )
+        );
+    assert_ne!(b, roles_a(), "roles_b must change the executor's provider");
+    b
 }
 
 fn agent_bin() -> PathBuf {
