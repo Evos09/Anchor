@@ -97,7 +97,7 @@ impl Response {
         }
     }
 
-    fn error(status: u16, msg: &str) -> Response {
+    pub fn error(status: u16, msg: &str) -> Response {
         Response::json(status, &json!({ "error": msg }))
     }
 }
@@ -105,6 +105,8 @@ impl Response {
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        204 => "No Content",
+        409 => "Conflict",
         202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
@@ -114,6 +116,7 @@ fn reason(status: u16) -> &'static str {
         408 => "Request Timeout",
         411 => "Length Required",
         413 => "Content Too Large",
+        415 => "Unsupported Media Type",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",
@@ -248,6 +251,14 @@ fn read_request(stream: &mut TcpStream, cfg: &ServerConfig) -> Result<Request, R
     Ok(req)
 }
 
+/// Everything after the transport: the shared core reads one bounded
+/// request, hands it to the service, and writes its response. The Hub's
+/// MCP/A2A routes are one service; the dashboard (`anchor ui`) is another,
+/// with its own Host/Origin/auth policy.
+pub trait Service: Send + Sync {
+    fn handle(&self, req: &Request) -> Response;
+}
+
 /// The authenticated handler for one endpoint.
 pub type Handler = dyn Fn(&Hub, Caller, &Request) -> Response + Send + Sync;
 
@@ -258,7 +269,7 @@ struct Routes {
     endpoints: Vec<(&'static str, Box<Handler>)>,
 }
 
-impl Routes {
+impl Service for Routes {
     fn handle(&self, req: &Request) -> Response {
         let host_ok = req.header("host").is_some_and(|h| {
             h == format!("127.0.0.1:{}", self.port) || h == format!("localhost:{}", self.port)
@@ -357,6 +368,22 @@ pub fn serve(hub: Arc<Hub>, port: u16, cfg: ServerConfig) -> std::io::Result<Ser
             ("/a2a", Box::new(crate::a2a::handle) as Box<Handler>),
         ],
     });
+    serve_on(listener, routes, cfg)
+}
+
+/// Serve `service` on an already bound loopback listener, with the shared
+/// limits (size, deadline, worker pool, backlog).
+pub fn serve_on(
+    listener: TcpListener,
+    routes: Arc<dyn Service>,
+    cfg: ServerConfig,
+) -> std::io::Result<ServerHandle> {
+    let addr = listener.local_addr()?;
+    if !addr.ip().is_loopback() {
+        return Err(std::io::Error::other(
+            "refusing to serve on a non-loopback address",
+        ));
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = sync_channel::<TcpStream>(cfg.backlog);
     let rx = Arc::new(Mutex::new(rx));

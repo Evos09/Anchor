@@ -30,6 +30,7 @@ dependencies = [
  "anchor-protocol",
  "anchor-snapshot",
  "anchor-verify",
+ "getrandom 0.4.3",
  "globset",
  "ignore",
  "regex",

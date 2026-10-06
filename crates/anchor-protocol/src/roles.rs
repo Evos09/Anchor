@@ -46,6 +46,11 @@ pub struct RoleView {
     pub family: Option<String>,
     #[serde(default)]
     pub fallback: Vec<String>,
+    /// USD per million input / output tokens (the runtime's cost basis).
+    #[serde(default)]
+    pub price_in_per_mtok: f64,
+    #[serde(default)]
+    pub price_out_per_mtok: f64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -112,6 +117,15 @@ impl RolesView {
             }
         }
         out
+    }
+
+    /// Each role's `(price_in, price_out)` in USD per million tokens: what
+    /// the user configured, against which reported costs are checked.
+    pub fn prices(&self) -> BTreeMap<String, (f64, f64)> {
+        self.roles
+            .iter()
+            .map(|(n, r)| (n.clone(), (r.price_in_per_mtok, r.price_out_per_mtok)))
+            .collect()
     }
 
     /// Every family a route can run on.

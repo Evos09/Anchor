@@ -255,6 +255,8 @@ pub fn hub_tool_defs() -> Vec<HubToolDef> {
 pub struct Shared {
     name: String,
     inner: Arc<Mutex<Box<dyn Interaction>>>,
+    /// Set when the shared interaction can serve agents independently.
+    own: Option<Box<dyn Interaction>>,
 }
 
 impl std::fmt::Debug for Shared {
@@ -268,9 +270,11 @@ impl Shared {
         Arc::new(Mutex::new(inner))
     }
     pub fn new(name: &str, inner: &Arc<Mutex<Box<dyn Interaction>>>) -> Self {
+        let own = inner.lock().unwrap_or_else(|p| p.into_inner()).split(name);
         Shared {
             name: name.to_string(),
             inner: inner.clone(),
+            own,
         }
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, Box<dyn Interaction>> {
@@ -280,18 +284,31 @@ impl Shared {
 
 impl Interaction for Shared {
     fn confirm(&mut self, view: &PromptView) -> UserResponse {
+        if let Some(own) = &mut self.own {
+            return own.confirm(view);
+        }
         let mut v = view.clone();
         v.rule = format!("[{}] {}", self.name, v.rule);
         self.lock().confirm(&v)
     }
     fn resume_choice(&mut self, checkpoint_id: &str, ratio_hint: &str) -> ResumeChoice {
+        if let Some(own) = &mut self.own {
+            return own.resume_choice(checkpoint_id, ratio_hint);
+        }
         self.lock().resume_choice(checkpoint_id, ratio_hint)
     }
     fn notify(&mut self, line: &str) {
-        self.lock().notify(&format!("[{}] {line}", self.name));
+        let line = format!("[{}] {line}", self.name);
+        match &mut self.own {
+            Some(own) => own.notify(&line),
+            None => self.lock().notify(&line),
+        }
     }
     fn responder(&self) -> Responder {
-        self.lock().responder()
+        match &self.own {
+            Some(own) => own.responder(),
+            None => self.lock().responder(),
+        }
     }
 }
 
@@ -476,13 +493,27 @@ pub fn run(
         ids.push(agent.id);
         idents.push((role, model_id, family));
     }
+    // The prices each agent's roles file sets: the dashboard recomputes
+    // every reported cost from them.
+    let prices = |roles: &str| roles_view(roles).map(|v| v.prices()).unwrap_or_default();
+    let reviewer = team.verify.as_ref().map(|v| {
+        serde_json::json!({
+            "kind": match v.reviewer { ReviewerKind::Rule => "rule", ReviewerKind::Model => "model" },
+            "prices": v.reviewer_roles.as_deref().map(prices),
+        })
+    });
     let _ = opened.mediator.engine().log(
         "team_started",
         serde_json::json!({
             "schedule": team.schedule,
             "agents": team.agents.iter().zip(&ids).zip(&idents).map(|((a, id), (role, model, family))| {
-                serde_json::json!({ "name": a.name, "agent_id": id, "role": role, "model_id": model, "family": family })
+                serde_json::json!({
+                    "name": a.name, "agent_id": id, "role": role, "model_id": model,
+                    "family": family, "claim_within": a.claim_within,
+                    "instruction": a.instruction, "prices": prices(&a.roles_toml),
+                })
             }).collect::<Vec<_>>(),
+            "verify": reviewer,
         }),
     );
     let tools = hub_tool_defs();

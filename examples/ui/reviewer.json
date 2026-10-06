@@ -1,0 +1,28 @@
+{
+ "steps": [
+  {
+   "content": "",
+   "tool_calls": [
+    {
+     "tool": "submit_verdicts",
+     "args": {
+      "verdicts": [
+       {
+        "claim_id": "c1",
+        "verdict": "supported",
+        "reason_code": "evidence_matches"
+       }
+      ]
+     }
+    }
+   ],
+   "prompt_tokens": 1200,
+   "completion_tokens": 50
+  },
+  {
+   "content": "done",
+   "prompt_tokens": 1200,
+   "completion_tokens": 10
+  }
+ ]
+}

@@ -17,6 +17,7 @@ pub mod mediator;
 pub mod queue;
 pub mod session;
 pub mod team;
+pub mod ui;
 pub mod verify;
 
 use interact::Interaction;

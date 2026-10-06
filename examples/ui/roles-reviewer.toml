@@ -1,0 +1,37 @@
+# The model reviewer: family C, unlike both executors (spec §8.2(a)).
+
+[providers.mock_a]
+kind = "mock"
+family = "demo-family-a"
+
+[providers.mock_b]
+kind = "mock"
+family = "demo-family-b"
+
+[providers.mock_c]
+kind = "mock"
+family = "demo-family-c"
+
+[roles.planner]
+provider = "mock_a"
+model_id = "demo-unused-a"
+context_window = 32000
+
+[roles.executor]
+provider = "mock_a"
+model_id = "demo-unused-a"
+context_window = 32000
+price_in_per_mtok = 0.5
+price_out_per_mtok = 2.0
+
+[roles.tester]
+provider = "mock_a"
+model_id = "demo-unused-a"
+context_window = 32000
+
+[roles.reviewer]
+provider = "mock_c"
+model_id = "demo-reviewer-c"
+context_window = 32000
+price_in_per_mtok = 0.5
+price_out_per_mtok = 2.0

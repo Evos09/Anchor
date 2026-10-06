@@ -68,7 +68,15 @@ pub fn cmd_team(a: &Args) -> Result<ExitCode, String> {
     let ws = PathBuf::from(a.need("--workspace")?);
     let mut ro = default_exec_read_only();
     ro.extend(a.all("--exec-read-only").into_iter().map(PathBuf::from));
-    let interact = team::Shared::wrap(interaction(a)?);
+    let want_ui = a.has("--ui");
+    // With the dashboard, prompts are answered there (unless the run
+    // answers them automatically).
+    let broker = (want_ui && !a.has("--auto-approve") && !a.has("--auto-deny"))
+        .then(anchor_backend::ui::Broker::new);
+    let interact = team::Shared::wrap(match &broker {
+        Some(b) => Box::new(anchor_backend::ui::UiInteraction::new(b.clone())),
+        None => interaction(a)?,
+    });
     let mut opened = open_workspace(
         &ws,
         a.get("--policy").map(Path::new),
@@ -97,7 +105,37 @@ pub fn cmd_team(a: &Args) -> Result<ExitCode, String> {
         opened.mediator.workspace().root().display(),
         team.schedule
     );
-    let report = team::run(&mut opened, &team, opts, interact)?;
+    let ui = if want_ui {
+        let audit = opened.mediator.engine().audit_arc();
+        if let Some(b) = &broker {
+            b.set_audit(audit.clone());
+        }
+        let root = opened.mediator.workspace().root().to_path_buf();
+        let hub = team::open_hub(&opened.paths, &root, audit.clone())?;
+        let ui = anchor_backend::ui::start(
+            anchor_backend::ui::Sources {
+                workspace: root,
+                audit,
+                hub: Some(hub),
+                store: Some(opened.mediator.shared_store()),
+                store_note: None,
+                broker: broker.clone(),
+                mode: "live",
+            },
+            ui_port(a)?,
+        )
+        .map_err(|e| format!("dashboard: {e}"))?;
+        announce_ui(a, &ui)?;
+        ui.set_running(true);
+        Some(ui)
+    } else {
+        None
+    };
+    let report = team::run(&mut opened, &team, opts, interact);
+    if let Some(ui) = &ui {
+        ui.set_running(false);
+    }
+    let report = report?;
     for o in &report.recovered {
         println!("recovered merge {}: {}", o.seq(), outcome_text(o));
     }
@@ -138,6 +176,15 @@ pub fn cmd_team(a: &Args) -> Result<ExitCode, String> {
             Some(o) => ok &= o.is_merged(),
             None => println!("not merged (the session did not finish)"),
         }
+    }
+    if let Some(ui) = ui
+        && !a.has("--ui-exit")
+    {
+        // The run is over: the dashboard keeps the workspace (rollback)
+        // until the user quits.
+        ui.attach_workspace(opened.mediator);
+        eprintln!("anchor: the run finished; the dashboard stays open. Press Ctrl-C to quit.");
+        ui.wait();
     }
     Ok(if ok {
         ExitCode::SUCCESS
@@ -404,4 +451,106 @@ fn resolve_agent(hub: &Hub, who: &str) -> Result<AgentId, String> {
         .map(|g| g.id)
         .max()
         .ok_or_else(|| format!("no agent named {who:?}"))
+}
+
+fn ui_port(a: &Args) -> Result<u16, String> {
+    a.get("--ui-port")
+        .map(|p| p.parse::<u16>().map_err(|e| format!("--ui-port: {e}")))
+        .transpose()
+        .map(|p| p.unwrap_or(0))
+}
+
+/// Print the dashboard's URL (it carries the access token), and write it
+/// to `--ui-url-file` (owner-only) for scripts.
+fn announce_ui(a: &Args, ui: &anchor_backend::ui::Ui) -> Result<(), String> {
+    eprintln!("anchor: dashboard at {}", ui.url());
+    if let Some(f) = a.get("--ui-url-file") {
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        use std::io::Write as _;
+        o.open(f)
+            .and_then(|mut file| writeln!(file, "{}", ui.url()))
+            .map_err(|e| format!("{f}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// `anchor ui --workspace DIR`: the dashboard for a workspace, outside a
+/// run. If a team run holds the snapshot store, the timeline and rollback
+/// are unavailable (that run's own `--ui` dashboard has them).
+pub fn cmd_ui(a: &Args) -> Result<ExitCode, String> {
+    let ws = PathBuf::from(a.need("--workspace")?);
+    let deny = Box::new(anchor_backend::interact::Scripted::new(
+        false,
+        anchor_protocol::ResumeChoice::FreshSession,
+    ));
+    let (src, mediator) = match open_workspace(&ws, None, deny, default_exec_read_only()) {
+        Ok(opened) => {
+            let audit = opened.mediator.engine().audit_arc();
+            let root = opened.mediator.workspace().root().to_path_buf();
+            let hub = opened
+                .paths
+                .dir
+                .join("hub.sqlite")
+                .exists()
+                .then(|| team::open_hub(&opened.paths, &root, audit.clone()))
+                .transpose()?;
+            (
+                anchor_backend::ui::Sources {
+                    workspace: root,
+                    audit,
+                    hub,
+                    store: Some(opened.mediator.shared_store()),
+                    store_note: None,
+                    broker: None,
+                    mode: "inspect",
+                },
+                Some(opened.mediator),
+            )
+        }
+        Err(anchor_backend::OpenError::Snapshot(anchor_snapshot::Error::Locked)) => {
+            let w = anchor_fs::Workspace::open(&ws).map_err(|e| e.to_string())?;
+            let paths =
+                StatePaths::create(w.root(), &default_state_base()).map_err(|e| e.to_string())?;
+            let audit = Arc::new(AuditLog::open(&paths.audit).map_err(|e| e.to_string())?);
+            let hub = paths
+                .dir
+                .join("hub.sqlite")
+                .exists()
+                .then(|| team::open_hub(&paths, w.root(), audit.clone()))
+                .transpose()?;
+            (
+                anchor_backend::ui::Sources {
+                    workspace: w.root().to_path_buf(),
+                    audit,
+                    hub,
+                    store: None,
+                    store_note: Some(
+                        "a running team holds the snapshot store; its own dashboard \
+                         (`anchor team run --ui`) shows the timeline"
+                            .into(),
+                    ),
+                    broker: None,
+                    mode: "inspect",
+                },
+                None,
+            )
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let port = a
+        .get("--port")
+        .map(|p| p.parse::<u16>().map_err(|e| format!("--port: {e}")))
+        .transpose()?
+        .unwrap_or(0);
+    let ui = anchor_backend::ui::start(src, port).map_err(|e| format!("dashboard: {e}"))?;
+    if let Some(m) = mediator {
+        ui.attach_workspace(m);
+    }
+    announce_ui(a, &ui)?;
+    eprintln!("anchor: press Ctrl-C to quit.");
+    ui.wait();
+    Ok(ExitCode::SUCCESS)
 }

@@ -28,6 +28,7 @@ sha2.workspace = true
 regex.workspace = true
 globset.workspace = true
 ignore.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

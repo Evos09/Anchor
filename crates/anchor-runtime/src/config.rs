@@ -177,6 +177,8 @@ impl RolesConfig {
                             model_id: r.model_id.clone(),
                             family: r.family.clone(),
                             fallback: r.fallback.clone(),
+                            price_in_per_mtok: r.price_in_per_mtok,
+                            price_out_per_mtok: r.price_out_per_mtok,
                         },
                     )
                 })

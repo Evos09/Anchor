@@ -29,6 +29,12 @@ pub trait Interaction: Send {
     fn resume_choice(&mut self, checkpoint_id: &str, ratio_hint: &str) -> ResumeChoice;
     fn notify(&mut self, line: &str);
     fn responder(&self) -> Responder;
+    /// An independent interaction speaking for `name`, for implementations
+    /// that can serve several agents at once (the dashboard). `None`: the
+    /// caller serializes every agent through this one.
+    fn split(&self, _name: &str) -> Option<Box<dyn Interaction>> {
+        None
+    }
 }
 
 /// Interactive terminal responder.

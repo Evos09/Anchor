@@ -1,0 +1,43 @@
+# A scripted two-model collaboration for the dashboard (spec §12, §14
+# Phase 6). No API keys needed. See README.md in this directory.
+#
+#   cp -r examples/ui/workspace /tmp/ui-demo
+#   anchor team run --workspace /tmp/ui-demo --team examples/ui/team.toml --ui
+#
+# alpha (model family A) implements clamp() but ships a bug; verification
+# rejects it, alpha repairs it, records a decision and asks beta for tests.
+# beta (family B) tries to claim calc.py (refused: not its area), writes
+# edge-case tests, and reports back with a message held for your approval.
+# A model reviewer of family C judges each claim. Agent ids assume a fresh
+# Hub (alpha = 1, beta = 2).
+
+schedule = "sequential"
+
+[[agent]]
+name = "alpha"
+roles = "roles-alpha.toml"
+instruction = "Make clamp(x, lo, hi) in calc.py limit x to [lo, hi], with tests. Then ask beta for edge-case tests."
+claim_within = ["calc.py", "tests/"]
+mock_script = "alpha.json"
+repair_mock_scripts = ["alpha-fix.json"]
+
+[[agent]]
+name = "beta"
+roles = "roles-beta.toml"
+instruction = "Write the tests the other agent asks for."
+claim_within = ["tests/"]
+mock_script = "beta.json"
+messages_need_approval = true
+
+[verify]
+build = ["python3", "-I", "-m", "compileall", "-q", "."]
+test = ["python3", "-I", "-m", "unittest", "discover", "-v"]
+coverage = ["python3", "-I", "-m", "trace", "--count", "--missing",
+            "--coverdir", "{coverdir}",
+            "--ignore-dir", "$prefix", "--ignore-dir", "$exec_prefix",
+            "--module", "unittest", "discover"]
+protected = ["tests/**"]
+max_attempts = 3
+reviewer = "model"
+reviewer_roles = "roles-reviewer.toml"
+reviewer_mock_script = "reviewer.json"

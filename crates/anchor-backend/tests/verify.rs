@@ -373,6 +373,37 @@ fn failing_tests_do_not_merge() {
     assert_eq!(fx.read("calc.py"), CALC);
 }
 
+/// A change of tests only, whose new test fails: the defect is in code
+/// the main workspace already has (a reviewer missed it; a test caught it
+/// later, spec §12.3). Rejected, with the blame placed.
+#[cfg(unix)]
+#[test]
+fn test_only_change_failing_is_flagged_as_caught_later() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = fx.open();
+    let hub = hub_of(&opened);
+    let g = gate(&fx, &opened, spec());
+    let mut q = MergeQueue::new(hub, &mut opened.mediator, Box::new(g), true);
+    // calc.py's clamp() (the stub) ignores its bounds.
+    let claim = Claim {
+        id: "c1".into(),
+        text: "clamp() is tested below its range".into(),
+        files: vec!["tests/test_clamp.py".into()],
+        tests: vec!["tests.test_clamp.C.test_low".into()],
+    };
+    let o = submit_change(
+        &mut q,
+        &fx,
+        |r| write(r, "tests/test_clamp.py", TEST_CLAMP),
+        &[claim],
+    );
+    let c = codes(&o);
+    assert!(c.contains(&"fails_on_main".to_string()), "{o:?}");
+    assert!(!o.is_merged());
+}
+
 #[cfg(unix)]
 #[test]
 fn failing_build_does_not_merge() {

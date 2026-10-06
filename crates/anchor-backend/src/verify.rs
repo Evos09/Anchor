@@ -895,6 +895,23 @@ impl VerifyGate {
                 commands.push(r.record);
             }
 
+            // Tests that only an agent's *test* change brings in, failing:
+            // the defect is in code already merged (a reviewer missed it and
+            // a test caught it later, spec §12.3). Still a rejection; the
+            // finding says where the blame lies.
+            let failing: Vec<&str> = tests
+                .iter()
+                .filter(|t| matches!(t.outcome, TestOutcome::Failed | TestOutcome::Error))
+                .map(|t| t.id.as_str())
+                .collect();
+            if !failing.is_empty() && !changes.is_empty() && changes.iter().all(|c| c.is_test) {
+                prior.push(Finding::new(
+                    Stage::Tests,
+                    "fails_on_main",
+                    json!({ "tests": failing }),
+                ));
+            }
+
             // No regressions: every test that passed before still passes.
             let now: BTreeSet<&str> = tests
                 .iter()

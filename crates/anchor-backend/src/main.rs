@@ -41,6 +41,11 @@ USAGE:
   anchor team run --workspace DIR --team FILE [options]
       --auto-merge           apply merges without asking (still audited)
       --unverified           merge without verification (only without [verify])
+      --ui                   serve the collaboration dashboard on 127.0.0.1 and
+                             answer approvals there (prints its URL)
+      --ui-port N            dashboard port (default: any free port)
+      --ui-url-file FILE     also write the dashboard URL (with its token) to FILE
+      --ui-exit              exit when the run ends (default: keep serving)
       --auto-approve | --auto-deny | --policy | --agent | --threshold  as for `run`
   anchor queue list   --workspace DIR
   anchor queue revert --workspace DIR (--seq N | --agent NAME|ID)
@@ -54,6 +59,9 @@ USAGE:
   anchor hub log | verify --workspace DIR
   anchor hub artifacts [--prefix GROUP] --workspace DIR   verification evidence
   anchor hub show EVIDENCE_PATH --workspace DIR          print one evidence file
+
+  anchor ui --workspace DIR [--port N] [--ui-url-file FILE]
+                             the dashboard for a workspace, outside a run
 
   anchor eval run --corpus DIR [options]   seeded-bug harness (spec §8.5)
       --reviewer R           rule (default), model, accept-all or oracle
@@ -85,6 +93,8 @@ impl Args {
             "--reject",
             "--hold-messages",
             "--all",
+            "--ui",
+            "--ui-exit",
         ];
         let mut pos = Vec::new();
         let mut flags = Vec::new();
@@ -502,6 +512,7 @@ fn main() -> ExitCode {
         Some("hub") => hubcli::cmd_hub(&a),
         Some("queue") => hubcli::cmd_queue(&a),
         Some("eval") => evalcli::cmd_eval(&a),
+        Some("ui") => hubcli::cmd_ui(&a),
         _ => {
             print!("{USAGE}");
             return ExitCode::from(2);
