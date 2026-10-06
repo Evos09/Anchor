@@ -95,15 +95,15 @@ pub struct Rule {
 
 impl Rule {
     pub fn matches(&self, req: &PermissionRequest) -> bool {
-        if let Some(t) = &self.tools {
-            if !t.contains(&req.tool) {
-                return false;
-            }
+        if let Some(t) = &self.tools
+            && !t.contains(&req.tool)
+        {
+            return false;
         }
-        if let Some(o) = &self.operations {
-            if !o.contains(&req.operation) {
-                return false;
-            }
+        if let Some(o) = &self.operations
+            && !o.contains(&req.operation)
+        {
+            return false;
         }
         let target = req.canonical_target.as_deref();
         if let Some(Scope::Workspace) = self.target_within {
@@ -124,20 +124,20 @@ impl Rule {
                 _ => return false,
             }
         }
-        if let Some(e) = self.target_exists {
-            if req.target_exists != e {
-                return false;
-            }
+        if let Some(e) = self.target_exists
+            && req.target_exists != e
+        {
+            return false;
         }
-        if let Some(a) = self.append_only {
-            if req.is_append_only != a {
-                return false;
-            }
+        if let Some(a) = self.append_only
+            && req.is_append_only != a
+        {
+            return false;
         }
-        if let Some(n) = self.network {
-            if req.network != n {
-                return false;
-            }
+        if let Some(n) = self.network
+            && req.network != n
+        {
+            return false;
         }
         if let Some(progs) = &self.programs {
             if req.tool != Tool::RunCommand {
@@ -149,10 +149,10 @@ impl Rule {
                 _ => return false,
             }
         }
-        if let Some(min) = self.min_blast_radius {
-            if req.blast_radius_count < min {
-                return false;
-            }
+        if let Some(min) = self.min_blast_radius
+            && req.blast_radius_count < min
+        {
+            return false;
         }
         true
     }

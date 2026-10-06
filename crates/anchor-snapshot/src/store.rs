@@ -49,16 +49,15 @@ impl Fault {
     /// builds (used by the kill-mid-snapshot / kill-mid-restore tests).
     fn from_env() -> Fault {
         let mut f = Fault::default();
-        if cfg!(debug_assertions) {
-            if let Ok(v) = std::env::var("ANCHOR_TEST_FAULT") {
-                if let Some((k, n)) = v.split_once(':') {
-                    let n = n.parse().ok();
-                    match k {
-                        "snapshot" => f.snapshot_after = n,
-                        "restore" => f.restore_after = n,
-                        _ => {}
-                    }
-                }
+        if cfg!(debug_assertions)
+            && let Ok(v) = std::env::var("ANCHOR_TEST_FAULT")
+            && let Some((k, n)) = v.split_once(':')
+        {
+            let n = n.parse().ok();
+            match k {
+                "snapshot" => f.snapshot_after = n,
+                "restore" => f.restore_after = n,
+                _ => {}
             }
         }
         f

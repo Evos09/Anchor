@@ -74,14 +74,14 @@ fn runtime_env(roles_toml: &str) -> Vec<(String, String)> {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    if let Ok(v) = roles_toml.parse::<toml::Table>() {
-        if let Some(providers) = v.get("providers").and_then(|p| p.as_table()) {
-            for p in providers.values() {
-                if let Some(k) = p.get("api_key_env").and_then(|k| k.as_str()) {
-                    if !k.is_empty() {
-                        names.push(k.to_string());
-                    }
-                }
+    if let Ok(v) = roles_toml.parse::<toml::Table>()
+        && let Some(providers) = v.get("providers").and_then(|p| p.as_table())
+    {
+        for p in providers.values() {
+            if let Some(k) = p.get("api_key_env").and_then(|k| k.as_str())
+                && !k.is_empty()
+            {
+                names.push(k.to_string());
             }
         }
     }

@@ -266,10 +266,10 @@ impl<T: Transport> Session<'_, T> {
                 }))?;
                 return Ok(());
             }
-            if let ContextStatus::PauseRequired { ratio } = status {
-                if !self.pause(ratio)? {
-                    return Ok(());
-                }
+            if let ContextStatus::PauseRequired { ratio } = status
+                && !self.pause(ratio)?
+            {
+                return Ok(());
             }
         }
     }

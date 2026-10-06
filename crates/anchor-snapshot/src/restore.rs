@@ -450,17 +450,17 @@ fn preflight_dir(store: &Store, cur: Option<&TreeObj>, tgt: Option<&TreeObj>, ou
                 preflight_dir(store, ct.as_ref(), tt.as_ref(), out);
             }
         };
-        if let Some(Node::File { id, .. }) = c {
-            if let Err(e) = store.file(id).and_then(|f| store.file_content(&f)) {
-                *out = Preflight::PreDamaged(e);
-                return;
-            }
+        if let Some(Node::File { id, .. }) = c
+            && let Err(e) = store.file(id).and_then(|f| store.file_content(&f))
+        {
+            *out = Preflight::PreDamaged(e);
+            return;
         }
-        if let Some(Node::File { id, .. }) = t {
-            if let Err(e) = store.file(id).and_then(|f| store.file_content(&f)) {
-                *out = Preflight::TargetDamaged(e);
-                return;
-            }
+        if let Some(Node::File { id, .. }) = t
+            && let Err(e) = store.file(id).and_then(|f| store.file_content(&f))
+        {
+            *out = Preflight::TargetDamaged(e);
+            return;
         }
         sub(c, t, out);
     }

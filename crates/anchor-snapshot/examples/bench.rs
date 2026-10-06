@@ -145,13 +145,13 @@ fn hardware() -> Vec<(String, String)> {
                 .unwrap_or_default(),
         ),
     ];
-    if let Ok(c) = fs::read_to_string("/proc/cpuinfo") {
-        if let Some(l) = c.lines().find(|l| l.starts_with("model name")) {
-            h.push((
-                "cpu".into(),
-                l.split(':').nth(1).unwrap_or("").trim().into(),
-            ));
-        }
+    if let Ok(c) = fs::read_to_string("/proc/cpuinfo")
+        && let Some(l) = c.lines().find(|l| l.starts_with("model name"))
+    {
+        h.push((
+            "cpu".into(),
+            l.split(':').nth(1).unwrap_or("").trim().into(),
+        ));
     }
     if let Ok(out) = std::process::Command::new("sysctl")
         .args(["-n", "machdep.cpu.brand_string"])

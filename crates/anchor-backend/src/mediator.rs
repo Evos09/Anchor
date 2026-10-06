@@ -361,10 +361,10 @@ impl Mediator {
             })
             .build();
         for ent in walker.flatten() {
-            if ent.file_type().is_some_and(|t| t.is_file()) {
-                if let Ok(rel) = ent.path().strip_prefix(&root) {
-                    out.push(rel.to_path_buf());
-                }
+            if ent.file_type().is_some_and(|t| t.is_file())
+                && let Ok(rel) = ent.path().strip_prefix(&root)
+            {
+                out.push(rel.to_path_buf());
             }
             if out.len() >= MAX_SEARCH_FILES {
                 break;

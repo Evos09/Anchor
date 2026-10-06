@@ -288,10 +288,10 @@ impl TreeObj {
                     String::from_utf8_lossy(&name)
                 ));
             }
-            if let Some(prev) = entries.last() {
-                if prev.name >= name {
-                    return bad("tree: entries unsorted or duplicated");
-                }
+            if let Some(prev) = entries.last()
+                && prev.name >= name
+            {
+                return bad("tree: entries unsorted or duplicated");
             }
             let node = match r.u8()? {
                 1 => Node::File {

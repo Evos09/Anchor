@@ -511,7 +511,7 @@ mod symlinks {
             let mut n = 0u64;
             while !s2.load(Ordering::Relaxed) {
                 let tmp = ws.join(format!(".flip{n}"));
-                let target: &Path = if n % 2 == 0 {
+                let target: &Path = if n.is_multiple_of(2) {
                     &outside
                 } else {
                     Path::new("inside")
