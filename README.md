@@ -194,8 +194,7 @@ every §11 threat to its test and its per-platform status.
     - messages persisting across restart;
     - the Threat 8 rogue-agent suite.
 
-- Phase 5, the verification pipeline (ADR-0024). Verified locally on
-  Linux; the confirming CI run is pending.
+- Phase 5, the verification pipeline (ADR-0024).
   - **Deterministic Tester:** build, test and coverage commands from the
     user's `[verify]`, sandboxed.
   - **Claims and evidence:** claims resolved to evidence, and claims

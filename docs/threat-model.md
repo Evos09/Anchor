@@ -78,34 +78,34 @@ legend:
 ## §8 verification pipeline (Phase 5)
 
 Tests are in `crates/anchor-backend/tests/verify.rs` and `tests/eval.rs`.
-They use real commands (Python unittest and trace) in the sandbox, as root
-in CI containers (commands run as uid 65534). Design: ADR-0024.
+They use real commands (Python unittest and trace) in the sandbox. As root
+(the development container), commands run as uid 65534. Design: ADR-0024.
 
 | Requirement / threat | Test | Status |
 |---|---|---|
-| The pipeline refuses to start if executor and reviewer share a family | `pipeline_refuses_same_family`: same primary family, or overlap only through a fallback | ✅ Linux (local) · CI pending |
-| | `reviewer_falling_back_into_executor_family_is_refused` | ✅ Linux (local) · CI pending |
-| | `verdicts_from_an_executor_family_are_refused`: a session that fell back mid-review | ✅ Linux (local) · CI pending |
-| A failing build does not merge | `failing_build_does_not_merge` | ✅ Linux (local) · CI pending |
-| Failing tests do not merge | `failing_tests_do_not_merge`, with structured feedback (failing test, hunks) | ✅ Linux (local) · CI pending |
-| A failed review does not merge | `refuted_claim_does_not_merge` (mock model reviewer) | ✅ Linux (local) · CI pending |
-| | `uncovered_change_is_not_supported` (rule reviewer) | ✅ Linux (local) · CI pending |
-| A claim without evidence is rejected automatically (§8.2(b)) | `claim_without_evidence_rejected_automatically` | ✅ Linux (local) · CI pending |
-| Test tampering | `tampered_tests_rejected`: protected tests edited | ✅ Linux (local) · CI pending |
-| | `regressed_test_rejected`: a passing test deleted, with no protected paths | ✅ Linux (local) · CI pending |
-| Spoofed success (exit 0 before the tests can fail) | `spoofed_exit_rejected` (`tests_inconclusive`) | ✅ Linux (local) · CI pending |
-| Stdlib shadowing (`unittest.py` in the workspace) | `stdlib_shadowing_rejected` | ✅ Linux (local) · CI pending |
-| Verification commands are confined | `verification_commands_cannot_write_outside_scratch`; `verified_change_merges_with_evidence` (the test log records `fs_confined` and the network-isolation method) | ✅ Linux (local) · CI pending |
-| Evidence is durable, hashed and backend-only | `verified_change_merges_with_evidence`, `evidence_is_backend_only_hashed_and_immutable` | ✅ Linux (local) · CI pending |
-| §8.2(c) self-repair with feedback, bounded | `self_repair_merges_on_second_attempt` (the feedback is in the repair instruction) | ✅ Linux (local) · CI pending |
-| | `retries_are_bounded`, `user_decline_is_not_retried` | ✅ Linux (local) · CI pending |
-| What is applied is what was verified | `drift_reverifies_candidate`: main edited mid-check; the applied tree is the one verified last | ✅ Linux (local) · CI pending |
-| | `crash_after_gate_reverifies_on_recover`: a child `anchor team run` killed mid-apply; re-verified before applying | ✅ Linux (local) · CI pending |
-| Verification never stalls other agents | `slow_gate_does_not_block_other_agents`: the store stays available during a 1.5 s check | ✅ Linux (local) · CI pending |
-| Unverified merges are explicit | `unverified_team_needs_explicit_flag`; `merge_unverified` audited | ✅ Linux (local) · CI pending |
-| Windows fails closed | `verify_gate_fails_closed_on_windows` | CI pending |
-| §8.5 reviewer false-negative rate measured | `seeded_bug_harness_measures_reviewers`: accept-all lets through exactly what reaches review, oracle 0%, rule baseline matrix locked | ✅ Linux (local) · CI pending |
-| | `corpus_ground_truth_holds`, `eval_cli_with_mock_model_reviewer`; results in the [benchmark](benchmarks/reviewer.md) | ✅ Linux (local) · CI pending |
+| The pipeline refuses to start if executor and reviewer share a family | `pipeline_refuses_same_family`: same primary family, or overlap only through a fallback | ✅ Linux, macOS (run 37496045693) |
+| | `reviewer_falling_back_into_executor_family_is_refused` | ✅ Linux, macOS (run 37496045693) |
+| | `verdicts_from_an_executor_family_are_refused`: a session that fell back mid-review | ✅ Linux, macOS (run 37496045693) |
+| A failing build does not merge | `failing_build_does_not_merge` | ✅ Linux, macOS (run 37496045693) |
+| Failing tests do not merge | `failing_tests_do_not_merge`, with structured feedback (failing test, hunks) | ✅ Linux, macOS (run 37496045693) |
+| A failed review does not merge | `refuted_claim_does_not_merge` (mock model reviewer) | ✅ Linux, macOS (run 37496045693) |
+| | `uncovered_change_is_not_supported` (rule reviewer) | ✅ Linux, macOS (run 37496045693) |
+| A claim without evidence is rejected automatically (§8.2(b)) | `claim_without_evidence_rejected_automatically` | ✅ Linux, macOS (run 37496045693) |
+| Test tampering | `tampered_tests_rejected`: protected tests edited | ✅ Linux, macOS (run 37496045693) |
+| | `regressed_test_rejected`: a passing test deleted, with no protected paths | ✅ Linux, macOS (run 37496045693) |
+| Spoofed success (exit 0 before the tests can fail) | `spoofed_exit_rejected` (`tests_inconclusive`) | ✅ Linux, macOS (run 37496045693) |
+| Stdlib shadowing (`unittest.py` in the workspace) | `stdlib_shadowing_rejected` | ✅ Linux, macOS (run 37496045693) |
+| Verification commands are confined | `verification_commands_cannot_write_outside_scratch`; `verified_change_merges_with_evidence` (the test log records `fs_confined` and the network-isolation method) | ✅ Linux, macOS (run 37496045693) |
+| Evidence is durable, hashed and backend-only | `verified_change_merges_with_evidence`, `evidence_is_backend_only_hashed_and_immutable` | ✅ Linux, macOS (run 37496045693) |
+| §8.2(c) self-repair with feedback, bounded | `self_repair_merges_on_second_attempt` (the feedback is in the repair instruction) | ✅ Linux, macOS (run 37496045693) |
+| | `retries_are_bounded`, `user_decline_is_not_retried` | ✅ Linux, macOS (run 37496045693) |
+| What is applied is what was verified | `drift_reverifies_candidate`: main edited mid-check; the applied tree is the one verified last | ✅ Linux, macOS (run 37496045693) |
+| | `crash_after_gate_reverifies_on_recover`: a child `anchor team run` killed mid-apply; re-verified before applying | ✅ Linux, macOS (run 37496045693) |
+| Verification never stalls other agents | `slow_gate_does_not_block_other_agents`: the store stays available during a 1.5 s check | ✅ Linux, macOS (run 37496045693) |
+| Unverified merges are explicit | `unverified_team_needs_explicit_flag`; `merge_unverified` audited | ✅ Linux, macOS (run 37496045693) |
+| Windows fails closed | `verify_gate_fails_closed_on_windows` | ✅ Windows (run 37496045693) |
+| §8.5 reviewer false-negative rate measured | `seeded_bug_harness_measures_reviewers`: accept-all lets through exactly what reaches review, oracle 0%, rule baseline matrix locked | ✅ Linux, macOS (run 37496045693) |
+| | `corpus_ground_truth_holds`, `eval_cli_with_mock_model_reviewer`; results in the [benchmark](benchmarks/reviewer.md) | ✅ Linux, macOS (run 37496045693) |
 
 **Residual risks** (ADR-0024):
 
@@ -160,6 +160,10 @@ model key.
   only on demand.
 - Run 37474281956 (attempt 3): all jobs green on Linux, macOS and Windows;
   the Phase 4 done-when tests and the Threat 8 suite pass on all three.
+- Run 37496045693 (Phase 5, attempt 2): all jobs green on Linux, macOS
+  and Windows. The §8 done-when tests pass on Linux and macOS, and the
+  Windows gate fails closed. The Linux job ran the seeded-bug harness on
+  the whole corpus.
 
 ## Out of scope for this push
 
