@@ -8,8 +8,9 @@
 Evaluation is total and has four phases:
 
 1. **Capability floor** (built in, not editable). It denies: any target
-   inside `<workspace>/.anchor` for agent tools; non-absolute targets or
-   workspace roots; mutations without a target.
+   inside `<workspace>/.anchor` for agent tools; any target inside the
+   backend's state directory for every tool (ADR-0022); non-absolute
+   targets or workspace roots; mutations without a target.
 2. **Deny overrides**: if *any* `deny` rule matches, the request is denied,
    wherever that rule sits in the file.
 3. **First match**: otherwise the first matching `allow`/`prompt` rule in

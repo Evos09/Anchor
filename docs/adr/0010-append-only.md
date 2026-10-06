@@ -7,7 +7,7 @@
 
 Detection order (`anchor-guard`):
 
-1. **Explicit**: workspace-relative globs in `.anchor/workspace.toml`
+1. **Explicit**: workspace-relative globs in `workspace.toml` in the workspace's state directory (ADR-0022)
    (`append_only = ["logs/*.md"]`).
 2. **Marker**: the string `anchor:append-only` within the first 4 KiB.
 3. **Heuristics**:

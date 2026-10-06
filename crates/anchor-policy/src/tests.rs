@@ -230,6 +230,35 @@ fn capability_floor_protects_anchor_state_dir() {
 }
 
 #[test]
+fn protected_dir_is_floor_denied_for_every_tool() {
+    let policy = "version = 1\n[default]\naction = \"allow\"\n";
+    let (mut e, _d) = engine_with(policy);
+    e.protect(abs_path("/home/dev/.local/state/anchor/ws/abc"));
+    let r = req(
+        Tool::ReadFile,
+        Operation::Read,
+        "/home/dev/.local/state/anchor/ws/abc/policy.toml",
+    );
+    let (a, rule) = action_of(&e, &r);
+    assert_eq!((a, rule.as_str()), ("deny", "capability:anchor_state_dir"));
+    assert!(!e.would_allow(&r));
+    assert_eq!(e.peek(&r), Action::Deny);
+    let u = req(
+        Tool::UserAction,
+        Operation::Write,
+        "/home/dev/.local/state/anchor/ws/abc/snapshots/refs/HEAD",
+    );
+    assert!(e.user_initiated(UserAction::Rollback, &u).is_err());
+    // A sibling directory with a common prefix is not protected.
+    let sib = req(
+        Tool::ReadFile,
+        Operation::Read,
+        "/home/dev/.local/state/anchor/ws/abcd/x",
+    );
+    assert_eq!(action_of(&e, &sib).0, "allow");
+}
+
+#[test]
 fn capability_floor_rejects_relative_target() {
     let policy = "version = 1\n[default]\naction = \"allow\"\n";
     let (e, _d) = engine_with(policy);

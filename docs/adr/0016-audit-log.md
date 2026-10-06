@@ -5,7 +5,7 @@
 
 ## Decision
 
-`.anchor/audit.jsonl` holds one JSON object per line:
+`audit.jsonl` in the workspace's state directory (ADR-0022) holds one JSON object per line:
 `{seq, ts_ms, kind, data, prev, hash}`. The hash is SHA-256 over the
 canonical JSON encoding of `{seq, ts_ms, kind, data, prev}`; serde_json maps
 are ordered, so the encoding is canonical. Each entry is fsynced. The log is

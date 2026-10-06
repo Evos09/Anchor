@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use anchor_backend::interact::Scripted;
 use anchor_backend::session::{self, SessionConfig, SessionReport};
-use anchor_backend::{Opened, default_exec_read_only, open_workspace};
+use anchor_backend::{Opened, StatePaths, default_exec_read_only, open_workspace_in};
 use anchor_policy::AuditLog;
 use anchor_protocol::{CheckpointReason, ResumeChoice};
 
@@ -85,9 +85,20 @@ fn fixture() -> Fx {
     }
 }
 
+impl Fx {
+    /// Base directory for backend state, outside the workspace.
+    fn state_base(&self) -> PathBuf {
+        self.base.join("state")
+    }
+    fn state(&self) -> StatePaths {
+        StatePaths::create(&self.ws, &self.state_base()).unwrap()
+    }
+}
+
 fn open(fx: &Fx, approve: bool, resume: ResumeChoice) -> Opened {
-    open_workspace(
+    open_workspace_in(
         &fx.ws,
+        &fx.state_base(),
         None,
         Box::new(Scripted::new(approve, resume)),
         default_exec_read_only(),
@@ -457,11 +468,12 @@ fn kill_mid_turn_leaves_valid_checkpoint_and_resumes() {
         .arg(dir.join("roles.toml"))
         .arg("--mock-script")
         .arg(dir.join("script.json"))
+        .env(anchor_backend::STATE_DIR_ENV, fx.state_base())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    let audit = fx.ws.join(".anchor/audit.jsonl");
+    let audit = fx.state().audit;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     // Wait until the command is running (turn 2), then kill -9.
     loop {
@@ -475,8 +487,7 @@ fn kill_mid_turn_leaves_valid_checkpoint_and_resumes() {
     child.kill().unwrap();
     child.wait().unwrap();
 
-    let store =
-        anchor_checkpoint::CheckpointStore::open(&fx.ws.join(".anchor/checkpoints")).unwrap();
+    let store = anchor_checkpoint::CheckpointStore::open(&fx.state().checkpoints).unwrap();
     let (ok, bad) = store.list().unwrap();
     assert!(bad.is_empty(), "{bad:?}");
     let latest = store.latest(None).unwrap().expect("a checkpoint survived");
@@ -503,4 +514,47 @@ fn kill_mid_turn_leaves_valid_checkpoint_and_resumes() {
     };
     let r = session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap();
     assert_eq!(r.done.as_deref(), Some("recovered"));
+}
+
+/// ADR-0022 / Threat 9: an approved agent command cannot read or write the
+/// backend's state (policy, audit log, durability store), and the agent's
+/// file tools cannot target it either.
+#[test]
+fn command_cannot_touch_state_dir() {
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = open(&fx, true, ResumeChoice::FreshSession);
+    let state = opened.paths.dir.clone();
+    assert!(!state.starts_with(&fx.ws));
+    let policy_before = std::fs::read(&opened.paths.policy).unwrap();
+    let p = |name: &str| state.join(name).display().to_string();
+    let script = serde_json::json!({"steps": [
+        {"content": "", "tool_calls": [
+            {"tool": "run_command", "args": {"program": "cp", "args": ["src/main.py", p("policy.toml")]}},
+            {"tool": "run_command", "args": {"program": "touch", "args": [p("evil")]}},
+            {"tool": "run_command", "args": {"program": "cat", "args": [p("audit.jsonl")]}},
+            {"tool": "write_file", "args": {"path": p("policy.toml"), "content": "x"}},
+            {"tool": "read_file", "args": {"path": p("audit.jsonl")}}
+        ]},
+        {"content": "done"}
+    ]})
+    .to_string();
+    let report = run(&fx, &mut opened, &script, 0.8, ROLES);
+    assert!(report.failed.is_none(), "{:?}", report.failed);
+    assert_eq!(std::fs::read(&opened.paths.policy).unwrap(), policy_before);
+    assert!(!state.join("evil").exists());
+    let ents = entries(&opened);
+    let commands: Vec<_> = ents.iter().filter(|e| e.kind == "command").collect();
+    assert_eq!(commands.len(), 3, "all three commands ran (sandboxed)");
+    for c in &commands {
+        let exit = c.data["exit"].as_str().unwrap_or_default().to_string();
+        assert_ne!(
+            exit, "Code(0)",
+            "command succeeded against the state dir: {c:?}"
+        );
+    }
+    // File tools never reach the state dir: path confinement refuses any
+    // absolute path outside the workspace before the engine is consulted
+    // (the engine's floor rule for the state dir is defence in depth).
+    assert_eq!(report.stats.denied, 2, "both file-tool attempts refused");
 }

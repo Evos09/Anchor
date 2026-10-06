@@ -22,8 +22,11 @@ use preimage::PreimageStore;
 /// The policy shipped with Anchor; copied into a workspace on first use.
 pub const DEFAULT_POLICY: &str = include_str!("../../../config/policy.default.toml");
 
-/// Per-workspace state lives in `<workspace>/.anchor/` (never agent-writable:
-/// the permission engine's capability floor denies it).
+/// Per-workspace backend state: policy, audit log, checkpoints, the
+/// durability store. It lives **outside** the workspace (ADR-0022): agent
+/// commands get read-write access to the whole workspace, and a sandbox
+/// cannot carve a subtree out of a granted path, so state inside the
+/// workspace would be writable by any approved command.
 #[derive(Debug, Clone)]
 pub struct StatePaths {
     pub dir: PathBuf,
@@ -34,9 +37,42 @@ pub struct StatePaths {
     pub preimages: PathBuf,
 }
 
+/// Environment override for the state base directory.
+pub const STATE_DIR_ENV: &str = "ANCHOR_STATE_DIR";
+
+/// The base directory holding every workspace's state:
+/// `$ANCHOR_STATE_DIR`, else the platform's per-user state directory.
+pub fn default_state_base() -> PathBuf {
+    if let Some(d) = std::env::var_os(STATE_DIR_ENV).filter(|d| !d.is_empty()) {
+        return PathBuf::from(d);
+    }
+    let home = home_dir();
+    if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData").join("Local"))
+            .join("anchor")
+    } else if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/anchor")
+    } else {
+        std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".local/state"))
+            .join("anchor")
+    }
+}
+
 impl StatePaths {
-    pub fn for_root(root: &Path) -> Self {
-        let dir = root.join(".anchor");
+    /// State paths for the workspace with canonical root `root`, under
+    /// `base` (see [`default_state_base`]). The directory name is derived
+    /// from the canonical root, so each workspace gets its own.
+    pub fn for_workspace(root: &Path, base: &Path) -> Self {
+        let id = anchor_policy::audit::sha256_hex(root.to_string_lossy().as_bytes());
+        Self::in_dir(base.join("ws").join(&id[..16]))
+    }
+
+    fn in_dir(dir: PathBuf) -> Self {
         StatePaths {
             policy: dir.join("policy.toml"),
             audit: dir.join("audit.jsonl"),
@@ -45,6 +81,47 @@ impl StatePaths {
             preimages: dir.join("preimages"),
             dir,
         }
+    }
+
+    /// Create the state directory (owner-only on Unix), canonicalise it,
+    /// and refuse layouts where the workspace and the state overlap.
+    pub fn create(root: &Path, base: &Path) -> Result<Self, OpenError> {
+        let wanted = Self::for_workspace(root, base);
+        create_private_dir(&wanted.dir)?;
+        let dir = anchor_fs::normalize_verbatim(&std::fs::canonicalize(&wanted.dir)?);
+        if dir.starts_with(root) || root.starts_with(&dir) {
+            return Err(OpenError::StateOverlap {
+                state: dir,
+                workspace: root.to_path_buf(),
+            });
+        }
+        let paths = Self::in_dir(dir);
+        // Record which workspace this directory belongs to (for humans).
+        let marker = paths.dir.join("workspace-root");
+        if !marker.exists() {
+            std::fs::write(&marker, format!("{}\n", root.display()))?;
+        }
+        Ok(paths)
+    }
+}
+
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        let mode = std::fs::metadata(dir)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
     }
 }
 
@@ -64,6 +141,10 @@ pub enum OpenError {
     Preimage(#[from] preimage::PreimageError),
     #[error("checkpoints: {0}")]
     Checkpoint(#[from] anchor_checkpoint::CheckpointError),
+    #[error(
+        "state directory {state} overlaps the workspace {workspace}; set {STATE_DIR_ENV} to a directory outside it"
+    )]
+    StateOverlap { state: PathBuf, workspace: PathBuf },
 }
 
 pub struct Opened {
@@ -86,18 +167,41 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/nonexistent-home"))
 }
 
-/// Open a workspace: canonical root, state dir, policy (installing the
-/// default if none exists), audit log, guard, pre-image and checkpoint
-/// stores.
+/// Open a workspace with the default state location: canonical root, state
+/// directory, policy (installing the default if none exists), audit log,
+/// guard, pre-image and checkpoint stores.
 pub fn open_workspace(
     root: &Path,
     policy_override: Option<&Path>,
     interact: Box<dyn Interaction>,
     exec_read_only: Vec<PathBuf>,
 ) -> Result<Opened, OpenError> {
+    open_workspace_in(
+        root,
+        &default_state_base(),
+        policy_override,
+        interact,
+        exec_read_only,
+    )
+}
+
+/// [`open_workspace`] with an explicit state base directory.
+pub fn open_workspace_in(
+    root: &Path,
+    state_base: &Path,
+    policy_override: Option<&Path>,
+    interact: Box<dyn Interaction>,
+    exec_read_only: Vec<PathBuf>,
+) -> Result<Opened, OpenError> {
     let ws = Workspace::open(root)?;
-    let paths = StatePaths::for_root(ws.root());
-    std::fs::create_dir_all(&paths.dir)?;
+    let paths = StatePaths::create(ws.root(), state_base)?;
+    if ws.root().join(".anchor").exists() {
+        eprintln!(
+            "anchor: note: {} is from an older layout and is no longer used; state now lives in {}",
+            ws.root().join(".anchor").display(),
+            paths.dir.display()
+        );
+    }
     if policy_override.is_none() && !paths.policy.exists() {
         std::fs::write(&paths.policy, DEFAULT_POLICY)?;
     }
@@ -105,7 +209,8 @@ pub fn open_workspace(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| paths.policy.clone());
     let audit = AuditLog::open(&paths.audit)?;
-    let engine = Engine::from_file(&policy_path, &home_dir(), audit)?;
+    let mut engine = Engine::from_file(&policy_path, &home_dir(), audit)?;
+    engine.protect(paths.dir.clone());
     let guard = Guard::load(&paths.workspace_config)?;
     let preimages = PreimageStore::open(&paths.preimages)?;
     let checkpoints = CheckpointStore::open(&paths.checkpoints)?;

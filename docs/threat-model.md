@@ -21,7 +21,7 @@ legend:
 | 6 | Network egress | Commands default to network-denied: user+net namespace, or a seccomp socket filter where user namespaces are restricted (Ubuntu ≥ 23.10, GitHub runners); macOS Seatbelt; `network = true` requires a prompt | `network_denied_process_has_no_network` (both Linux methods, asserting the mechanism's errno), `network_allowed_process_can_open_inet_sockets` | ✅ Linux · 🟡 macOS (Seatbelt rule applied, no egress test yet) · ⛔ Windows |
 | 7 | Resource exhaustion | rlimits (NPROC, AS, CPU, FSIZE, CORE), wall timeout, process-group kill, root drop | `fork_bomb_is_contained`, `process_limit_refuses_excess_forks`, `memory_limit_enforced` (Linux), `wall_timeout_kills`, `output_is_capped` | ✅ Linux · ✅ macOS except memory (RLIMIT_AS unsupported, ADR-0003) · ⛔ Windows |
 | 8 | Malicious MCP/A2A peer | Hub RPC authentication and authorisation | — | ⏳ Phase 4 |
-| 9 | Snapshot poisoning | Hash-verified blobs; manifest paths re-confined on restore | `crafted_manifest_cannot_escape_on_restore` (interim store) | ✅ interim · ⏳ Phase 3 engine |
+| 9 | Snapshot poisoning | State (policy, audit, store) lives outside the workspace, beyond every command sandbox (ADR-0022); hash-verified blobs; manifest paths re-confined on restore | `command_cannot_touch_state_dir`, `crafted_manifest_cannot_escape_on_restore` (interim store) | ✅ Linux, macOS · ⏳ Phase 3 engine |
 
 ## §5 primitive test bullets
 

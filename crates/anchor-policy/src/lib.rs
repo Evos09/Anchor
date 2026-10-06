@@ -229,6 +229,9 @@ pub struct Engine {
     state: Mutex<PolicyState>,
     audit: AuditLog,
     next_decision: AtomicU64,
+    /// Extra floor-protected directories (the backend's state directory,
+    /// which lives outside the workspace). Canonical paths.
+    protected: Vec<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -269,6 +272,7 @@ impl Engine {
             }),
             audit,
             next_decision: AtomicU64::new(1),
+            protected: Vec::new(),
         };
         engine.audit.append(
             "policy_loaded",
@@ -289,6 +293,30 @@ impl Engine {
             }),
             audit,
             next_decision: AtomicU64::new(1),
+            protected: Vec::new(),
+        }
+    }
+
+    /// Add a directory that no request may target, for any tool (including
+    /// user-initiated actions). `dir` must be canonical.
+    pub fn protect(&mut self, dir: PathBuf) {
+        if !self.protected.contains(&dir) {
+            self.protected.push(dir);
+        }
+    }
+
+    fn protected_floor(&self, req: &PermissionRequest) -> Option<&'static str> {
+        let t = req.canonical_target.as_deref()?;
+        self.protected
+            .iter()
+            .any(|d| t.starts_with(d))
+            .then_some("capability:anchor_state_dir")
+    }
+
+    fn eval(&self, policy: &Policy, req: &PermissionRequest) -> (Action, String, Phase) {
+        match self.protected_floor(req) {
+            Some(rule) => (Action::Deny, rule.to_string(), Phase::CapabilityFloor),
+            None => evaluate(policy, req),
         }
     }
 
@@ -359,7 +387,7 @@ impl Engine {
                 Err(p) => p.into_inner(),
             };
             self.refresh(&mut state);
-            evaluate(&state.policy, req)
+            self.eval(&state.policy, req)
         };
         let logged = self.audit.append(
             "decision",
@@ -401,7 +429,7 @@ impl Engine {
             Ok(s) => s,
             Err(p) => p.into_inner(),
         };
-        matches!(evaluate(&state.policy, req).0, Action::Allow)
+        matches!(self.eval(&state.policy, req).0, Action::Allow)
     }
 
     /// The action the policy would take, without minting or logging. Used to
@@ -413,7 +441,7 @@ impl Engine {
             Ok(s) => s,
             Err(p) => p.into_inner(),
         };
-        evaluate(&state.policy, req).0
+        self.eval(&state.policy, req).0
     }
 
     /// Record the user's answer to a prompt.
@@ -458,7 +486,7 @@ impl Engine {
         req: &PermissionRequest,
     ) -> Result<Approved, Denial> {
         let decision_id = self.next_decision.fetch_add(1, Ordering::SeqCst);
-        let floor = capability_floor(req);
+        let floor = capability_floor(req).or_else(|| self.protected_floor(req));
         let logged = self.audit.append(
             "user_initiated",
             serde_json::json!({

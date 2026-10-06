@@ -68,6 +68,10 @@ canonical path, and the session ends with a cost summary. Afterwards:
 ./target/debug/anchor rollback --workspace /tmp/anchor-demo/ws --turn 3
 ```
 
+Policy, audit log, checkpoints and snapshots live outside the workspace, so
+agent commands can't reach them (ADR-0022). `anchor state-dir --workspace
+DIR` prints the location; set `ANCHOR_STATE_DIR` to move it.
+
 For real models, copy `config/roles.example.toml`. Point it at a local
 OpenAI-compatible server (`anchor detect-local`) and/or a hosted API with
 your own key (`api_key_env`).

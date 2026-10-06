@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use anchor_backend::interact::{Interaction, Scripted, Terminal};
 use anchor_backend::session::{self, SessionConfig};
-use anchor_backend::{StatePaths, default_exec_read_only, open_workspace};
+use anchor_backend::{StatePaths, default_exec_read_only, default_state_base, open_workspace};
 use anchor_checkpoint::CheckpointStore;
 use anchor_policy::{AuditLog, Policy};
 use anchor_protocol::ResumeChoice;
@@ -16,7 +16,7 @@ anchor — trust-first coding agent (backend harness)
 
 USAGE:
   anchor run --workspace DIR --task TEXT --roles FILE [options]
-      --policy FILE          use this policy instead of DIR/.anchor/policy.toml
+      --policy FILE          use this policy instead of the workspace's policy.toml
       --mock-script FILE     scripted responses for `kind = \"mock\"` providers
       --threshold F          pause at this fraction of the context window (default 0.8)
       --resume ID            seed a fresh session from checkpoint ID
@@ -30,7 +30,11 @@ USAGE:
   anchor checkpoint list --workspace DIR
   anchor rollback --workspace DIR --turn N [--yes]
   anchor mark-not-append-only --workspace DIR PATH
+  anchor state-dir --workspace DIR
   anchor detect-local [--agent PATH]
+
+Per-workspace state (policy, audit log, checkpoints, snapshots) lives outside
+the workspace, under $ANCHOR_STATE_DIR or the per-user state directory.
 ";
 
 struct Args {
@@ -161,10 +165,20 @@ fn cmd_run(a: &Args) -> Result<ExitCode, String> {
     })
 }
 
+/// State paths for `--workspace`, creating the state directory if needed.
+fn state_paths(a: &Args) -> Result<StatePaths, String> {
+    let ws =
+        anchor_fs::Workspace::open(Path::new(a.need("--workspace")?)).map_err(|e| e.to_string())?;
+    StatePaths::create(ws.root(), &default_state_base()).map_err(|e| e.to_string())
+}
+
+fn cmd_state_dir(a: &Args) -> Result<ExitCode, String> {
+    println!("{}", state_paths(a)?.dir.display());
+    Ok(ExitCode::SUCCESS)
+}
+
 fn cmd_audit(a: &Args) -> Result<ExitCode, String> {
-    let ws = PathBuf::from(a.need("--workspace")?);
-    let root = std::fs::canonicalize(&ws).map_err(|e| e.to_string())?;
-    let path = StatePaths::for_root(&root).audit;
+    let path = state_paths(a)?.audit;
     match a.pos.get(1).map(String::as_str) {
         Some("verify") => match AuditLog::verify(&path) {
             Ok(n) => {
@@ -218,9 +232,7 @@ fn cmd_policy(a: &Args) -> Result<ExitCode, String> {
 }
 
 fn cmd_checkpoint(a: &Args) -> Result<ExitCode, String> {
-    let root = std::fs::canonicalize(a.need("--workspace")?).map_err(|e| e.to_string())?;
-    let store = CheckpointStore::open(&StatePaths::for_root(&root).checkpoints)
-        .map_err(|e| e.to_string())?;
+    let store = CheckpointStore::open(&state_paths(a)?.checkpoints).map_err(|e| e.to_string())?;
     let (ok, bad) = store.list().map_err(|e| e.to_string())?;
     for c in ok {
         println!(
@@ -274,9 +286,10 @@ fn cmd_mark(a: &Args) -> Result<ExitCode, String> {
         .map_err(|e| e.to_string())?;
     let st = opened.mediator.mark_not_append_only(&r)?;
     println!(
-        "{}: now {:?} (override persisted in .anchor/workspace.toml)",
+        "{}: now {:?} (override persisted in {})",
         r.display(),
-        st
+        st,
+        opened.paths.workspace_config.display()
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -314,6 +327,7 @@ fn main() -> ExitCode {
         Some("checkpoint") => cmd_checkpoint(&a),
         Some("rollback") => cmd_rollback(&a),
         Some("mark-not-append-only") => cmd_mark(&a),
+        Some("state-dir") => cmd_state_dir(&a),
         Some("detect-local") => cmd_detect(&a),
         _ => {
             print!("{USAGE}");
