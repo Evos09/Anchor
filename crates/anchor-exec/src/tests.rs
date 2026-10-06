@@ -73,27 +73,86 @@ fn environment_is_cleared() {
 #[cfg(target_os = "linux")]
 #[test]
 fn network_denied_process_has_no_network() {
-    let out = run(&spec("cat", &["/proc/net/dev"], Network::Deny)).unwrap();
-    assert!(out.isolation.network_isolated);
-    let text = String::from_utf8_lossy(&out.stdout);
-    let ifaces: Vec<_> = text
-        .lines()
-        .skip(2)
-        .filter_map(|l| l.split(':').next())
-        .map(|s| s.trim().to_string())
-        .collect();
-    assert_eq!(ifaces, vec!["lo".to_string()], "{text}");
-
-    // A real connection attempt fails.
-    if resolve_program("curl", &path_var()).is_ok() {
-        let out = run(&spec(
-            "curl",
-            &["-sS", "--max-time", "5", "http://1.1.1.1/"],
-            Network::Deny,
-        ))
-        .unwrap();
-        assert_ne!(out.exit, ExitKind::Exited(0), "curl reached the network");
+    for force_seccomp in [false, true] {
+        sys::linux_net::FORCE_SECCOMP.with(|f| f.set(force_seccomp));
+        let out = run(&spec("cat", &["/proc/net/dev"], Network::Deny)).unwrap();
+        let method = out.isolation.network.expect("network denied");
+        if force_seccomp {
+            assert_eq!(method, NetworkMethod::Seccomp);
+        }
+        if method == NetworkMethod::Namespace {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let ifaces: Vec<_> = text
+                .lines()
+                .skip(2)
+                .filter_map(|l| l.split(':').next())
+                .map(|s| s.trim().to_string())
+                .collect();
+            assert_eq!(ifaces, vec!["lo".to_string()], "{text}");
+        }
+        // Real egress attempts fail (TCP and UDP); local AF_UNIX still works.
+        if resolve_program("python3", &path_var()).is_ok() {
+            let probe = r#"
+import socket
+def attempt(kind):
+    try:
+        s = socket.socket(socket.AF_INET, kind)
+        s.settimeout(3)
+        if kind == socket.SOCK_STREAM:
+            s.connect(("1.1.1.1", 80))
+        else:
+            s.sendto(b"x", ("1.1.1.1", 53))
+        print(kind, "EGRESS_OK")
+    except OSError as e:
+        print(kind, "blocked", e.errno)
+attempt(socket.SOCK_STREAM)
+attempt(socket.SOCK_DGRAM)
+a, b = socket.socketpair(socket.AF_UNIX)
+a.send(b"ok"); print("unix", b.recv(2).decode())
+"#;
+            let out = run(&spec("python3", &["-c", probe], Network::Deny)).unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(!text.contains("EGRESS_OK"), "{method:?}: {text}");
+            // Blocked by the mechanism itself, not by an outside firewall:
+            // seccomp refuses the socket (EACCES); an empty namespace has no
+            // route (ENETUNREACH).
+            let expected = match method {
+                NetworkMethod::Seccomp => libc::EACCES,
+                _ => libc::ENETUNREACH,
+            };
+            assert_eq!(
+                text.matches(&format!("blocked {expected}")).count(),
+                2,
+                "{method:?}: {text}"
+            );
+            assert!(
+                text.contains("unix ok"),
+                "{method:?}: {text} {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
+    sys::linux_net::FORCE_SECCOMP.with(|f| f.set(false));
+}
+
+/// Without network denial, the seccomp filter is not applied.
+#[cfg(target_os = "linux")]
+#[test]
+fn network_allowed_process_can_open_inet_sockets() {
+    if resolve_program("python3", &path_var()).is_err() {
+        return;
+    }
+    let out = run(&spec(
+        "python3",
+        &[
+            "-c",
+            "import socket; socket.socket(socket.AF_INET); print('inet ok')",
+        ],
+        Network::Allow,
+    ))
+    .unwrap();
+    assert!(out.isolation.network.is_none());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "inet ok\n");
 }
 
 /// Threat 7: a fork bomb is stopped at the process limit and the whole

@@ -184,8 +184,18 @@ fn end_to_end_session_enforces_every_primitive() {
 
     // 9 attack calls denied. The tenth, `echo "; rm -rf / #"`, runs: the
     // payload is a single inert argv element (Threat 4).
-    assert_eq!(report.stats.denied, 9, "{:?}", report.stats);
-    assert_eq!(report.stats.commands, 2);
+    let es = entries(&opened);
+    let refused: Vec<_> = es
+        .iter()
+        .filter(|e| e.kind == "command_refused")
+        .map(|e| e.data.to_string())
+        .collect();
+    assert_eq!(
+        report.stats.denied, 9,
+        "{:?}; sandbox refusals: {refused:?}",
+        report.stats
+    );
+    assert_eq!(report.stats.commands, 2, "sandbox refusals: {refused:?}");
 
     // Instrumentation: every filesystem mutation in this process went
     // through anchor-fs with an approval, and each has an audit record whose
@@ -470,7 +480,13 @@ fn kill_mid_turn_leaves_valid_checkpoint_and_resumes() {
     let (ok, bad) = store.list().unwrap();
     assert!(bad.is_empty(), "{bad:?}");
     let latest = store.latest(None).unwrap().expect("a checkpoint survived");
-    assert_eq!(latest.turn, 1);
+    let refused: Vec<_> = AuditLog::read_entries(&audit)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.kind == "command_refused")
+        .map(|e| e.data.to_string())
+        .collect();
+    assert_eq!(latest.turn, 1, "sandbox refusals: {refused:?}");
     assert!(AuditLog::verify(&audit).is_ok());
     assert!(ok.iter().all(|c| c.turn == 1));
 

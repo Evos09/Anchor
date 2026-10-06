@@ -18,7 +18,8 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let base = fs::canonicalize(dir.path()).unwrap();
+    // Same form Anchor displays (no Windows verbatim prefix).
+    let base = normalize_verbatim(&fs::canonicalize(dir.path()).unwrap());
     let ws = base.join("ws");
     let outside = base.join("outside");
     fs::create_dir_all(&ws).unwrap();
@@ -220,6 +221,40 @@ fn remove_requires_delete_approval_and_same_file() {
     let a = approve(&f, &w, &r, Operation::Delete);
     w.remove(&r, a).unwrap();
     assert!(!f.ws.join("gone.txt").exists());
+}
+
+#[test]
+fn verbatim_absolute_params_are_accepted() {
+    let f = fixture();
+    let w = Workspace::open(&f.ws).unwrap();
+    fs::write(f.ws.join("v.txt"), b"x").unwrap();
+    // `canonicalize` yields the verbatim form on Windows.
+    let verbatim = fs::canonicalize(f.ws.join("v.txt")).unwrap();
+    let r = w.resolve(verbatim.to_str().unwrap()).unwrap();
+    assert_eq!(r.canonical, f.ws.join("v.txt"));
+    assert_eq!(normalize_verbatim(&r.canonical), r.canonical);
+}
+
+#[cfg(windows)]
+#[test]
+fn normalize_verbatim_forms() {
+    use std::path::Path;
+    assert_eq!(
+        normalize_verbatim(Path::new(r"\\?\C:\a\b")),
+        PathBuf::from(r"C:\a\b")
+    );
+    assert_eq!(
+        normalize_verbatim(Path::new(r"\\?\UNC\srv\share\x")),
+        PathBuf::from(r"\\srv\share\x")
+    );
+    assert_eq!(
+        normalize_verbatim(Path::new(r"C:\a")),
+        PathBuf::from(r"C:\a")
+    );
+    assert_eq!(
+        normalize_verbatim(Path::new(r"\\?\Volume{x}\a")),
+        PathBuf::from(r"\\?\Volume{x}\a")
+    );
 }
 
 #[test]

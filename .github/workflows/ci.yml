@@ -16,7 +16,7 @@ jobs:
     name: Linux (blocking)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
       - name: Format
@@ -24,7 +24,7 @@ jobs:
       - name: Clippy (includes the Layer 2 no-filesystem rule)
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
       - name: Type-check other platforms
         run: |
           rustup target add x86_64-pc-windows-gnu aarch64-apple-darwin
@@ -39,7 +39,7 @@ jobs:
     name: Supply chain (cargo-deny)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked --version 0.20.2
       - name: Advisories, licenses, bans, sources
@@ -58,10 +58,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Toolchain
         run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast

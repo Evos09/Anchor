@@ -739,7 +739,8 @@ impl Mediator {
                         "program": spec.program,
                         "args": spec.args,
                         "exit": format!("{:?}", o.exit),
-                        "network_isolated": o.isolation.network_isolated,
+                        "network_isolated": o.isolation.network_isolated(),
+                        "network_method": o.isolation.network.map(|m| format!("{m:?}")),
                         "fs_confined": o.isolation.fs_confined,
                     }),
                 );
@@ -762,7 +763,18 @@ impl Mediator {
                     ),
                 }
             }
-            Err(anchor_exec::ExecError::SandboxUnavailable(m)) => denied(DeniedBy::Sandbox, m),
+            Err(anchor_exec::ExecError::SandboxUnavailable(m)) => {
+                let _ = self.engine.audit().append(
+                    "command_refused",
+                    serde_json::json!({
+                        "turn": self.turn,
+                        "program": spec.program,
+                        "reason": "sandbox_unavailable",
+                        "detail": m,
+                    }),
+                );
+                denied(DeniedBy::Sandbox, m)
+            }
             Err(e) => error(e.to_string()),
         }
     }

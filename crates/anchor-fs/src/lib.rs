@@ -218,7 +218,8 @@ impl Workspace {
         if param.is_empty() || param.contains('\0') {
             return Err(FsError::InvalidParam);
         }
-        let p = Path::new(param);
+        let normalized = normalize_verbatim(Path::new(param));
+        let p = normalized.as_path();
         let rel_input: &Path = if p.is_absolute() || p.has_root() {
             match strip_root_prefix(p, &self.root) {
                 Some(r) => r,
@@ -464,6 +465,27 @@ impl Workspace {
         }
         Ok(receipt)
     }
+}
+
+/// Convert a Windows verbatim path (`\\?\C:\x`, `\\?\UNC\srv\share`) to
+/// the ordinary form Anchor uses for canonical paths (`C:\x`,
+/// `\\srv\share`). `std::fs::canonicalize` returns the verbatim form, so
+/// absolute parameters may arrive either way. A no-op on other platforms.
+pub fn normalize_verbatim(p: &Path) -> PathBuf {
+    if cfg!(windows) {
+        let s = p.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            // Only drive-letter forms; other verbatim namespaces (e.g.
+            // `\\?\Volume{..}`) stay as-is and will not match the root.
+            if rest.as_bytes().get(1) == Some(&b':') {
+                return PathBuf::from(rest);
+            }
+        }
+    }
+    p.to_path_buf()
 }
 
 /// True iff `new` starts with exactly `original` (hash and byte comparison).

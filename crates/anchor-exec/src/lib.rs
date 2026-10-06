@@ -111,11 +111,30 @@ pub enum ExitKind {
     TimedOut,
 }
 
+/// How network access was denied to a child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkMethod {
+    /// Fresh user + network namespace (loopback only).
+    Namespace,
+    /// Seccomp filter refusing non-`AF_UNIX` sockets (used where user
+    /// namespaces are unavailable).
+    Seccomp,
+    /// macOS Seatbelt `(deny network*)`.
+    Seatbelt,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Isolation {
-    pub network_isolated: bool,
+    /// `Some` iff network access was denied, and how.
+    pub network: Option<NetworkMethod>,
     pub fs_confined: bool,
     pub dropped_root: bool,
+}
+
+impl Isolation {
+    pub fn network_isolated(&self) -> bool {
+        self.network.is_some()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -199,7 +218,7 @@ pub fn run(spec: &CommandSpec) -> Result<Output, ExecError> {
     if spec.args.iter().any(|a| a.contains('\0')) {
         return Err(ExecError::NulInArgument);
     }
-    let (mut cmd, isolation) = sys::build(spec)?;
+    let (mut cmd, isolation, steps) = sys::build(spec)?;
     cmd.current_dir(&spec.cwd)
         .env_clear()
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
@@ -208,13 +227,13 @@ pub fn run(spec: &CommandSpec) -> Result<Output, ExecError> {
         .stderr(Stdio::piped());
     let start = Instant::now();
     let mut child = cmd.spawn().map_err(|e| {
-        // A pre_exec failure (e.g. unshare refused) surfaces here.
-        if e.raw_os_error().is_some() && spec.network == Network::Deny {
-            ExecError::SandboxUnavailable(format!("could not isolate network: {e}"))
-        } else {
-            ExecError::Spawn(e.to_string())
+        // A pre_exec failure surfaces here; the status pipe names the step.
+        match steps.as_ref().and_then(|s| s.failed_step()) {
+            Some(step) => ExecError::SandboxUnavailable(format!("{step} failed: {e}")),
+            None => ExecError::Spawn(e.to_string()),
         }
     })?;
+    drop(cmd);
     let cap = spec.limits.max_output_bytes;
     let out_reader = spawn_reader(child.stdout.take(), cap);
     let err_reader = spawn_reader(child.stderr.take(), cap);
@@ -314,7 +333,84 @@ mod sys {
         Ok(())
     }
 
-    pub(super) fn build(spec: &CommandSpec) -> Result<(Command, Isolation), ExecError> {
+    /// Steps of child setup, reported through the status pipe when one
+    /// fails so the error names exactly what could not be established.
+    pub(super) const STEPS: &[&str] = &[
+        "?",
+        "setpgid",
+        "drop root to uid 65534",
+        "restore dumpable flag",
+        "set resource limits",
+        "unshare(CLONE_NEWUSER|CLONE_NEWNET)",
+        "write /proc/self/setgroups",
+        "write /proc/self/uid_map",
+        "write /proc/self/gid_map",
+        "set no_new_privs",
+        "landlock_restrict_self",
+        "install seccomp network filter",
+    ];
+
+    /// Status pipe: the child writes one byte (the failing step) before
+    /// returning an error from `pre_exec`.
+    pub(super) struct StepPipe {
+        read: std::os::fd::OwnedFd,
+    }
+
+    impl StepPipe {
+        pub(super) fn failed_step(&self) -> Option<&'static str> {
+            use std::os::fd::AsRawFd;
+            let mut b = [0u8; 1];
+            // SAFETY: valid fd and buffer; the read end is non-blocking.
+            let n = unsafe { libc::read(self.read.as_raw_fd(), b.as_mut_ptr().cast(), 1) };
+            (n == 1).then(|| STEPS.get(b[0] as usize).copied().unwrap_or("?"))
+        }
+    }
+
+    fn pipe() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), ExecError> {
+        use std::os::fd::FromRawFd;
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` is a valid out-array of two ints.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(ExecError::Io(std::io::Error::last_os_error().to_string()));
+        }
+        for (fd, extra) in [(fds[0], libc::O_NONBLOCK), (fds[1], 0)] {
+            // SAFETY: fcntl on fds we just created.
+            unsafe {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                if extra != 0 {
+                    let fl = libc::fcntl(fd, libc::F_GETFL);
+                    libc::fcntl(fd, libc::F_SETFL, fl | extra);
+                }
+            }
+        }
+        // SAFETY: both fds are freshly created and owned by us.
+        Ok(unsafe {
+            (
+                std::os::fd::OwnedFd::from_raw_fd(fds[0]),
+                std::os::fd::OwnedFd::from_raw_fd(fds[1]),
+            )
+        })
+    }
+
+    /// `min(wanted, current hard limit)`: an unprivileged process cannot
+    /// raise its hard limit, and asking to would fail the whole spawn.
+    fn clamp_to_hard(resource: Resource, wanted: u64) -> u64 {
+        let mut cur = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: valid out-pointer.
+        if unsafe { libc::getrlimit(resource, &mut cur) } != 0
+            || cur.rlim_max == libc::RLIM_INFINITY
+        {
+            return wanted;
+        }
+        wanted.min(cur.rlim_max)
+    }
+
+    pub(super) fn build(
+        spec: &CommandSpec,
+    ) -> Result<(Command, Isolation, Option<StepPipe>), ExecError> {
         let mut isolation = Isolation::default();
         // SAFETY: geteuid has no preconditions.
         let is_root = unsafe { libc::geteuid() } == 0;
@@ -327,7 +423,9 @@ mod sys {
                     .arg(macos_profile(spec))
                     .arg(&spec.program)
                     .args(&spec.args);
-                isolation.network_isolated = spec.network == Network::Deny;
+                if spec.network == Network::Deny {
+                    isolation.network = Some(NetworkMethod::Seatbelt);
+                }
                 isolation.fs_confined = spec.fs.is_some();
                 c
             } else {
@@ -336,11 +434,41 @@ mod sys {
                 c
             };
 
-        let limits = spec.limits.clone();
-        let deny_net = spec.network == Network::Deny && cfg!(target_os = "linux");
-        if deny_net {
-            isolation.network_isolated = true;
-        }
+        // Linux network denial: namespaces when the system allows them,
+        // otherwise a seccomp filter on socket families (ADR-0003).
+        #[cfg(target_os = "linux")]
+        let (use_netns, use_seccomp) = if spec.network == Network::Deny {
+            match linux_net::namespaces_available(is_root) {
+                Ok(()) => {
+                    isolation.network = Some(NetworkMethod::Namespace);
+                    (true, false)
+                }
+                Err(_) => {
+                    isolation.network = Some(NetworkMethod::Seccomp);
+                    (false, true)
+                }
+            }
+        } else {
+            (false, false)
+        };
+        #[cfg(target_os = "linux")]
+        let seccomp_prog: Vec<libc::sock_filter> = if use_seccomp {
+            linux_net::socket_filter().map_err(ExecError::SandboxUnavailable)?
+        } else {
+            Vec::new()
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (use_netns, use_seccomp) = (false, false);
+
+        let limits = [
+            (libc::RLIMIT_NPROC as Resource, spec.limits.max_processes),
+            (libc::RLIMIT_AS as Resource, spec.limits.address_space_bytes),
+            (libc::RLIMIT_CPU as Resource, spec.limits.cpu_seconds),
+            (libc::RLIMIT_FSIZE as Resource, spec.limits.max_file_bytes),
+            (libc::RLIMIT_CORE as Resource, 0),
+        ]
+        .map(|(r, v)| (r, clamp_to_hard(r, v)));
+
         // Pre-format everything the child needs: no allocation after fork.
         let (uid, gid) = if is_root {
             (NOBODY, NOBODY)
@@ -365,57 +493,96 @@ mod sys {
             landlock_fd.as_ref().map(|f| f.as_raw_fd()).unwrap_or(-1)
         };
 
+        let (read_end, write_end) = pipe()?;
+        let status_fd = {
+            use std::os::fd::AsRawFd;
+            write_end.as_raw_fd()
+        };
+
         // SAFETY: the closure only performs async-signal-safe syscalls on
         // pre-allocated data.
         unsafe {
             cmd.pre_exec(move || {
+                let _keep_pipe = &write_end;
+                let fail = |step: u8| {
+                    let e = std::io::Error::last_os_error();
+                    libc::write(status_fd, [step].as_ptr().cast(), 1);
+                    e
+                };
                 if libc::setpgid(0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
+                    return Err(fail(1));
                 }
                 if is_root {
                     if libc::setgroups(0, std::ptr::null()) != 0
                         || libc::setgid(NOBODY) != 0
                         || libc::setuid(NOBODY) != 0
                     {
-                        return Err(std::io::Error::last_os_error());
+                        return Err(fail(2));
                     }
                     // Changing uid clears the dumpable flag, which makes
                     // /proc/self/{uid,gid}_map root-owned; restore it so the
                     // namespace maps below can be written.
                     #[cfg(target_os = "linux")]
                     if libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) != 0 {
-                        return Err(std::io::Error::last_os_error());
+                        return Err(fail(3));
                     }
                 }
-                rlimit(libc::RLIMIT_NPROC as _, limits.max_processes)?;
-                rlimit(libc::RLIMIT_AS as _, limits.address_space_bytes)?;
-                rlimit(libc::RLIMIT_CPU as _, limits.cpu_seconds)?;
-                rlimit(libc::RLIMIT_FSIZE as _, limits.max_file_bytes)?;
-                rlimit(libc::RLIMIT_CORE as _, 0)?;
-                #[cfg(target_os = "linux")]
-                if deny_net {
-                    if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) != 0 {
-                        return Err(std::io::Error::last_os_error());
+                for (r, v) in limits {
+                    if rlimit(r, v).is_err() {
+                        return Err(fail(4));
                     }
-                    write_proc(c"/proc/self/setgroups", b"deny")?;
-                    write_proc(c"/proc/self/uid_map", &uid_map)?;
-                    write_proc(c"/proc/self/gid_map", &gid_map)?;
+                }
+                #[cfg(target_os = "linux")]
+                if use_netns {
+                    if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) != 0 {
+                        return Err(fail(5));
+                    }
+                    if write_proc(c"/proc/self/setgroups", b"deny").is_err() {
+                        return Err(fail(6));
+                    }
+                    if write_proc(c"/proc/self/uid_map", &uid_map).is_err() {
+                        return Err(fail(7));
+                    }
+                    if write_proc(c"/proc/self/gid_map", &gid_map).is_err() {
+                        return Err(fail(8));
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                if (landlock_raw >= 0 || use_seccomp)
+                    && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                {
+                    return Err(fail(9));
                 }
                 #[cfg(target_os = "linux")]
                 if landlock_raw >= 0 {
                     // Keeps the OwnedFd alive for as long as the Command.
                     let _keep = &landlock_fd;
-                    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
-                        || libc::syscall(libc::SYS_landlock_restrict_self, landlock_raw, 0) != 0
-                    {
-                        return Err(std::io::Error::last_os_error());
+                    if libc::syscall(libc::SYS_landlock_restrict_self, landlock_raw, 0) != 0 {
+                        return Err(fail(10));
                     }
                 }
-                let _ = (&uid_map, &gid_map, deny_net);
+                #[cfg(target_os = "linux")]
+                if use_seccomp {
+                    let prog = libc::sock_fprog {
+                        len: seccomp_prog.len() as libc::c_ushort,
+                        filter: seccomp_prog.as_ptr() as *mut libc::sock_filter,
+                    };
+                    if libc::prctl(
+                        libc::PR_SET_SECCOMP,
+                        libc::SECCOMP_MODE_FILTER as libc::c_ulong,
+                        &prog as *const libc::sock_fprog as libc::c_ulong,
+                        0,
+                        0,
+                    ) != 0
+                    {
+                        return Err(fail(11));
+                    }
+                }
+                let _ = (&uid_map, &gid_map, use_netns, use_seccomp);
                 Ok(())
             });
         }
-        Ok((cmd, isolation))
+        Ok((cmd, isolation, Some(StepPipe { read: read_end })))
     }
 
     /// Build a Landlock ruleset in the parent (allocation is fine here); the
@@ -462,7 +629,9 @@ mod sys {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn macos_profile(spec: &CommandSpec) -> String {
         // Seatbelt profile (ADR-0003). Paths are quoted with escaping.
+        // Seatbelt matches real paths: `/var/...` is `/private/var/...`.
         let q = |p: &Path| {
+            let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
             format!(
                 "\"{}\"",
                 p.display()
@@ -495,6 +664,134 @@ mod sys {
             }
         }
         prof
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) mod linux_net {
+        use std::sync::OnceLock;
+
+        #[cfg(test)]
+        thread_local! {
+            /// Test hook: force the seccomp fallback on this thread.
+            pub(crate) static FORCE_SECCOMP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+
+        /// Whether user+network namespaces can be created here, probed once
+        /// in a forked child (e.g. Ubuntu >= 23.10 restricts unprivileged
+        /// user namespaces through AppArmor).
+        pub(crate) fn namespaces_available(is_root: bool) -> Result<(), String> {
+            #[cfg(test)]
+            if FORCE_SECCOMP.with(|f| f.get()) {
+                return Err("forced by test".into());
+            }
+            #[cfg(debug_assertions)]
+            if std::env::var_os("ANCHOR_EXEC_TEST_DISABLE_USERNS").is_some() {
+                return Err("disabled by ANCHOR_EXEC_TEST_DISABLE_USERNS".into());
+            }
+            static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
+            PROBE.get_or_init(|| probe(is_root)).clone()
+        }
+
+        fn probe(is_root: bool) -> Result<(), String> {
+            let (uid, gid) = if is_root {
+                (super::NOBODY, super::NOBODY)
+            } else {
+                // SAFETY: no preconditions.
+                unsafe { (libc::getuid(), libc::getgid()) }
+            };
+            let uid_map = format!("{uid} {uid} 1").into_bytes();
+            let gid_map = format!("{gid} {gid} 1").into_bytes();
+            // SAFETY: the child only makes async-signal-safe calls on
+            // pre-allocated data, then _exits.
+            let pid = unsafe { libc::fork() };
+            if pid < 0 {
+                return Err("fork failed".into());
+            }
+            if pid == 0 {
+                // SAFETY: async-signal-safe calls only.
+                unsafe {
+                    if is_root
+                        && (libc::setgroups(0, std::ptr::null()) != 0
+                            || libc::setgid(super::NOBODY) != 0
+                            || libc::setuid(super::NOBODY) != 0
+                            || libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) != 0)
+                    {
+                        libc::_exit(2);
+                    }
+                    if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) != 0 {
+                        libc::_exit(5);
+                    }
+                    if super::write_proc(c"/proc/self/setgroups", b"deny").is_err() {
+                        libc::_exit(6);
+                    }
+                    if super::write_proc(c"/proc/self/uid_map", &uid_map).is_err() {
+                        libc::_exit(7);
+                    }
+                    if super::write_proc(c"/proc/self/gid_map", &gid_map).is_err() {
+                        libc::_exit(8);
+                    }
+                    libc::_exit(0);
+                }
+            }
+            let mut status = 0;
+            // SAFETY: waiting on our own child.
+            unsafe { libc::waitpid(pid, &mut status, 0) };
+            if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+                Ok(())
+            } else {
+                let code = libc::WEXITSTATUS(status) as usize;
+                Err(format!(
+                    "namespace probe failed at: {}",
+                    super::STEPS.get(code).unwrap_or(&"?")
+                ))
+            }
+        }
+
+        const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
+        const AUDIT_ARCH_AARCH64: u32 = 0xC000_00B7;
+        /// BPF_LD | BPF_W | BPF_ABS (BPF_LD and BPF_W are 0).
+        const BPF_LD_W_ABS: u16 = 0x20;
+        const BPF_JMP_JEQ_K: u16 = 0x05 | 0x10;
+        const BPF_JMP_JGE_K: u16 = 0x05 | 0x30;
+        const BPF_RET_K: u16 = 0x06;
+        const OFF_NR: u32 = 0;
+        const OFF_ARCH: u32 = 4;
+        const OFF_ARG0: u32 = 16; // low 32 bits on little-endian
+
+        fn ins(code: u16, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
+            libc::sock_filter { code, jt, jf, k }
+        }
+
+        /// Seccomp program: `socket`/`socketpair` with any family other than
+        /// `AF_UNIX`, and `io_uring_setup`, fail with `EACCES`; a foreign
+        /// architecture or the x32 ABI kills the process (fail closed).
+        pub(crate) fn socket_filter() -> Result<Vec<libc::sock_filter>, String> {
+            let arch = if cfg!(target_arch = "x86_64") {
+                AUDIT_ARCH_X86_64
+            } else if cfg!(target_arch = "aarch64") {
+                AUDIT_ARCH_AARCH64
+            } else {
+                return Err("seccomp network filter: unsupported architecture".into());
+            };
+            let deny = libc::SECCOMP_RET_ERRNO | (libc::EACCES as u32);
+            let kill = libc::SECCOMP_RET_KILL_PROCESS;
+            let allow = libc::SECCOMP_RET_ALLOW;
+            Ok(vec![
+                /* 0 */ ins(BPF_LD_W_ABS, 0, 0, OFF_ARCH),
+                /* 1 */ ins(BPF_JMP_JEQ_K, 1, 0, arch),
+                /* 2 */ ins(BPF_RET_K, 0, 0, kill),
+                /* 3 */ ins(BPF_LD_W_ABS, 0, 0, OFF_NR),
+                /* 4 */ ins(BPF_JMP_JGE_K, 0, 1, 0x4000_0000),
+                /* 5 */ ins(BPF_RET_K, 0, 0, kill),
+                /* 6 */ ins(BPF_JMP_JEQ_K, 2, 0, libc::SYS_socket as u32),
+                /* 7 */ ins(BPF_JMP_JEQ_K, 1, 0, libc::SYS_socketpair as u32),
+                /* 8 */ ins(BPF_JMP_JEQ_K, 2, 3, libc::SYS_io_uring_setup as u32),
+                /* 9 */ ins(BPF_LD_W_ABS, 0, 0, OFF_ARG0),
+                /* 10 */ ins(BPF_JMP_JEQ_K, 1, 0, libc::AF_UNIX as u32),
+                /* 11 */ ins(BPF_RET_K, 0, 0, deny),
+                /* 12 */ ins(BPF_RET_K, 0, 0, allow),
+            ])
+        }
     }
 
     pub(super) fn exit_kind(s: ExitStatus) -> ExitKind {
@@ -532,7 +829,16 @@ mod sys {
 
     use super::*;
 
-    pub(super) fn build(spec: &CommandSpec) -> Result<(Command, Isolation), ExecError> {
+    pub(super) struct StepPipe;
+    impl StepPipe {
+        pub(super) fn failed_step(&self) -> Option<&'static str> {
+            None
+        }
+    }
+
+    pub(super) fn build(
+        spec: &CommandSpec,
+    ) -> Result<(Command, Isolation, Option<StepPipe>), ExecError> {
         if spec.network == Network::Deny || spec.fs.is_some() {
             return Err(ExecError::SandboxUnavailable(
                 "network/filesystem isolation on Windows (AppContainer) is not implemented yet; refusing"
@@ -541,7 +847,7 @@ mod sys {
         }
         let mut c = Command::new(&spec.program);
         c.args(&spec.args);
-        Ok((c, Isolation::default()))
+        Ok((c, Isolation::default(), None))
     }
 
     pub(super) fn exit_kind(s: ExitStatus) -> ExitKind {
