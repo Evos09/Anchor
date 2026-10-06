@@ -3,6 +3,15 @@ name: CI
 on:
   push:
   pull_request:
+  # Manual runs also run the macOS and Windows benchmarks (below).
+  workflow_dispatch:
+
+# A newer push to the same ref cancels the run it supersedes, so a burst of
+# pushes does not stack up runner minutes. Keyed by event too, so a push
+# never cancels a manually started benchmark run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -66,22 +75,33 @@ jobs:
 
   snapshot-bench:
     # Spec §14 Phase 3: "a 100k-file monorepo snapshots incrementally in
-    # < 2 s, measured and published". The gate is on Linux; macOS and
-    # Windows runner I/O varies too much for a hard bound, so their numbers
-    # are reported only (docs/benchmarks/snapshot.md).
+    # < 2 s, measured and published". The gate is on Linux and runs on
+    # every push (docs/benchmarks/snapshot.md).
+    name: snapshot benchmark (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Build
+        run: cargo build --release -p anchor-snapshot --example bench
+      - name: 100k-file benchmark
+        run: cargo run --release -p anchor-snapshot --example bench -- --files 100000 --runs 5 --summary "$GITHUB_STEP_SUMMARY" --max-incremental-ms 2000
+
+  snapshot-bench-other:
+    # macOS and Windows runner I/O varies too much for a hard bound, so their
+    # numbers are reported only. They are also the costliest jobs (macOS
+    # minutes bill at 10x, Windows at 2x, and Windows takes about 40 minutes
+    # because Defender scans every file written), so they run only when the
+    # workflow is started by hand (Actions > CI > Run workflow).
+    if: github.event_name == 'workflow_dispatch'
     name: snapshot benchmark (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            gate: "--max-incremental-ms 2000"
-          - os: macos-latest
-            gate: ""
-          - os: windows-latest
-            gate: ""
+        os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # Windows takes about 40 minutes (Defender scans every file written).
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v5
@@ -91,4 +111,4 @@ jobs:
         run: cargo build --release -p anchor-snapshot --example bench
       - name: 100k-file benchmark
         shell: bash
-        run: cargo run --release -p anchor-snapshot --example bench -- --files 100000 --runs 5 --summary "$GITHUB_STEP_SUMMARY" ${{ matrix.gate }}
+        run: cargo run --release -p anchor-snapshot --example bench -- --files 100000 --runs 5 --summary "$GITHUB_STEP_SUMMARY"

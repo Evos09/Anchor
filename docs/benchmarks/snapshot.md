@@ -81,10 +81,15 @@ and 1.8× with 100 changed files.
 
 ### CI runners
 
-The `snapshot-bench` job in `.github/workflows/ci.yml` runs on every
-push. Its table is written to the job summary. On Linux it **fails** if
-the no-change or 100-changed median exceeds 2 s. macOS and Windows runner
-I/O varies too much for a hard bound, so they are reported only.
+The `snapshot-bench` job in `.github/workflows/ci.yml` runs on Linux on
+every push. Its table is written to the job summary, and it **fails** if
+the no-change or 100-changed median exceeds 2 s.
+
+The `snapshot-bench-other` job runs the same benchmark on macOS and
+Windows, reported only: their runner I/O varies too much for a hard
+bound. It runs only when the workflow is started by hand (Actions > CI >
+Run workflow), because it is the costliest job in CI: macOS minutes bill
+at 10×, and the Windows run takes about 40 minutes.
 
 #### GitHub `ubuntu-latest`: run 37456108695 (gated)
 
