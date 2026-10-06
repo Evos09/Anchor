@@ -1,21 +1,30 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::*;
 
 const DEFAULT_POLICY: &str = include_str!("../../../config/policy.default.toml");
 
+/// Absolute test path for the current OS (`/x` on Unix, `C:/x` on Windows,
+/// where a path without a drive is not absolute).
+fn abs_path(s: &str) -> PathBuf {
+    if cfg!(windows) && s.starts_with('/') {
+        PathBuf::from(format!("C:{s}"))
+    } else {
+        PathBuf::from(s)
+    }
+}
 fn home() -> PathBuf {
-    PathBuf::from("/home/dev")
+    abs_path("/home/dev")
 }
 fn ws() -> PathBuf {
-    PathBuf::from("/home/dev/project")
+    abs_path("/home/dev/project")
 }
 
 fn req(tool: Tool, op: Operation, target: &str) -> PermissionRequest {
     PermissionRequest {
         tool,
         operation: op,
-        canonical_target: Some(PathBuf::from(target)),
+        canonical_target: Some(abs_path(target)),
         workspace_root: ws(),
         target_exists: true,
         is_append_only: false,
@@ -132,6 +141,21 @@ fn credentials_denied_everywhere() {
 
 /// Deny overrides: a credential file *inside* the workspace is still denied,
 /// even though `allow_reads_in_workspace` appears first and matches.
+/// A Windows home directory uses backslashes; `~/` patterns must still
+/// match canonical targets (regression: they never matched on Windows).
+#[cfg(windows)]
+#[test]
+fn credentials_denied_with_backslash_home() {
+    let home = PathBuf::from(r"C:\Users\dev");
+    let dir = tempfile::tempdir().unwrap();
+    let audit = AuditLog::open(&dir.path().join("audit.jsonl")).unwrap();
+    let e = Engine::from_policy(Policy::parse(DEFAULT_POLICY, &home).unwrap(), &home, audit);
+    let mut r = req(Tool::ReadFile, Operation::Read, "/x");
+    r.workspace_root = PathBuf::from(r"C:\Users\dev\project");
+    r.canonical_target = Some(PathBuf::from(r"C:\Users\dev\.ssh\id_rsa"));
+    assert_eq!(action_of(&e, &r), ("deny", "deny_credentials".into()));
+}
+
 #[test]
 fn deny_overrides_earlier_allow() {
     let policy = r#"
@@ -353,7 +377,10 @@ fn every_decision_is_logged_with_structured_context() {
     let approved = e
         .resolve_prompt(p, UserResponse::Approve, Responder::Interactive)
         .unwrap();
-    assert_eq!(approved.target(), Some(Path::new("/home/dev/project/x.rs")));
+    assert_eq!(
+        approved.target(),
+        Some(abs_path("/home/dev/project/x.rs").as_path())
+    );
     let entries = AuditLog::read_entries(&dir.path().join("audit.jsonl")).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].kind, "decision");
@@ -361,7 +388,7 @@ fn every_decision_is_logged_with_structured_context() {
     assert_eq!(entries[0].data["action"], "prompt");
     assert_eq!(
         entries[0].data["request"]["canonical_target"],
-        "/home/dev/project/x.rs"
+        abs_path("/home/dev/project/x.rs").to_str().unwrap()
     );
     assert_eq!(entries[1].kind, "prompt_response");
     assert_eq!(entries[1].data["response"], "approve");

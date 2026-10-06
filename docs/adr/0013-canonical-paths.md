@@ -57,6 +57,15 @@ rustix covered the surface.
   refused. Workspaces using hardlink-based package stores (e.g. pnpm) need
   an explicit opt-in (`allow_hardlinked_reads`, not yet exposed).
 
+## Windows path forms
+
+`GetFinalPathNameByHandleW` returns the verbatim form (`\\?\C:\…`),
+which Anchor displays and compares in the ordinary form (`C:\…`).
+`std::fs::canonicalize` also returns the verbatim form, so absolute
+parameters are normalised with `normalize_verbatim` before confinement.
+CI run 37414390349 found the original refusal
+(`verbatim_absolute_params_are_accepted`).
+
 ## Known gaps
 
 - Windows `list_dir` enumerates by path (`read_dir`) between two

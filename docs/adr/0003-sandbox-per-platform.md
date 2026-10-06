@@ -23,7 +23,15 @@ backend to run.
   - argv only, with a cleared environment;
   - `RLIMIT_NPROC / AS / CPU / FSIZE / CORE`, plus a wall-clock timeout and a
     process-group kill;
-  - network denial through new user + network namespaces (loopback only);
+  - network denial in two tiers, chosen by a one-time probe:
+    1. new user + network namespaces (loopback only) where the system
+       allows unprivileged user namespaces;
+    2. otherwise a seccomp-BPF filter that fails `socket`/`socketpair` for
+       every family except `AF_UNIX`, fails `io_uring_setup`, and kills on
+       a foreign architecture or the x32 ABI. Ubuntu >= 23.10 (and
+       GitHub's runners) restrict unprivileged user namespaces through
+       AppArmor; CI run 37414390349 caught this. The method used is
+       recorded per command in the audit log (`network_method`);
   - filesystem confinement through a Landlock ruleset built in the parent and
     applied in the child with raw `prctl` + `landlock_restrict_self`
     syscalls (no allocation after fork). The rules are read-write on the
@@ -37,8 +45,8 @@ backend to run.
 
 Chosen over bubblewrap: no extra binary to ship or find on `PATH`; the
 rules are expressed in our own code and tested in-tree; Landlock composes
-with the namespace approach. Seccomp is **not** yet applied (see
-Consequences).
+with the namespace approach. Seccomp is used only as the network
+fallback, not as a general syscall filter (see Consequences).
 
 ### macOS (written, type-checked, not executed)
 
@@ -63,9 +71,14 @@ Objects. WSL2 was rejected as the default because of the heavy dependency.
 
 ## Consequences / known gaps
 
-- No seccomp filter yet: confined commands can still make any syscall
+- No general seccomp syscall filter yet (only the network fallback):
+  confined commands can still make any other syscall
   Landlock doesn't cover (e.g. `ptrace` of sibling processes under the same
   uid is limited only by Yama). This is tracked for Phase 7.
+- With the seccomp tier, `AF_UNIX` sockets stay available, so a command
+  could talk to a local daemon socket it can open (e.g. a container
+  engine socket). Landlock ABI v6 scoping and a socket-path deny list
+  are the follow-ups.
 - Fork-bomb containment relies on `RLIMIT_NPROC`, which is per-uid. A user
   already running many processes has less headroom. A cgroup `pids.max` is
   preferable where delegation is available.

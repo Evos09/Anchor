@@ -348,6 +348,11 @@ mod sys {
         "set no_new_privs",
         "landlock_restrict_self",
         "install seccomp network filter",
+        "set RLIMIT_NPROC",
+        "set RLIMIT_AS",
+        "set RLIMIT_CPU",
+        "set RLIMIT_FSIZE",
+        "set RLIMIT_CORE",
     ];
 
     /// Status pipe: the child writes one byte (the failing step) before
@@ -460,14 +465,33 @@ mod sys {
         #[cfg(not(target_os = "linux"))]
         let (use_netns, use_seccomp) = (false, false);
 
+        // (resource, value, step code for error reporting). macOS does not
+        // support lowering RLIMIT_AS (setrlimit fails with EINVAL; memory
+        // limits are not enforced there), so it is skipped on macOS and the
+        // gap is recorded in ADR-0003.
         let limits = [
-            (libc::RLIMIT_NPROC as Resource, spec.limits.max_processes),
-            (libc::RLIMIT_AS as Resource, spec.limits.address_space_bytes),
-            (libc::RLIMIT_CPU as Resource, spec.limits.cpu_seconds),
-            (libc::RLIMIT_FSIZE as Resource, spec.limits.max_file_bytes),
-            (libc::RLIMIT_CORE as Resource, 0),
+            (
+                libc::RLIMIT_NPROC as Resource,
+                spec.limits.max_processes,
+                12u8,
+            ),
+            (
+                libc::RLIMIT_AS as Resource,
+                spec.limits.address_space_bytes,
+                13,
+            ),
+            (libc::RLIMIT_CPU as Resource, spec.limits.cpu_seconds, 14),
+            (
+                libc::RLIMIT_FSIZE as Resource,
+                spec.limits.max_file_bytes,
+                15,
+            ),
+            (libc::RLIMIT_CORE as Resource, 0, 16),
         ]
-        .map(|(r, v)| (r, clamp_to_hard(r, v)));
+        .map(|(r, v, step)| {
+            let skip = cfg!(target_os = "macos") && step == 13;
+            (r, clamp_to_hard(r, v), step, skip)
+        });
 
         // Pre-format everything the child needs: no allocation after fork.
         let (uid, gid) = if is_root {
@@ -527,9 +551,9 @@ mod sys {
                         return Err(fail(3));
                     }
                 }
-                for (r, v) in limits {
-                    if rlimit(r, v).is_err() {
-                        return Err(fail(4));
+                for (r, v, step, skip) in limits {
+                    if !skip && rlimit(r, v).is_err() {
+                        return Err(fail(step));
                     }
                 }
                 #[cfg(target_os = "linux")]

@@ -254,8 +254,11 @@ impl Policy {
 
 fn expand_home(pattern: &str, home: &Path) -> String {
     if let Some(rest) = pattern.strip_prefix("~/") {
-        let h = home.to_string_lossy();
-        let h = h.trim_end_matches(['/', '\\']);
+        // globset matches against `/`-separated candidates on every
+        // platform, so a Windows home (`C:\\Users\\x`) must use `/` too, or
+        // `~/.ssh/**` would never match there.
+        let h = home.to_string_lossy().replace('\\', "/");
+        let h = h.trim_end_matches('/');
         format!("{h}/{rest}")
     } else {
         pattern.to_string()

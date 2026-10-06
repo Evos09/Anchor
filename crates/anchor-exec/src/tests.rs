@@ -216,7 +216,8 @@ fn process_limit_refuses_excess_forks() {
     );
 }
 
-#[cfg(unix)]
+// macOS does not enforce RLIMIT_AS (ADR-0003); Linux only.
+#[cfg(target_os = "linux")]
 #[test]
 fn memory_limit_enforced() {
     if resolve_program("python3", &path_var()).is_err() {
