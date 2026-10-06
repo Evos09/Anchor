@@ -1,0 +1,23 @@
+[package]
+name = "anchor-hub"
+description = "Coordination Hub (spec §6): shared project state in SQLite, file claims, message bus, tasks and decisions, with MCP and A2A endpoints."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anchor-fs.workspace = true
+anchor-policy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+rusqlite.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
