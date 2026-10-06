@@ -86,13 +86,70 @@ push. Its table is written to the job summary. On Linux it **fails** if
 the no-change or 100-changed median exceeds 2 s. macOS and Windows runner
 I/O varies too much for a hard bound, so they are reported only.
 
-(Runner results are recorded below once the job has run.)
+#### GitHub `ubuntu-latest`: run 37456108695 (gated)
+
+Environment: AMD EPYC 9V45, 2 logical CPUs, Linux 6.17 (Azure), ext4.
+
+| Measurement | Median | Detail |
+|---|---:|---|
+| Initial snapshot | 53,458 ms | 584 MiB stored |
+| **Incremental, no change** | **401 ms** | scan 211 ms |
+| **Incremental, 100 files changed** | **673 ms** | scan 208 ms, 200 re-hashed |
+| Incremental, 1% changed | 1,495 ms | 1,982 re-hashed |
+| Restore undoing 100 files | 1,330 ms | |
+| Verify whole store | 3,063 ms | |
+
+**PASS** under the 2 s gate. Runs:
+
+- no change: 389, 401, 403, 394, 459 ms;
+- 100 changed: 764, 673, 733, 662, 666 ms.
+
+#### GitHub `macos-latest`: run 37456108695 (reported)
+
+Environment: Apple M1 (virtual), 3 logical CPUs, APFS.
+
+| Measurement | Median | Detail |
+|---|---:|---|
+| Initial snapshot | 152,951 ms | |
+| Incremental, no change | **2,534 ms** | scan 1,788 ms |
+| Incremental, 100 files changed | **2,587 ms** | scan 2,837 ms (in the median run) |
+| Incremental, 1% changed | 5,324 ms | scan 4,856 ms |
+| Restore undoing 100 files | 4,968 ms | |
+| Verify whole store | 47,517 ms | |
+
+**The target is not met on this runner.** Details:
+
+- The scan alone takes 1.1–4.9 s for 100k `fstatat` calls. The other
+  phases match Linux.
+- The run is very noisy: no-change runs were 6,881, 755, 2,850, 2,534 and
+  2,205 ms. That suggests a contended virtual disk; the fastest run met the
+  target comfortably.
+- This is a known macOS cost: per-file metadata calls on APFS are much
+  slower than on ext4.
+
+The fix is the same as the "next" item below: stop scanning. On macOS that
+means FSEvents, which records changed directories since a given event id,
+so only those directories are rescanned. A parallel directory walk is the
+cheaper first step.
+
+Until then, Anchor on macOS meets the 2 s target only for smaller
+workspaces (cost is roughly linear in the file count, so about 50k files
+on this runner).
+
+#### GitHub `windows-latest`
+
+The job runs on every push and reports only. Results will be recorded
+here; creating 100k files under Defender real-time scanning dominates the
+job time.
 
 ## Where the time goes next
 
-- **The scan dominates.** It could be parallelised across top-level
-  directories, or replaced on Linux by fanotify / inotify change journals.
-  That would turn the per-turn cost into O(changes).
+- **The scan dominates on every platform**, and decides whether macOS
+  meets the target. It could be parallelised across top-level directories
+  (first step), then replaced by change journals that make the per-turn
+  cost O(changes): fanotify on Linux, FSEvents on macOS, the USN journal
+  on Windows. A journal can lose events, so a full scan stays as the
+  fallback and as a periodic check.
 - **The index** could be memory-mapped instead of parsed.
 - **Initial snapshots** are I/O-bound (every byte is written once). It is
   a one-off cost per workspace.

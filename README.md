@@ -117,9 +117,11 @@ every §11 threat to its test and its per-platform status.
 - Phase 3 durability, covering every §5.5 test bullet:
   - **Engine:** content-addressed, FastCDC-chunked snapshots taken before
     each mutating turn.
-  - **Speed:** incremental snapshots of 100k files take 0.77 s with no
-    changes and 1.10 s with 100 files changed
+  - **Speed:** on Linux, incremental snapshots of 100k files take 0.4–0.8 s
+    with no changes and 0.7–1.1 s with 100 files changed
     ([benchmark](docs/benchmarks/snapshot.md); CI gates Linux at 2 s).
+    The macOS CI runner does not meet the 2 s target yet (2.5 s;
+    scan-bound).
   - **Rollback:** atomic, journaled restore; kill-mid-snapshot and
     kill-mid-restore are tested in child processes.
   - **Merge-queue groundwork:** diff, path-level three-way merge and

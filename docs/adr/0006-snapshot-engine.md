@@ -207,16 +207,16 @@ Phase 4 builds the queue on these.
 ## Measured
 
 See [`docs/benchmarks/snapshot.md`](../benchmarks/snapshot.md). On
-100,000 files (571 MiB, 4 vCPU Xeon 2.8 GHz, ext4), the medians are:
+100,000 files (571 MiB), incremental medians are:
 
-| Case | Median |
-|---|---|
-| No change | 0.77 s |
-| 100 files changed | 1.10 s |
-| 1% changed | 1.39 s |
-| Restore of 100 files (including its own two snapshots) | 2.24 s |
+| Environment | No change | 100 files changed | Target |
+|---|---:|---:|---|
+| Dev container (4 vCPU Xeon, ext4) | 0.77 s | 1.10 s | met |
+| GitHub `ubuntu-latest` (2 vCPU EPYC, ext4; CI-gated at 2 s) | 0.40 s | 0.67 s | met |
+| GitHub `macos-latest` (3 vCPU virtual M1, APFS) | 2.53 s | 2.59 s | **not met** |
 
-CI gates the incremental cases on Linux at 2 s.
+On macOS the scan alone takes 1.8–2.8 s. The next step is a parallel walk,
+then FSEvents-driven scanning.
 
 ## Consequences and limits
 
