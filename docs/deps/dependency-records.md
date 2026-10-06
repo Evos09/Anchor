@@ -67,6 +67,52 @@ unmaintained:
   copyleft on results.
 - **rustls / rustls-webpki / untrusted**: Apache-2.0, ISC and MIT.
 
+## Frontend (npm, Phase 6)
+
+The dashboard (`ui/`, ADR-0025) is the project's first npm code. Checked
+2026-10-06 against the npm registry (`npm view`, `npm audit`). The steps
+were performed as follows:
+
+1. **Existence:** registry entry, exact scoped name, and the upstream
+   repository field. Typosquat check: these are the names the React,
+   Vite, TypeScript and Playwright projects document.
+2. **Maintenance:** each package was published within the last 7 days,
+   and every one has 1 to 7 maintainers. GitHub activity was not
+   reachable, as for the crates.
+3. **License:** read from each published `package.json` and `LICENSE`.
+4. **Fitness:** our own tests: `tests/ui.rs` (API) and
+   `ui/e2e/dashboard.spec.ts` (the bundle in Chromium).
+5. **Security:** `npm audit` reports 0 vulnerabilities across the 28
+   installed packages. CI runs `npm audit --audit-level=high` on every
+   push.
+
+Installs always use `npm ci --ignore-scripts`: no package's lifecycle
+script runs. Versions are pinned exactly (`--save-exact`) and the
+lockfile is committed.
+
+| Package | Version | Ships in the bundle? | License | Used for |
+|---|---|---|---|---|
+| react | 19.3.0 | yes | MIT | UI rendering (text only; no raw HTML) |
+| react-dom | 19.3.0 | yes (brings `scheduler` 0.28.0, MIT) | MIT | DOM renderer |
+| vite | 8.3.3 | no (build) | MIT | bundler (`rolldown` 1.2.12, `lightningcss` 1.33.0, `postcss`, `tinyglobby`, `picomatch`) |
+| @vitejs/plugin-react | 6.1.2 | no (build) | MIT | JSX transform |
+| typescript | 7.0.2 | no (build) | Apache-2.0 | type checking (`tsc --noEmit`, strict) |
+| @types/react, @types/react-dom | 19.3.0 | no (types) | MIT | type definitions |
+| @playwright/test | 1.63.0 | no (test) | Apache-2.0 | the e2e test (`playwright`, `playwright-core`) |
+
+**Licenses across the whole installed tree:** MIT, Apache-2.0, ISC,
+BSD-3-Clause and MPL-2.0. The MPL-2.0 package is `lightningcss`, used at
+build time only; none of its code ships in the bundle.
+
+**Native build binaries** (`@rolldown/binding-*`, `lightningcss-*`,
+`@typescript/typescript-*`) are per-platform optional packages from the
+same upstreams. Their install scripts are never run.
+
+**Not adopted:** component libraries, chart libraries, state managers
+and a router. The panels are hand-written CSS and SVG, which keeps the
+shipped JavaScript to React. The browser's own `fetch` is the only HTTP
+client.
+
 ## Rejected or not adopted
 
 | Candidate | Reason |
@@ -79,4 +125,4 @@ unmaintained:
 | `zstd` (compression) | Not needed in Phase 3. A future candidate for compressing chunks; it would need a five-step record (and it binds a C library). |
 | `rmcp` 3.5.1 | Evaluated for Phase 4 (ADR-0004). (1) Exists: crates.io `rmcp`, published 2026-10-05; the repository `modelcontextprotocol/rust-sdk` is under the MCP organisation and its README calls it the official Rust SDK. (2) Maintained (published the day before the check). (3) Apache-2.0/MIT. Supports MCP 2026-07-28. **Not adopted** (the user's decision, 2026-10-06): it requires tokio, which would make the trusted backend async and add ~15 crates to the audit surface; the stateless 2026-07-28 server subset the Hub needs is small enough to own (`anchor-hub/src/mcp.rs`). |
 | third-party A2A crates (`a2a`, `a2a-rs-core`, ...) | No official Rust SDK found; A2A 1.0 (JSON-RPC binding) is implemented from the specification (ADR-0004). |
-| `tauri`, editor packages | Phase 6 candidates. Existence only recorded (ADRs 0002, 0008); five-step records pending. |
+| `tauri`, editor packages | Deferred: the dashboard ships as a web UI first (ADR-0025). Existence only recorded (ADRs 0002, 0008); five-step records come with their adoption. |

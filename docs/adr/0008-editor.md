@@ -21,3 +21,9 @@ Measure, in each platform WebView (ADR-0002):
 Leaning towards CodeMirror 6 for its modular bundle and an extension model
 that fits a backend-driven parse. The decision is deferred until the
 numbers exist.
+
+## Update (Phase 6, 2026-10-06)
+
+The editor and terminal are deferred: the user scoped Phase 6 to the
+dashboard (ADR-0025). Neither package is a dependency, and this ADR
+stays Proposed until the measurements above exist.

@@ -130,6 +130,32 @@ The harness checks every seeded bug (48, in 12 tasks) with the same gate
 and reports how many would merge, overall and per bug category
 ([results](docs/benchmarks/reviewer.md)).
 
+### The collaboration dashboard (Phase 6)
+
+```sh
+npm --prefix ui ci --ignore-scripts && npm --prefix ui run build   # once; then rebuild anchor
+cargo build
+cp -r examples/ui/workspace /tmp/ui-demo
+./target/debug/anchor team run --workspace /tmp/ui-demo --team examples/ui/team.toml --ui
+```
+
+Open the printed `http://127.0.0.1:…/#t=…` URL. The token in the URL is
+the only credential. [`examples/ui`](examples/ui/README.md) is a scripted
+two-model collaboration, and in it you watch:
+
+- the roster (thinking, waiting, blocked, done);
+- every approval gate, which you answer in the page;
+- a rejected change with its diff and test evidence side by side;
+- the repair;
+- a refused claim, in red on the claim map;
+- a held message and a proposed decision;
+- the cost meter, recomputed from your own prices;
+- the snapshot timeline, with a one-click restore.
+
+`anchor ui --workspace DIR` opens the same dashboard after a run.
+[`docs/ui-walkthrough.md`](docs/ui-walkthrough.md) tours the panels with
+screenshots.
+
 For real models, copy `config/roles.example.toml`. Point it at a local
 OpenAI-compatible server (`anchor detect-local`) and/or a hosted API with
 your own key (`api_key_env`).
@@ -137,7 +163,8 @@ your own key (`api_key_env`).
 ## Tests
 
 ```sh
-cargo test --workspace                       # 231 tests on Linux, including the attack suites
+cargo test --workspace                       # 242 tests on Linux, including the attack suites
+npm --prefix ui run build && (cd ui && npx playwright test)   # the dashboard, end to end
 cargo run --release -p anchor-snapshot --example bench   # 100k-file snapshot benchmark
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check                             # advisories, licenses, bans, sources
@@ -214,6 +241,29 @@ every §11 threat to its test and its per-platform status.
   - **Done-when tests:** `crates/anchor-backend/tests/verify.rs` and
     `tests/eval.rs`.
 
+- Phase 6, the collaboration dashboard (ADR-0025). Linux, locally; the
+  confirming CI run is pending.
+  - **Serving:** `anchor team run --ui` (live, answering approvals) and
+    `anchor ui` (after a run). Loopback only, with a per-launch token in
+    the URL fragment, exact Host and same-origin checks, and a strict CSP.
+  - **Panels** (§12.2): roster, approvals, "what happened" (every audit
+    entry, narrated), message stream, claim map, decision log, merge
+    queue with the diff and evidence side by side, cost meter, snapshot
+    timeline with restore, and the audit log. Plus the §12.4 slash
+    commands.
+  - **Every interaction visible:** every audit entry reaches the
+    dashboard, verified against the hash chain as it is read. Agent
+    actions are attributed: entries now carry their agent and session.
+  - **Failures shown:** rejections, conflicts, a broken audit chain, cost
+    mismatches, and bugs "caught later" (`fails_on_main`).
+  - **Accurate cost:** every call is recomputed from the prices in your
+    roles files and checked against the runtime's report and each
+    session's totals.
+  - **Done-when tests:** `crates/anchor-backend/tests/ui.rs` (over HTTP)
+    and `ui/e2e/dashboard.spec.ts` (Chromium). The "a newcomer
+    understands it" criterion also needs your sign-off in
+    [`docs/ui-walkthrough.md`](docs/ui-walkthrough.md).
+
 **Known platform gaps:**
 
 - Windows: agent commands refuse to run (no AppContainer sandbox yet), and
@@ -249,9 +299,21 @@ every §11 threat to its test and its per-platform status.
   (§16.3) needs a model; in review-only mode, every correct solution is
   approved.
 
+**Phase 6 limits:**
+
+- **No desktop shell, editor or terminal yet.** The dashboard is a web
+  page; the Tauri shell (ADR-0002) and the editor and terminal (§12.1,
+  ADR-0008) are deferred. `/plan`, `/implement` and `/review` print the
+  CLI command to run.
+- **Agent turn snapshots** are visible only while the agent's isolated
+  workspace exists. After a run, the merge snapshots and the narrated
+  story say which agent changed what.
+- **Linux only so far.** The browser test runs only in the Linux CI job.
+  macOS and Windows build without the bundle (a notice page) and run the
+  API tests.
+
 **Not started (later phases):**
 
-- Desktop UI (Phase 6).
 - General seccomp syscall filter, Windows sandbox, external audit (Phase 7).
 
 The architecture decisions, including those still pending evaluation, are

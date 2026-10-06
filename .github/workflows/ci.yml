@@ -28,6 +28,16 @@ jobs:
       - uses: actions/checkout@v5
       - name: Toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Dashboard frontend (ADR-0025; embedded by the Rust build)
+        working-directory: ui
+        run: |
+          # No lifecycle script of any package runs (dependency-records.md).
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+          npm run build
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy (includes the Layer 2 no-filesystem rule)
@@ -42,6 +52,19 @@ jobs:
             --corpus examples/eval/corpus --reviewer rule --md "$GITHUB_STEP_SUMMARY"
           cargo run -q -p anchor-backend --bin anchor -- eval run \
             --corpus examples/eval/corpus --reviewer oracle --max-fn-rate 0
+      - name: Dashboard end to end (spec §14 Phase 6, Chromium)
+        working-directory: ui
+        run: |
+          cargo build --workspace --bins
+          npx playwright install --with-deps chromium
+          npx playwright test
+      - name: Dashboard screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-screens
+          path: ui/test-results/
+          if-no-files-found: ignore
       - name: Type-check other platforms
         run: |
           rustup target add x86_64-pc-windows-gnu aarch64-apple-darwin

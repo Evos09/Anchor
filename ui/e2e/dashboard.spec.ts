@@ -117,7 +117,7 @@ test("a newcomer can follow and steer a two-model collaboration", async ({ page 
     expect(i, `"${m}" after position ${at} in:\n${text}`).toBeGreaterThan(at);
     at = i;
   }
-  await page.screenshot({ path: join(shots, "02-what-happened.png"), fullPage: true });
+  await page.screenshot({ path: join(shots, "02-what-happened.png") });
 
   // The claim map: beta's refused claim on calc.py, in red.
   await tab(page, "Claim map");

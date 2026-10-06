@@ -35,6 +35,15 @@ On macOS (WKWebView), Windows (WebView2) and Linux (WebKitGTK):
 If WebKitGTK performance is insufficient on Linux, that finding goes back
 into this ADR before any fallback is chosen.
 
+## Update (Phase 6, 2026-10-06)
+
+The user chose **web UI first, Tauri later** (ADR-0025). The dashboard
+is a React bundle (`ui/dist`) served by the backend on loopback. A Tauri
+shell will load the same bundle, with the backend linked in, instead of
+going over HTTP. The evaluation above still gates Tauri's adoption.
+`tauri` cannot be built in the development container (webkit2gtk is
+missing), so it is still not a dependency.
+
 ## Alternatives
 
 - *Electron*. It would need a native module for every primitive in
