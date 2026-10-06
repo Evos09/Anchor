@@ -116,6 +116,7 @@ fn agent(name: &str, roles: String, within: &[&str], script: Value) -> TeamAgent
         instruction: format!("you are {name}"),
         claim_within: within.iter().map(|s| s.to_string()).collect(),
         mock_script: Some(script.to_string()),
+        repair_mock_scripts: Vec::new(),
         messages_need_approval: false,
     }
 }

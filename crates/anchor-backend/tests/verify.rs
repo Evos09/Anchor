@@ -591,6 +591,7 @@ fn team_with(reviewer: String) -> Team {
             instruction: "x".into(),
             claim_within: vec!["calc.py".into()],
             mock_script: None,
+            repair_mock_scripts: Vec::new(),
             messages_need_approval: false,
         }],
     }
@@ -631,5 +632,291 @@ fn verify_gate_fails_closed_on_windows() {
     );
     assert_eq!(codes(&o), ["unsupported_platform"]);
     drop(q);
+    assert_eq!(fx.read("calc.py"), CALC);
+}
+
+// ---- Team runs: claims from real runtime sessions, self-repair, model
+// reviewers. ----
+
+fn agent_bin() -> PathBuf {
+    let p = anchor_backend::session::default_agent_bin();
+    if !p.exists() {
+        let status = std::process::Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "-q",
+                "-p",
+                "anchor-runtime",
+                "--bin",
+                "anchor-agent",
+            ])
+            .status()
+            .expect("cargo build anchor-agent");
+        assert!(status.success());
+    }
+    p
+}
+
+fn step(calls: Value) -> Value {
+    json!({ "content": "", "tool_calls": calls, "prompt_tokens": 100, "completion_tokens": 10 })
+}
+
+fn call(tool: &str, args: Value) -> Value {
+    json!({ "tool": tool, "args": args })
+}
+
+/// An executor that writes `calc` (and the clamp tests) and claims it.
+fn executor_script(calc: &str) -> String {
+    json!({ "steps": [
+        step(json!([
+            call("hub_request_claim", json!({ "path": "calc.py", "claim_type": "edit" })),
+            call("hub_request_claim", json!({ "path": "tests/", "claim_type": "edit" })),
+        ])),
+        step(json!([
+            call("write_file", json!({ "path": "calc.py", "content": calc })),
+            call("write_file", json!({ "path": "tests/test_clamp.py", "content": TEST_CLAMP })),
+        ])),
+        step(json!([ call("submit_claims", json!({ "claims": [clamp_claim()] })) ])),
+        { "content": "clamp implemented", "prompt_tokens": 100, "completion_tokens": 10 },
+    ]})
+    .to_string()
+}
+
+/// A reviewer that gives every claim (here: `c1`) `verdict`.
+fn reviewer_script(verdict: &str) -> String {
+    json!({ "steps": [
+        step(json!([ call("submit_verdicts", json!({ "verdicts": [{
+            "claim_id": "c1", "verdict": verdict, "reason_code": "checked",
+            "evidence_refs": ["diff:calc.py", "test:tests.test_clamp.C.test_high"],
+        }]})) ])),
+        { "content": "reviewed", "prompt_tokens": 100, "completion_tokens": 10 },
+    ]})
+    .to_string()
+}
+
+fn verify_team(first: &str, repairs: &[&str], spec: VerifySpec) -> Team {
+    Team {
+        schedule: Schedule::Sequential,
+        verify: Some(spec),
+        agents: vec![TeamAgent {
+            name: "alpha".into(),
+            roles_toml: roles_a(),
+            instruction: "Make clamp() limit x to [lo, hi], with tests.".into(),
+            claim_within: vec!["calc.py".into(), "tests/".into()],
+            mock_script: Some(executor_script(first)),
+            repair_mock_scripts: repairs.iter().map(|c| executor_script(c)).collect(),
+            messages_need_approval: false,
+        }],
+    }
+}
+
+fn run_verified(
+    fx: &Fx,
+    opened: &mut Opened,
+    team: &Team,
+    interact: Box<dyn anchor_backend::interact::Interaction>,
+    auto_merge: bool,
+) -> team::TeamReport {
+    let opts = team::TeamOptions {
+        agent_bin: agent_bin(),
+        state_base: fx.state_base(),
+        auto_merge,
+        checkpoint_threshold: 0.8,
+        gate: Box::new(anchor_backend::queue::NoGate),
+    };
+    team::run(opened, team, opts, team::Shared::wrap(interact)).unwrap()
+}
+
+fn buggy() -> String {
+    GOOD_CALC.replace("return hi", "return lo")
+}
+
+#[cfg(unix)]
+#[test]
+fn self_repair_merges_on_second_attempt() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = fx.open();
+    let team = verify_team(&buggy(), &[GOOD_CALC], spec());
+    let r = run_verified(
+        &fx,
+        &mut opened,
+        &team,
+        Box::new(Scripted::new(true, ResumeChoice::FreshSession)),
+        true,
+    );
+    let a = &r.agents[0];
+    assert_eq!(a.attempts.len(), 2, "{:?}", a.attempts);
+    assert_eq!(a.attempts[0].reject_kind(), Some(RejectKind::Gate));
+    assert!(a.attempts[1].is_merged());
+    assert!(a.merge.as_ref().unwrap().is_merged());
+    assert_eq!(fx.read("calc.py"), GOOD_CALC);
+    // The repair session was told what failed.
+    let audit = anchor_policy::AuditLog::read_entries(&opened.paths.audit).unwrap();
+    assert_eq!(
+        audit.iter().filter(|e| e.kind == "repair_started").count(),
+        1
+    );
+    let store =
+        anchor_checkpoint::CheckpointStore::open(&opened.paths.checkpoints.join("alpha")).unwrap();
+    let (cps, _) = store.list().unwrap();
+    let seen_feedback = cps.iter().any(|c| {
+        store
+            .load(&c.checkpoint_id)
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| {
+                m.content.contains("REJECTED by verification")
+                    && m.content.contains("tests.test_clamp.C.test_high")
+            })
+    });
+    assert!(seen_feedback, "the repair instruction carries the feedback");
+}
+
+#[cfg(unix)]
+#[test]
+fn retries_are_bounded() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = fx.open();
+    let b = buggy();
+    let team = verify_team(&b, &[&b], spec());
+    let r = run_verified(
+        &fx,
+        &mut opened,
+        &team,
+        Box::new(Scripted::new(true, ResumeChoice::FreshSession)),
+        true,
+    );
+    let a = &r.agents[0];
+    assert_eq!(a.attempts.len(), 3, "max_attempts = 3");
+    assert!(
+        a.attempts
+            .iter()
+            .all(|o| o.reject_kind() == Some(RejectKind::Gate))
+    );
+    assert_eq!(fx.read("calc.py"), CALC);
+}
+
+/// Approves everything except merges.
+struct DeclinesMerges;
+
+impl anchor_backend::interact::Interaction for DeclinesMerges {
+    fn confirm(&mut self, v: &anchor_backend::interact::PromptView) -> anchor_policy::UserResponse {
+        if v.rule.contains("merge_queue") {
+            anchor_policy::UserResponse::Deny
+        } else {
+            anchor_policy::UserResponse::Approve
+        }
+    }
+    fn resume_choice(&mut self, _: &str, _: &str) -> ResumeChoice {
+        ResumeChoice::FreshSession
+    }
+    fn notify(&mut self, _: &str) {}
+    fn responder(&self) -> anchor_policy::Responder {
+        anchor_policy::Responder::Automatic
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn user_decline_is_not_retried() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = open_workspace_in(
+        &fx.ws,
+        &fx.state_base(),
+        None,
+        Box::new(DeclinesMerges),
+        vec![],
+    )
+    .unwrap();
+    let team = verify_team(GOOD_CALC, &[], spec());
+    let r = run_verified(&fx, &mut opened, &team, Box::new(DeclinesMerges), false);
+    let a = &r.agents[0];
+    assert_eq!(a.attempts.len(), 1);
+    assert_eq!(a.attempts[0].reject_kind(), Some(RejectKind::Declined));
+    assert_eq!(fx.read("calc.py"), CALC);
+}
+
+fn model_spec(reviewer: &str, verdict: &str) -> VerifySpec {
+    let mut s = spec();
+    s.reviewer = ReviewerKind::Model;
+    s.reviewer_roles = Some(reviewer_roles(reviewer, None));
+    s.reviewer_mock_script = Some(reviewer_script(verdict));
+    s.max_attempts = 1;
+    s
+}
+
+#[cfg(unix)]
+#[test]
+fn model_reviewer_approves_supported_claims() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = fx.open();
+    let team = verify_team(GOOD_CALC, &[], model_spec("mock_b", "supported"));
+    let r = run_verified(
+        &fx,
+        &mut opened,
+        &team,
+        Box::new(Scripted::new(true, ResumeChoice::FreshSession)),
+        true,
+    );
+    assert!(
+        r.agents[0].merge.as_ref().unwrap().is_merged(),
+        "{:?}",
+        r.agents[0].attempts
+    );
+    assert_eq!(fx.read("calc.py"), GOOD_CALC);
+}
+
+#[cfg(unix)]
+#[test]
+fn refuted_claim_does_not_merge() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = fx.open();
+    let team = verify_team(GOOD_CALC, &[], model_spec("mock_b", "refuted"));
+    let r = run_verified(
+        &fx,
+        &mut opened,
+        &team,
+        Box::new(Scripted::new(true, ResumeChoice::FreshSession)),
+        true,
+    );
+    let o = r.agents[0].merge.as_ref().unwrap();
+    assert_eq!(codes(o), ["checked"]);
+    assert_eq!(fx.read("calc.py"), CALC);
+}
+
+/// A reviewer that could fall back into the executor's family is refused
+/// before any agent runs (§8.2(a)). (Verdicts from a session that did fall
+/// back into it are refused by the gate: `verify::tests`.)
+#[cfg(unix)]
+#[test]
+fn reviewer_falling_back_into_executor_family_is_refused() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = fx.open();
+    let mut s = model_spec("mock_b", "supported");
+    s.reviewer_roles = Some(reviewer_roles("mock_b", Some("mock_a")));
+    let team = verify_team(GOOD_CALC, &[], s);
+    let opts = team::TeamOptions {
+        agent_bin: agent_bin(),
+        state_base: fx.state_base(),
+        auto_merge: true,
+        checkpoint_threshold: 0.8,
+        gate: Box::new(anchor_backend::queue::NoGate),
+    };
+    let interact = team::Shared::wrap(Box::new(Scripted::new(true, ResumeChoice::FreshSession)));
+    let e = team::run(&mut opened, &team, opts, interact).unwrap_err();
+    assert!(e.contains("family"), "{e}");
     assert_eq!(fx.read("calc.py"), CALC);
 }

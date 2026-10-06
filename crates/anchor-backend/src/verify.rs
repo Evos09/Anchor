@@ -1045,54 +1045,57 @@ impl ModelReviewer {
             usage: Arc::new(Mutex::new(ReviewUsage::default())),
         })
     }
+}
 
-    /// Providers a session's notices say it ran on.
-    fn providers(notices: &[Notice]) -> Vec<String> {
-        let mut out = Vec::new();
-        for n in notices {
-            match n.kind {
-                NoticeKind::RoutingDecision => {
-                    if let Some(p) = n
-                        .detail
-                        .split_whitespace()
-                        .find_map(|w| w.strip_prefix("provider="))
-                    {
-                        out.push(p.to_string());
-                    }
+/// Providers a session's notices say it ran on.
+fn notice_providers(notices: &[Notice]) -> Vec<String> {
+    let mut out = Vec::new();
+    for n in notices {
+        match n.kind {
+            NoticeKind::RoutingDecision => {
+                if let Some(p) = n
+                    .detail
+                    .split_whitespace()
+                    .find_map(|w| w.strip_prefix("provider="))
+                {
+                    out.push(p.to_string());
                 }
-                NoticeKind::ProviderFallback => {
-                    if let Some((_, p)) = n.detail.rsplit_once("falling back to ") {
-                        out.push(p.trim().trim_matches('"').to_string());
-                    }
-                }
-                _ => {}
             }
+            NoticeKind::ProviderFallback => {
+                if let Some((_, p)) = n.detail.rsplit_once("falling back to ") {
+                    out.push(p.trim().trim_matches('"').to_string());
+                }
+            }
+            _ => {}
         }
-        out
     }
+    out
+}
 
-    /// §8.2(a) once more, on what the session actually ran on.
-    fn check_ran_on(&self, notices: &[Notice]) -> Result<(), String> {
-        let providers = Self::providers(notices);
-        if providers.is_empty() {
-            return Err("the review session reported no routing decision".into());
-        }
-        for p in providers {
-            let family = self
-                .view
-                .providers
-                .get(&p)
-                .map(|pv| normalize_family(&pv.family))
-                .ok_or_else(|| format!("the reviewer ran on unknown provider {p:?}"))?;
-            if self.executor_families.contains(&family) {
-                return Err(format!(
-                    "reviewer_family_clash: the reviewer ran on {p:?} (family {family:?}), \
-                     an executor's family"
-                ));
-            }
-        }
-        Ok(())
+/// §8.2(a) once more, on what a review session actually ran on.
+fn check_ran_on(
+    view: &RolesView,
+    executor_families: &[String],
+    notices: &[Notice],
+) -> Result<(), String> {
+    let providers = notice_providers(notices);
+    if providers.is_empty() {
+        return Err("the review session reported no routing decision".into());
     }
+    for p in providers {
+        let family = view
+            .providers
+            .get(&p)
+            .map(|pv| normalize_family(&pv.family))
+            .ok_or_else(|| format!("the reviewer ran on unknown provider {p:?}"))?;
+        if executor_families.contains(&family) {
+            return Err(format!(
+                "reviewer_family_clash: the reviewer ran on {p:?} (family {family:?}), \
+                 an executor's family"
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl Reviewer for ModelReviewer {
@@ -1114,7 +1117,7 @@ impl Reviewer for ModelReviewer {
             u.tokens_out += rep.tokens_out;
             u.cost_usd += rep.cost_usd;
         }
-        self.check_ran_on(&rep.notices)?;
+        check_ran_on(&self.view, &self.executor_families, &rep.notices)?;
         if let Some(f) = rep.failed {
             return Err(format!("review session failed: {f}"));
         }
@@ -1126,4 +1129,71 @@ impl Reviewer for ModelReviewer {
 /// The rule baseline, boxed for the gate.
 pub fn rule_reviewer() -> BoxedReviewer {
     Box::new(RuleReviewer)
+}
+
+/// The executor-facing text of a gate rejection (`feedback.detail`).
+pub fn render_gate_feedback(feedback: &Value) -> String {
+    let detail = &feedback["detail"];
+    if detail.get("findings").is_some() {
+        anchor_verify::render_feedback(detail)
+    } else {
+        format!("Your previous change was REJECTED by verification:\n{detail}\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn notice(kind: NoticeKind, detail: &str) -> Notice {
+        Notice {
+            kind,
+            detail: detail.into(),
+        }
+    }
+
+    #[test]
+    fn verdicts_from_an_executor_family_are_refused() {
+        let view: RolesView = toml::from_str(
+            "[providers.a]\nfamily = \"Fam-A\"\n[providers.b]\nfamily = \"fam-b\"\n",
+        )
+        .unwrap();
+        let exec = vec!["fam-a".to_string()];
+        let routed = notice(
+            NoticeKind::RoutingDecision,
+            "role=reviewer provider=b model=m reason: review route",
+        );
+        check_ran_on(&view, &exec, std::slice::from_ref(&routed)).unwrap();
+        // The session fell back into the executor's family mid-review.
+        let fell = notice(
+            NoticeKind::ProviderFallback,
+            "provider \"b\" failed (overloaded); falling back to \"a\"",
+        );
+        let e = check_ran_on(&view, &exec, &[routed.clone(), fell]).unwrap_err();
+        assert!(e.contains("reviewer_family_clash"), "{e}");
+        // No routing notice, or an unknown provider: refused too.
+        assert!(check_ran_on(&view, &exec, &[]).is_err());
+        let odd = notice(NoticeKind::RoutingDecision, "role=reviewer provider=zz");
+        assert!(check_ran_on(&view, &exec, &[odd]).is_err());
+    }
+
+    #[test]
+    fn verify_config_is_validated() {
+        let dir = std::path::Path::new(".");
+        let file = |extra: &str| -> Result<VerifySpec, String> {
+            let f: VerifyFile = toml::from_str(&format!(
+                "test = [\"python3\", \"-m\", \"unittest\"]\n{extra}"
+            ))
+            .map_err(|e| e.to_string())?;
+            VerifySpec::load(f, dir)
+        };
+        let s = file("").unwrap();
+        assert_eq!(s.protected, ["tests/**"]);
+        assert_eq!((s.max_attempts, s.reviewer), (3, ReviewerKind::Rule));
+        assert!(file("coverage = [\"python3\", \"-m\", \"trace\"]").is_err());
+        assert!(file("max_attempts = 0").is_err());
+        assert!(file("reviewer = \"model\"").is_err());
+        assert!(file("unknown = 1").is_err());
+        assert!(file("build = []").is_err());
+    }
 }

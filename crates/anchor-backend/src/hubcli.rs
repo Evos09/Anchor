@@ -131,11 +131,11 @@ pub fn cmd_team(a: &Args) -> Result<ExitCode, String> {
                 println!("SESSION ERROR: {e}");
             }
         }
+        for (n, o) in r.attempts.iter().enumerate() {
+            println!("attempt {}: merge {}: {}", n + 1, o.seq(), outcome_text(o));
+        }
         match &r.merge {
-            Some(o) => {
-                ok &= o.is_merged();
-                println!("merge {}: {}", o.seq(), outcome_text(o));
-            }
+            Some(o) => ok &= o.is_merged(),
             None => println!("not merged (the session did not finish)"),
         }
     }
@@ -149,7 +149,15 @@ pub fn cmd_team(a: &Args) -> Result<ExitCode, String> {
 fn outcome_text(o: &Outcome) -> String {
     match o {
         Outcome::Merged { merged, .. } => format!("merged ({})", merged.hex()),
-        Outcome::Rejected { feedback, .. } => format!("REJECTED {feedback}"),
+        Outcome::Rejected {
+            reason, feedback, ..
+        } => match reason {
+            anchor_backend::queue::RejectKind::Gate => format!(
+                "REJECTED by verification\n{}",
+                anchor_backend::verify::render_gate_feedback(feedback)
+            ),
+            r => format!("REJECTED ({}) {feedback}", r.as_str()),
+        },
     }
 }
 

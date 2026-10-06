@@ -49,7 +49,7 @@ use serde::Deserialize;
 
 use crate::interact::{Interaction, PromptView};
 use crate::mediator::{HubBinding, Mediator, lock_store};
-use crate::queue::{MergeGate, MergeQueue, Outcome};
+use crate::queue::{MergeGate, MergeQueue, Outcome, RejectKind};
 use crate::session::{self, SessionConfig, SessionReport};
 use crate::verify::{ModelReviewer, ReviewerKind, VerifyFile, VerifyGate, VerifySpec};
 use crate::{Opened, StatePaths, iso};
@@ -87,6 +87,9 @@ struct AgentSpec {
     claim_within: Vec<String>,
     #[serde(default)]
     mock_script: Option<PathBuf>,
+    /// Scripted models for repair attempts 2, 3, … (the last repeats).
+    #[serde(default)]
+    repair_mock_scripts: Vec<PathBuf>,
     #[serde(default)]
     messages_need_approval: bool,
 }
@@ -98,6 +101,8 @@ pub struct TeamAgent {
     pub instruction: String,
     pub claim_within: Vec<String>,
     pub mock_script: Option<String>,
+    /// Scripted models for repair attempts 2, 3, … (the last repeats).
+    pub repair_mock_scripts: Vec<String>,
     pub messages_need_approval: bool,
 }
 
@@ -134,6 +139,11 @@ impl Team {
             agents.push(TeamAgent {
                 roles_toml: read(&a.roles)?,
                 mock_script: a.mock_script.as_deref().map(read).transpose()?,
+                repair_mock_scripts: a
+                    .repair_mock_scripts
+                    .iter()
+                    .map(|p| read(p))
+                    .collect::<Result<_, _>>()?,
                 name: a.name,
                 instruction: a.instruction,
                 claim_within: a.claim_within,
@@ -308,8 +318,39 @@ pub struct AgentResult {
     pub agent_id: AgentId,
     pub model_id: String,
     pub family: String,
+    /// The last session (of the last attempt).
     pub session: Result<SessionReport, String>,
+    /// Sessions of earlier, rejected attempts.
+    pub earlier_sessions: Vec<Result<SessionReport, String>>,
+    /// The final merge outcome (the last of `attempts`).
     pub merge: Option<Outcome>,
+    /// Every submission's outcome, in order (at most `max_attempts`).
+    pub attempts: Vec<Outcome>,
+}
+
+/// What a repair session is told about the rejected attempt.
+fn repair_note(reason: RejectKind, feedback: &serde_json::Value) -> String {
+    match reason {
+        RejectKind::Gate => format!(
+            "{}\nThe workspace now holds your rejected change merged with the latest \
+             main workspace. Fix the problems above, then finish with new claims.",
+            crate::verify::render_gate_feedback(feedback)
+        ),
+        _ => format!(
+            "Your previous change conflicted with changes made meanwhile to: {}. \
+             The workspace now holds the latest version of those files with the rest \
+             of your change applied. Redo your edits to them on top of the current \
+             content, then finish with new claims.",
+            feedback["paths"]
+                .as_array()
+                .map(|ps| ps
+                    .iter()
+                    .filter_map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .unwrap_or_default()
+        ),
+    }
 }
 
 #[derive(Debug, Default)]
@@ -375,13 +416,21 @@ fn verify_gate(
             )?)
         }
     };
+    // The tester's commands are the user's own (not an agent's): they get
+    // the system's read-only view, plus whatever agent commands get.
+    let mut read_only = crate::default_exec_read_only();
+    for d in main.exec_read_only() {
+        if !read_only.contains(d) {
+            read_only.push(d.clone());
+        }
+    }
     VerifyGate::new(
         spec.clone(),
         scratch,
         Some(hub.clone()),
         reviewer,
         main.path_var().to_string(),
-        main.exec_read_only().to_vec(),
+        read_only,
     )
 }
 
@@ -463,23 +512,35 @@ pub fn run(
         report.recovered.push(queue.process(seq)?);
     }
 
-    // Isolated workspace, mediator and session config for agent `i`, based
-    // on the main workspace as it is now.
-    let prepare = |queue: &mut MergeQueue<'_>, i: usize, base: &anchor_snapshot::Id| {
+    // Isolated workspace, mediator and session config for agent `i`'s
+    // `attempt` (1-based): filled from `from`, with its changes counted
+    // from `base`.
+    let prepare = |queue: &mut MergeQueue<'_>,
+                   i: usize,
+                   attempt: usize,
+                   from: &anchor_snapshot::Id,
+                   base: &anchor_snapshot::Id,
+                   instruction: String| {
         let a = &team.agents[i];
         let main = queue.main();
         let store_arc = main.shared_store();
-        let iso = {
+        let mut iso = {
             let store = lock_store(&store_arc);
+            let root = iso::root_for(ids[i]);
+            if attempt > 1 {
+                // The previous attempt's directory is settled: start over.
+                iso::teardown(&store, &root, &iso_base.join(root.name().unwrap_or("?")))?;
+            }
             iso::create(
                 &store,
                 main.snapshot_options(),
                 main.engine(),
                 &iso_base,
-                iso::root_for(ids[i]),
-                base,
+                root,
+                from,
             )?
         };
+        iso.base = *base;
         let ws = anchor_fs::Workspace::open(iso.ws.root()).map_err(|e| e.to_string())?;
         let guard = Guard::load(&paths.workspace_config).map_err(|e| e.to_string())?;
         let mut mediator = main.isolated(
@@ -495,14 +556,23 @@ pub fn run(
         });
         let checkpoints =
             CheckpointStore::open(&paths.checkpoints.join(&a.name)).map_err(|e| e.to_string())?;
+        let mock_script = match attempt {
+            1 => a.mock_script.clone(),
+            n => a
+                .repair_mock_scripts
+                .get(n - 2)
+                .or(a.repair_mock_scripts.last())
+                .cloned()
+                .or_else(|| a.mock_script.clone()),
+        };
         let cfg = SessionConfig {
             agent_bin: opts.agent_bin.clone(),
-            session_id: format!("{}-{}", session::new_session_id(), a.name),
-            instruction: a.instruction.clone(),
+            session_id: format!("{}-{}-{attempt}", session::new_session_id(), a.name),
+            instruction,
             roles_toml: a.roles_toml.clone(),
             checkpoint_threshold: opts.checkpoint_threshold,
             resume_from: None,
-            mock_script: a.mock_script.clone(),
+            mock_script,
             hub: Some(hub_info(i)),
             review: None,
         };
@@ -528,30 +598,84 @@ pub fn run(
         .map_err(|e| e.to_string())
     };
 
+    let submit = |p: &Prepared| {
+        let store_arc = p.mediator.shared_store();
+        let store = lock_store(&store_arc);
+        iso::submit(&store, &p.iso).ok()
+    };
+    let max_attempts = team.verify.as_ref().map_or(1, |v| v.max_attempts);
+
     let mut results: Vec<Option<AgentResult>> = (0..team.agents.len()).map(|_| None).collect();
+    // Merge an agent's work; on a rejection worth another try, give the
+    // agent (a fresh session) the feedback and its rejected candidate, and
+    // try again, up to `max_attempts` submissions (spec §8.2(c)).
     let mut finish = |queue: &mut MergeQueue<'_>,
-                      p: Prepared,
-                      session: Result<SessionReport, String>,
-                      submitted: Option<anchor_snapshot::Id>|
+                      mut p: Prepared,
+                      mut session: Result<SessionReport, String>,
+                      mut submitted: Option<anchor_snapshot::Id>|
      -> Result<(), String> {
         let i = p.idx;
-        let merge = match submitted {
-            Some(sub) if finished_ok(&session) => {
-                let claims = session
-                    .as_ref()
-                    .map(|r| r.claims.clone())
-                    .unwrap_or_default();
-                let e = queue.submit(ids[i], &p.iso.base, &sub, &claims)?;
-                Some(queue.process(e.seq)?)
+        let mut attempts: Vec<Outcome> = Vec::new();
+        let mut sessions = Vec::new();
+        loop {
+            let outcome = match submitted {
+                Some(sub) if finished_ok(&session) => {
+                    let claims = session
+                        .as_ref()
+                        .map(|r| r.claims.clone())
+                        .unwrap_or_default();
+                    let e = queue.submit(ids[i], &p.iso.base, &sub, &claims)?;
+                    Some(queue.process(e.seq)?)
+                }
+                _ => None,
+            };
+            let retry = match &outcome {
+                Some(Outcome::Rejected {
+                    reason: reason @ (RejectKind::Gate | RejectKind::Conflict),
+                    feedback,
+                    pre: Some(pre),
+                    candidate: Some(cand),
+                    ..
+                }) if attempts.len() + 1 < max_attempts => {
+                    Some((*reason, feedback.clone(), *pre, *cand))
+                }
+                _ => None,
+            };
+            if let Some(o) = outcome {
+                attempts.push(o);
             }
-            _ => None,
-        };
+            let Some((reason, feedback, pre, cand)) = retry else {
+                break;
+            };
+            let attempt = attempts.len() + 1;
+            let _ = queue.main().engine().log(
+                "repair_started",
+                serde_json::json!({
+                    "agent": team.agents[i].name,
+                    "agent_id": ids[i],
+                    "attempt": attempt,
+                    "after": attempts.last().map(Outcome::seq),
+                    "reason": reason.as_str(),
+                }),
+            );
+            let instruction = format!(
+                "{}\n\n{}",
+                team.agents[i].instruction,
+                repair_note(reason, &feedback)
+            );
+            sessions.push(std::mem::replace(&mut session, Err(String::new())));
+            p = prepare(queue, i, attempt, &cand, &pre, instruction)?;
+            session =
+                session::run(&p.cfg, &mut p.mediator, &p.checkpoints).map_err(|e| e.to_string());
+            submitted = submit(&p);
+        }
         // The agent's work is settled: free its claims for the others.
         if let Ok(claims) = hub.list_claims(Caller::User, true) {
             for c in claims.iter().filter(|c| c.agent_id == ids[i]) {
                 let _ = hub.revoke_claim(Caller::User, c.id);
             }
         }
+        let merge = attempts.last().cloned();
         if merge.as_ref().is_some_and(Outcome::is_merged) {
             let store_arc = queue.main().shared_store();
             let store = lock_store(&store_arc);
@@ -563,21 +687,19 @@ pub fn run(
             model_id: idents[i].1.clone(),
             family: idents[i].2.clone(),
             session,
+            earlier_sessions: sessions,
             merge,
+            attempts,
         });
         Ok(())
-    };
-    let submit = |p: &Prepared| {
-        let store_arc = p.mediator.shared_store();
-        let store = lock_store(&store_arc);
-        iso::submit(&store, &p.iso).ok()
     };
 
     match team.schedule {
         Schedule::Sequential => {
             for i in 0..team.agents.len() {
                 let base = base_now(&mut queue)?;
-                let mut p = prepare(&mut queue, i, &base)?;
+                let instruction = team.agents[i].instruction.clone();
+                let mut p = prepare(&mut queue, i, 1, &base, &base, instruction)?;
                 let session = session::run(&p.cfg, &mut p.mediator, &p.checkpoints)
                     .map_err(|e| e.to_string());
                 let sub = submit(&p);
@@ -588,7 +710,8 @@ pub fn run(
             let base = base_now(&mut queue)?;
             let mut prepared = Vec::new();
             for i in 0..team.agents.len() {
-                prepared.push(prepare(&mut queue, i, &base)?);
+                let instruction = team.agents[i].instruction.clone();
+                prepared.push(prepare(&mut queue, i, 1, &base, &base, instruction)?);
             }
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::scope(|s| -> Result<(), String> {
