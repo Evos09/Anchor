@@ -14,7 +14,7 @@ Check date: **2026-10-06**. Sources and how each step was performed:
 
 | Crate | Version | Releases in last 90 days | License (read) | Used for | Fitness evidence |
 |---|---|---|---|---|---|
-| serde / serde_json | 1.0.229 / 1.0.151 | 1 / 1 | MIT OR Apache-2.0 (standard) | protocol, audit, checkpoints | `anchor-protocol` tests (unknown fields, versions) |
+| serde / serde_json | 1.0.229 / 1.0.151 | 1 / 1 | MIT OR Apache-2.0 (standard) | protocol, audit, checkpoints (serde_json with `float_roundtrip`, so audit hashes verify; ADR-0016) | `anchor-protocol` tests (unknown fields, versions) |
 | toml | 1.1.6 | 4 | MIT OR Apache-2.0 (standard) | policy, roles, workspace config | `policy_rejects_unknown_keys_and_bad_rules` |
 | thiserror | 2.0.21 | 3 | MIT OR Apache-2.0 (standard) | error types | compile-time only |
 | sha2 | 0.11.0 | 0 (last 2026-03-25) | MIT OR Apache-2.0 (standard) | content hashes, audit chain, snapshot object ids | `audit_chain_detects_tampering`, append verification, `poisoned_store_is_refused` |

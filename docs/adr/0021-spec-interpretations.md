@@ -14,3 +14,8 @@
 | §5.5(a) snapshot granularity | "workspace or claimed subtrees" | Phase 2: per-file pre-images for file tools, whole workspace before commands (ADR-0018) | Skipping snapshots until Phase 3 |
 | §8.2(a) "model family" | No definition | Declared per provider (or role override) in config; case-insensitive comparison; fallbacks included | Inferring from model-id strings |
 | §11 Threat 7 root | `RLIMIT_NPROC` ignored for uid 0 | Drop commands to uid 65534 when the backend is root | Running commands as root |
+| §7 worktrees | "git worktree" per agent | Snapshot-native isolated directories and a snapshot merge queue (user decision, ADR-0007) | Running `git` in the trusted backend on agent-writable repositories |
+| §6.5 `register_agent` | Listed among agent-callable Hub methods | User-only: an agent cannot mint identities or grants (ADR-0023) | Agents registering peers |
+| §6.5 local transport | "Unix socket / named pipe" | Loopback TCP with per-agent bearer tokens, Host and Origin checks, because MCP Streamable HTTP and A2A bind to HTTP (ADR-0004) | A socket that standard MCP/A2A clients cannot reach |
+| §6.4 claim enforcement | Advisory or enforced | Enforced twice: the mediator refuses writes to others' claims, and the merge queue rejects any unclaimed change (ADR-0007) | Advisory claims only |
+| §8.2(a) "model family" in teams | Where a team agent's family comes from | From its roles file's agentic route (provider family or role override), never from the team file | Declaring the family in `team.toml` |

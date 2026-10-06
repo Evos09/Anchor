@@ -3,8 +3,9 @@
 A trust-first desktop coding agent: one developers can trust not to lose
 their work, leak their credentials, or ship unverified changes.
 
-> **Status: Phases 1–3: the safety core and durability (snapshot engine,
-> atomic rollback), backend-only.** No desktop UI yet. Read
+> **Status: Phases 1–4: the safety core, durability (snapshot engine,
+> atomic rollback) and the Coordination Hub for multi-agent teams,
+> backend-only.** No desktop UI yet. Read
 > [What is and isn't done](#what-is-and-isnt-done) before relying on
 > anything here.
 
@@ -38,7 +39,8 @@ Every tool call the agent makes goes through this pipeline in the backend:
 | `anchor-exec` | argv-only command runner: rlimits, network namespace, Landlock / Seatbelt | §11 |
 | `anchor-snapshot` | Content-addressed, chunked snapshots; journaled, verified restore; diff / merge3 | §5.5 |
 | `anchor-runtime` | `anchor-agent`: agent loop, deterministic router, OpenAI-compatible + mock providers | §3.7, §9 |
-| `anchor-backend` | `anchor`: mediator, session supervisor, rollback, CLI | §3.2 |
+| `anchor-hub` | Coordination Hub: SQLite shared state, claims, message bus, permissions, audit anchoring; MCP 2026-07-28 and A2A 1.0 endpoints | §6 |
+| `anchor-backend` | `anchor`: mediator, session supervisor, rollback, isolated workspaces, merge queue, team runner, CLI | §3.2, §7 |
 
 ## Try it
 
@@ -83,6 +85,28 @@ Policy, audit log, checkpoints and snapshots live outside the workspace, so
 agent commands can't reach them (ADR-0022). `anchor state-dir --workspace
 DIR` prints the location; set `ANCHOR_STATE_DIR` to move it.
 
+### A team of agents (Phase 4)
+
+```sh
+mkdir -p /tmp/anchor-team/src && echo "# demo" > /tmp/anchor-team/README.md
+./target/debug/anchor team run --workspace /tmp/anchor-team \
+    --team examples/team/team.mock.toml --auto-approve --auto-merge
+./target/debug/anchor hub messages --workspace /tmp/anchor-team   # the agents' conversation
+./target/debug/anchor queue list   --workspace /tmp/anchor-team   # what merged, and why
+./target/debug/anchor hub verify   --workspace /tmp/anchor-team   # the Hub matches the audit log
+```
+
+Two scripted agents of different model families collaborate:
+
+1. `alpha` claims and writes `src/greet.py`, then asks `beta` for tests.
+2. `beta` reads the message, claims `tests/` and writes them.
+
+Each agent works in its own isolated copy of the workspace. Its changes
+reach the workspace only through the merge queue, and only for files it
+claimed (ADR-0007). External agents connect with
+`anchor hub agent add` (prints a token) and `anchor hub serve` (MCP and A2A
+on 127.0.0.1, ADR-0004).
+
 For real models, copy `config/roles.example.toml`. Point it at a local
 OpenAI-compatible server (`anchor detect-local`) and/or a hosted API with
 your own key (`api_key_env`).
@@ -90,7 +114,7 @@ your own key (`api_key_env`).
 ## Tests
 
 ```sh
-cargo test --workspace                       # 157 tests on Linux, including the attack suites
+cargo test --workspace                       # 184 tests on Linux, including the attack suites
 cargo run --release -p anchor-snapshot --example bench   # 100k-file snapshot benchmark
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check                             # advisories, licenses, bans, sources
@@ -128,6 +152,24 @@ every §11 threat to its test and its per-platform status.
     checkout into an empty workspace (ADR-0006).
 - State directory outside the workspace, beyond every command sandbox
   (ADR-0022).
+- Phase 4, the Coordination Hub (ADR-0004, 0007, 0012, 0023):
+  - **Endpoints:** MCP 2026-07-28 and A2A 1.0, implemented from the
+    specifications.
+  - **Shared state:** the §6.3 schema in SQLite, with leased claims and a
+    persistent message bus that can hold messages for approval.
+  - **Isolation:** snapshot-native isolated workspaces and a serialized
+    merge queue that rejects unclaimed changes and never reverts
+    concurrent edits.
+  - **Audit:** every Hub call is audited and cross-checked by
+    `anchor hub verify`.
+  - **Done-when tests** (`crates/anchor-backend/tests/team.rs`):
+    - two families collaborating;
+    - two agents claiming one file;
+    - adjacent files merged from parallel isolated agents, then one
+      reverted;
+    - kill mid-merge;
+    - messages persisting across restart;
+    - the Threat 8 rogue-agent suite.
 
 **Known platform gaps:**
 
@@ -138,9 +180,18 @@ every §11 threat to its test and its per-platform status.
 - The OpenAI-compatible adapter has not been run against a live endpoint:
   there was no local server or API key in the build environment.
 
+**Phase 4 limits:**
+
+- Claims are hinted (the mediator) and enforced at merge, per file.
+  Merges are path-level, so two edits to one file conflict.
+- The MCP and A2A endpoints are request/response only: no SSE,
+  subscriptions, streaming or push notifications.
+- Agent commands in isolated workspaces need the backend to run as a
+  normal user. As root, commands run as `nobody` and cannot enter the
+  0700 isolated directory.
+
 **Not started (later phases):**
 
-- Coordination Hub, MCP/A2A, worktrees (Phase 4).
 - Verification pipeline and seeded-bug harness (Phase 5).
 - Desktop UI (Phase 6).
 - General seccomp syscall filter, Windows sandbox, external audit (Phase 7).

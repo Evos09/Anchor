@@ -20,7 +20,7 @@ legend:
 | 5 | Credential exfiltration | Policy deny list (ssh, aws, gh, gnupg, keychains, browser profiles, …), including Windows homes; commands confined (Landlock / Seatbelt); runtime cannot read files | `credentials_denied_everywhere`, `credentials_denied_with_backslash_home` (Windows), `filesystem_confinement_enforced` (Linux), `runtime_process_cannot_touch_the_filesystem` (Linux), e2e symlink-to-`.ssh` attack | ✅ Linux · ✅ macOS policy + e2e, 🟡 Seatbelt read-confinement not directly tested · ✅ Windows policy, ⛔ commands refuse |
 | 6 | Network egress | Commands default to network-denied: user+net namespace, or a seccomp socket filter where user namespaces are restricted (Ubuntu ≥ 23.10, GitHub runners); macOS Seatbelt; `network = true` requires a prompt | `network_denied_process_has_no_network` (both Linux methods, asserting the mechanism's errno), `network_allowed_process_can_open_inet_sockets` | ✅ Linux · 🟡 macOS (Seatbelt rule applied, no egress test yet) · ⛔ Windows |
 | 7 | Resource exhaustion | rlimits (NPROC, AS, CPU, FSIZE, CORE), wall timeout, process-group kill, root drop | `fork_bomb_is_contained`, `process_limit_refuses_excess_forks`, `memory_limit_enforced` (Linux), `wall_timeout_kills`, `output_is_capped` | ✅ Linux · ✅ macOS except memory (RLIMIT_AS unsupported, ADR-0003) · ⛔ Windows |
-| 8 | Malicious MCP/A2A peer | Hub RPC authentication and authorisation | — | ⏳ Phase 4 |
+| 8 | Malicious MCP/A2A peer | Identity from the transport only (pipe binding or per-agent bearer token); user-granted permissions; closed argument structs; loopback-only listener with Host/Origin checks and size/time limits; claims enforced at merge; every call audited, refusals included (ADR-0023, ADR-0004, ADR-0007) | `rogue_agent_cannot_bypass_the_hub` (missing, invalid and retired tokens; a bad Host or an Origin header; claims outside the grant or of an ungranted type; releasing another agent's claim; user-only operations (approve, accept, register), which are not exposed as tools; forged identity fields over MCP; reading others' messages; each refused, DB unchanged, audited; an A2A metadata sender is ignored: identity is the token), `hostile_http_is_refused`, `claims_outside_grants_are_refused_and_audited`, `only_the_user_registers_agents_and_tokens_authenticate`, `unclaimed_changes_are_rejected_at_merge` (a change made without the Hub never reaches main), `claims_prevent_conflicts` (an internal write to another agent's claim: `DeniedBy::Claim`), `verify_detects_database_tampering`, `verify_detects_audit_truncation` | ✅ Linux, macOS, Windows (pending CI confirmation, see below) |
 | 9 | Snapshot poisoning | The store lives outside the workspace, beyond every command sandbox (ADR-0022). Type-tagged, hash-verified objects; strict canonical decoding refuses escaping names and setuid bits; restore is approval-gated, descriptor-based, never follows symlinks and runs a pre-flight. Dedup re-verifies existing objects and heals damaged ones (ADR-0006) | `command_cannot_touch_state_dir`, `crafted_snapshot_cannot_escape_on_restore`, `poisoned_store_is_refused`, `crafted_tree_names_are_refused`, `symlink_planted_in_store_is_refused` | ✅ Linux, macOS · 🟡 Windows (store tests pass; commands refuse anyway) |
 
 ## §5 primitive test bullets
@@ -59,7 +59,21 @@ legend:
 | 5.5 crafted file cannot escape the store | `crafted_tree_names_are_refused`, `poisoned_store_is_refused`, `symlink_planted_in_store_is_refused`, e2e `crafted_snapshot_cannot_escape_on_restore` | ✅ |
 | 5.5(c) dedup / unchanged files not re-stored | `unchanged_files_are_neither_reread_nor_restored`, `chunker_*`, `index_catches_backdated_and_replaced_files` | ✅ |
 | 5.5(d) concurrent change never clobbered | `concurrent_change_is_detected_and_preserved`, `damaged_objects_are_healed_from_the_workspace` | ✅ |
-| 5.5(f) merge-queue substrate | `diff_merge3_and_materialize` | ✅ (queue itself: Phase 4) |
+| 5.5(f) merge-queue substrate | `diff_merge3_and_materialize` | ✅ |
+
+## §16.2 Hub integration and §16.4 concurrency (Phase 4)
+
+| Requirement | Test | Status |
+|---|---|---|
+| Two agents of different model families collaborate | `two_agents_of_different_families_collaborate` (families from the roles files; beta works from alpha's merged code and reads alpha's message; exact final tree; Hub and audit verify) | ✅ |
+| File claims prevent conflicts (two agents, one file) | `claims_prevent_conflicts` (parallel real runtimes: exactly one write, the other gets a conflict and `DeniedBy::Claim`), `concurrent_claims_on_one_file_have_exactly_one_winner` (100 threads), `claim_conflict_rules` | ✅ |
+| All messages persist and are auditable | `messages_persist_across_restart`, `messages_are_persisted_visible_only_to_their_parties_and_holdable`, `anchor hub log`, `anchor hub verify` | ✅ |
+| §16.4 adjacent files, isolated, merged without corruption | `concurrent_isolated_agents_merge_adjacent_files` (parallel; exact tree; store verify; then one agent's merge reverted, by agent) | ✅ |
+| Merge conflicts return structured feedback | `merge_conflict_returns_structured_feedback`, `merge_gate_failure_rejects` | ✅ |
+| A merge never reverts concurrent edits | `merge_never_reverts_concurrent_main_edits` | ✅ |
+| Kill mid-merge recovers | `kill_mid_merge_recovers` (child `anchor team run` aborted after 2 apply operations) | ✅ |
+| Claims are checked per file | `new_directories_are_checked_file_by_file` | ✅ |
+| MCP and A2A conformance | `mcp_discover_list_and_call_conform_to_2026_07_28`, `mcp_protocol_errors`, `a2a_card_send_and_tasks` | ✅ |
 
 ## Phase 2 "verified by instrumentation"
 
@@ -91,5 +105,5 @@ legend:
 
 ## Out of scope for this push
 
-External audit (§11.2), seccomp, Windows sandbox, Hub threats (8), and
-verification-pipeline threats.
+External audit (§11.2), seccomp, Windows sandbox, and verification-pipeline
+threats.
