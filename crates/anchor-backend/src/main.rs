@@ -155,6 +155,7 @@ fn cmd_run(a: &Args) -> Result<ExitCode, String> {
         resume_from,
         mock_script: a.get("--mock-script").map(read).transpose()?,
         hub: None,
+        review: None,
     };
     eprintln!(
         "anchor: workspace {}",

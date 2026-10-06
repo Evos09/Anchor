@@ -116,6 +116,7 @@ fn run(fx: &Fx, opened: &mut Opened, script: &str, threshold: f64, roles: &str) 
         resume_from: None,
         mock_script: Some(script.into()),
         hub: None,
+        review: None,
     };
     let _ = fx;
     session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap()
@@ -411,6 +412,7 @@ fn context_threshold_pauses_and_fresh_session_resumes() {
         resume_from: Some(cp.clone()),
         mock_script: Some(r#"{"steps": [{"content": "resumed and finished"}]}"#.into()),
         hub: None,
+        review: None,
     };
     let r2 = session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap();
     assert_eq!(r2.done.as_deref(), Some("resumed and finished"));
@@ -684,6 +686,7 @@ fn kill_mid_turn_leaves_valid_checkpoint_and_resumes() {
         resume_from: Some(latest),
         mock_script: Some(r#"{"steps": [{"content": "recovered"}]}"#.into()),
         hub: None,
+        review: None,
     };
     let r = session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap();
     assert_eq!(r.done.as_deref(), Some("recovered"));

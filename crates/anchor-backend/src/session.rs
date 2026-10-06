@@ -25,11 +25,21 @@ pub struct SessionConfig {
     pub mock_script: Option<String>,
     /// Multi-agent runs: the agent's Hub identity and tools.
     pub hub: Option<anchor_protocol::HubInfo>,
+    /// Review sessions (Phase 5): what the reviewer judges. The runtime
+    /// gets no workspace tools; any tool call ends the session.
+    pub review: Option<anchor_protocol::verify::ReviewInput>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionReport {
     pub done: Option<String>,
+    /// The executor's claims, reported with `Done`.
+    pub claims: Vec<anchor_protocol::verify::Claim>,
+    /// A review session's verdicts.
+    pub verdicts: Option<Vec<anchor_protocol::verify::ClaimVerdict>>,
+    /// Routing and fallback notices, in order (the verify gate re-checks
+    /// the families a reviewer actually ran on).
+    pub notices: Vec<anchor_protocol::Notice>,
     pub failed: Option<String>,
     pub paused_at: Option<String>,
     pub checkpoints: Vec<String>,
@@ -185,6 +195,7 @@ pub fn run(
                         resume_from: cfg.resume_from.clone().map(Box::new),
                         mock_script: cfg.mock_script.clone(),
                         hub: cfg.hub.clone(),
+                        review: cfg.review.clone().map(Box::new),
                     })))?;
                 }
                 Message::TurnStarted { turn } => {
@@ -192,6 +203,19 @@ pub fn run(
                     mediator.interact().notify(&format!("── turn {turn} ──"));
                 }
                 Message::TurnFinished { .. } => {}
+                Message::ToolCall(call) if cfg.review.is_some() => {
+                    // A reviewer has no workspace access (ADR-0009): fail
+                    // closed rather than answer.
+                    audit(
+                        mediator,
+                        "review_tool_refused",
+                        serde_json::json!({ "tool": call.request.name() }),
+                    );
+                    return Err(SessionError::Protocol(format!(
+                        "review session requested tool {}",
+                        call.request.name()
+                    )));
+                }
                 Message::ToolCall(call) => {
                     let name = call.request.name();
                     let outcome = mediator.handle(call.request);
@@ -254,6 +278,7 @@ pub fn run(
                     ));
                 }
                 Message::Notice(n) => {
+                    report.notices.push(n.clone());
                     audit(
                         mediator,
                         "notice",
@@ -275,7 +300,23 @@ pub fn run(
                     );
                     wire.send(Message::Resume(Resume { choice }))?;
                 }
+                Message::Verdicts(v) if cfg.review.is_some() && report.verdicts.is_none() => {
+                    audit(
+                        mediator,
+                        "review_verdicts",
+                        serde_json::to_value(&v.verdicts).unwrap_or_default(),
+                    );
+                    report.verdicts = Some(v.verdicts);
+                }
                 Message::Done(d) => {
+                    if !d.claims.is_empty() {
+                        audit(
+                            mediator,
+                            "claims_submitted",
+                            serde_json::to_value(&d.claims).unwrap_or_default(),
+                        );
+                    }
+                    report.claims = d.claims;
                     report.done = Some(d.summary);
                     wire.send(Message::Shutdown)?;
                     return Ok(());

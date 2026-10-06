@@ -37,11 +37,12 @@ fn roundtrips_every_direction() {
 
 #[test]
 fn rejects_version_mismatch() {
-    let line = r#"{"v":1,"id":1,"msg":{"kind":"shutdown"}}"#;
+    // A Phase 4 (v2) peer is refused with a precise error.
+    let line = r#"{"v":2,"id":1,"msg":{"kind":"shutdown"}}"#;
     match decode(line) {
         Err(ProtocolError::VersionMismatch {
-            expected: 2,
-            got: 1,
+            expected: 3,
+            got: 2,
         }) => {}
         other => panic!("expected version mismatch, got {other:?}"),
     }
@@ -49,25 +50,25 @@ fn rejects_version_mismatch() {
 
 #[test]
 fn rejects_unknown_top_level_field() {
-    let line = r#"{"v":2,"id":1,"msg":{"kind":"shutdown"},"extra":true}"#;
+    let line = r#"{"v":3,"id":1,"msg":{"kind":"shutdown"},"extra":true}"#;
     assert!(matches!(decode(line), Err(ProtocolError::Malformed(_))));
 }
 
 #[test]
 fn rejects_unknown_payload_field() {
-    let line = r#"{"v":2,"id":1,"msg":{"kind":"tool_call","payload":{"call_id":"a","request":{"tool":"read_file","args":{"path":"x","follow_symlinks":true}}}}}"#;
+    let line = r#"{"v":3,"id":1,"msg":{"kind":"tool_call","payload":{"call_id":"a","request":{"tool":"read_file","args":{"path":"x","follow_symlinks":true}}}}}"#;
     assert!(matches!(decode(line), Err(ProtocolError::Malformed(_))));
 }
 
 #[test]
 fn rejects_unknown_struct_variant_field() {
-    let line = r#"{"v":2,"id":1,"msg":{"kind":"turn_started","payload":{"turn":1,"x":2}}}"#;
+    let line = r#"{"v":3,"id":1,"msg":{"kind":"turn_started","payload":{"turn":1,"x":2}}}"#;
     assert!(matches!(decode(line), Err(ProtocolError::Malformed(_))));
 }
 
 #[test]
 fn rejects_unknown_tool() {
-    let line = r#"{"v":2,"id":1,"msg":{"kind":"tool_call","payload":{"call_id":"a","request":{"tool":"exec_shell","args":{"cmd":"ls"}}}}}"#;
+    let line = r#"{"v":3,"id":1,"msg":{"kind":"tool_call","payload":{"call_id":"a","request":{"tool":"exec_shell","args":{"cmd":"ls"}}}}}"#;
     assert!(matches!(decode(line), Err(ProtocolError::Malformed(_))));
 }
 
@@ -163,4 +164,105 @@ fn hub_requests_are_bounded() {
         let line = serde_json::to_string(&call(tool, args)).unwrap();
         assert!(decode(&line).is_err(), "{tool}");
     }
+}
+
+#[test]
+fn claims_and_verdicts_on_the_wire() {
+    use crate::verify::*;
+    let claim = Claim {
+        id: "c1".into(),
+        text: "handles expired tokens".into(),
+        files: vec!["auth.py".into()],
+        tests: vec!["test_auth.T.test_expired".into()],
+    };
+    roundtrip(Message::Done(Done {
+        summary: "done".into(),
+        claims: vec![claim.clone()],
+    }));
+    // Claims are optional on the wire (sessions without claims).
+    let line = r#"{"v":3,"id":1,"msg":{"kind":"done","payload":{"summary":"ok"}}}"#;
+    assert!(matches!(decode(line).unwrap().msg, Message::Done(d) if d.claims.is_empty()));
+    let verdict = ClaimVerdict {
+        claim_id: "c1".into(),
+        verdict: Verdict::Refuted,
+        reason_code: "no_test_for_claim".into(),
+        evidence_refs: vec!["diff:auth.py".into()],
+        note: "advisory".into(),
+    };
+    roundtrip(Message::Verdicts(Verdicts {
+        verdicts: vec![verdict.clone()],
+    }));
+    roundtrip(Message::ToolCall(ToolCall {
+        call_id: "c3".into(),
+        request: ToolRequest::SubmitClaims {
+            claims: vec![claim.clone()],
+        },
+    }));
+    // Bad claims and verdicts are refused at the wire.
+    let mut bad = claim.clone();
+    bad.id = "has space".into();
+    assert!(
+        encode(&Frame::new(
+            1,
+            Message::Done(Done {
+                summary: String::new(),
+                claims: vec![bad]
+            })
+        ))
+        .is_err()
+    );
+    let mut bad = verdict.clone();
+    bad.reason_code = "Not Snake".into();
+    assert!(
+        encode(&Frame::new(
+            1,
+            Message::Verdicts(Verdicts {
+                verdicts: vec![bad]
+            })
+        ))
+        .is_err()
+    );
+    let too_many: Vec<Claim> = (0..=MAX_CLAIMS)
+        .map(|i| Claim {
+            id: format!("c{i}"),
+            ..claim.clone()
+        })
+        .collect();
+    assert!(validate_claims(&too_many).is_err());
+    // An unknown verdict word is malformed, not silently accepted.
+    let line = r#"{"v":3,"id":1,"msg":{"kind":"verdicts","payload":{"verdicts":[{"claim_id":"c1","verdict":"probably","reason_code":"x"}]}}}"#;
+    assert!(matches!(decode(line), Err(ProtocolError::Malformed(_))));
+}
+
+#[test]
+fn review_tasks_are_isolated() {
+    use crate::verify::*;
+    let review = ReviewInput {
+        claims: vec![],
+        changes: vec![],
+        commands: vec![],
+        tests: vec![],
+        coverage: None,
+        claim_refs: Default::default(),
+        truncated: false,
+    };
+    let mut task = Task {
+        session_id: "s".into(),
+        instruction: "review".into(),
+        roles_toml: "x".into(),
+        checkpoint_threshold: 0.8,
+        resume_from: None,
+        mock_script: None,
+        hub: None,
+        review: Some(Box::new(review)),
+    };
+    roundtrip(Message::Task(Box::new(task.clone())));
+    // A reviewer is never also a Hub agent.
+    task.hub = Some(HubInfo {
+        agent_id: 1,
+        display_name: "r".into(),
+        peers: vec![],
+        tools: vec![],
+    });
+    assert!(Message::Task(Box::new(task)).validate().is_err());
 }

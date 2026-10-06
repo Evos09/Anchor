@@ -287,6 +287,7 @@ fn task(script: &str) -> Task {
         resume_from: None,
         mock_script: Some(script.into()),
         hub: None,
+        review: None,
     }
 }
 
@@ -451,4 +452,91 @@ fn invalid_roles_config_fails_cleanly() {
 fn shipped_example_configs_parse() {
     RolesConfig::parse(include_str!("../../../config/roles.example.toml")).unwrap();
     RolesConfig::parse(include_str!("../../../examples/demo/roles.mock.toml")).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: claims and review sessions
+// ---------------------------------------------------------------------------
+
+fn review_input() -> anchor_protocol::verify::ReviewInput {
+    use anchor_protocol::verify::*;
+    ReviewInput {
+        claims: vec![Claim {
+            id: "c1".into(),
+            text: "clamp handles low values".into(),
+            files: vec!["m.py".into()],
+            tests: vec!["test_m.T.test_low".into()],
+        }],
+        changes: vec![],
+        commands: vec![],
+        tests: vec![],
+        coverage: None,
+        claim_refs: [("c1".to_string(), vec!["diff:m.py".to_string()])].into(),
+        truncated: false,
+    }
+}
+
+/// The executor records claims with a runtime-local tool; they travel with
+/// `Done` and never reach the backend as a tool call.
+#[test]
+fn executor_claims_are_reported_with_done() {
+    let script = r#"{"steps":[
+      {"content":"","tool_calls":[{"tool":"submit_claims","args":{"claims":[
+        {"id":"c1","text":"clamp handles low values","files":["m.py"],"tests":["test_m.T.test_low"]}]}}]},
+      {"content":"","tool_calls":[{"tool":"submit_claims","args":{"claims":[{"id":"bad id","text":"x"}]}}]},
+      {"content":"done"}
+    ]}"#;
+    let mut b = FakeBackend::new(task(script), ResumeChoice::ContinueWithCompaction);
+    run_session(&mut b, &*default_factory()).unwrap();
+    assert!(!b.sent.iter().any(|m| matches!(m, Message::ToolCall(_))));
+    let Message::Done(d) = b.sent.last().unwrap() else {
+        panic!()
+    };
+    // The invalid second submission was rejected; the first stands.
+    assert_eq!(d.claims.len(), 1);
+    assert_eq!(d.claims[0].files, ["m.py"]);
+    // Every session offers the claims tool, as part of the fixed prefix.
+    assert!(TOOLS_JSON.to_string().contains("submit_claims"));
+}
+
+/// A review session runs on the review route with only `submit_verdicts`;
+/// workspace tools are refused inside the runtime, and verdicts are sent
+/// before `Done`.
+#[test]
+fn review_session_routes_to_reviewer_and_returns_verdicts() {
+    let script = r#"{"steps":[
+      {"content":"","tool_calls":[{"tool":"read_file","args":{"path":"m.py"}}]},
+      {"content":"","tool_calls":[{"tool":"submit_claims","args":{"claims":[]}}]},
+      {"content":"verdict","tool_calls":[{"tool":"submit_verdicts","args":{"verdicts":[
+        {"claim_id":"c1","verdict":"refuted","reason_code":"uncovered_change","evidence_refs":["diff:m.py"],"note":"line 4 never ran"}]}}]},
+      {"content":"never reached"}
+    ]}"#;
+    let mut t = task(script);
+    t.review = Some(Box::new(review_input()));
+    let mut b = FakeBackend::new(t, ResumeChoice::ContinueWithCompaction);
+    run_session(&mut b, &*default_factory()).unwrap();
+    let routing = b
+        .sent
+        .iter()
+        .find_map(|m| match m {
+            Message::Notice(n) if n.kind == NoticeKind::RoutingDecision => Some(n.detail.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(routing.contains("role=reviewer"), "{routing}");
+    assert!(!b.sent.iter().any(|m| matches!(m, Message::ToolCall(_))));
+    let n = b.sent.len();
+    let Message::Verdicts(v) = &b.sent[n - 2] else {
+        panic!("{:?}", b.sent[n - 2])
+    };
+    assert_eq!(v.verdicts[0].reason_code, "uncovered_change");
+    assert!(matches!(&b.sent[n - 1], Message::Done(d) if d.claims.is_empty()));
+    // The reviewer's checkpoints show its fixed prompt and its one tool.
+    let Some(Message::Checkpoint(cp)) = b.sent.iter().find(|m| matches!(m, Message::Checkpoint(_)))
+    else {
+        panic!()
+    };
+    assert_eq!(cp.messages[0].content, crate::prompt::REVIEWER_PROMPT);
+    let tools = crate::prompt::REVIEW_TOOLS_JSON.to_string();
+    assert!(tools.contains("submit_verdicts") && !tools.contains("read_file"));
 }

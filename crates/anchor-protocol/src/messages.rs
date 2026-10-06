@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::verify::{Claim, ClaimVerdict, ReviewInput, validate_claims, validate_verdicts};
 use crate::{MAX_CONTENT_BYTES, Validate, check_param};
 
 /// Every message that may appear on the wire, in either direction.
@@ -33,6 +34,9 @@ pub enum Message {
     TurnFinished {
         turn: u64,
     },
+    /// A reviewer's per-claim verdicts (review sessions only), sent just
+    /// before `Done`.
+    Verdicts(Verdicts),
     /// Final answer for the task.
     Done(Done),
     /// Fatal runtime error.
@@ -78,8 +82,9 @@ impl Validate for Message {
                 if d.summary.len() > MAX_CONTENT_BYTES {
                     return Err("summary too large".into());
                 }
-                Ok(())
+                validate_claims(&d.claims)
             }
+            Message::Verdicts(v) => validate_verdicts(&v.verdicts),
             Message::Failed(f) => check_param("error", &f.error),
             Message::Welcome(w) => check_param("session_id", &w.session_id),
             Message::Task(t) => t.validate(),
@@ -171,6 +176,16 @@ pub enum ToolRequest {
         tool: String,
         args: serde_json::Value,
     },
+    /// The executor's claims about its change (spec §8.1). Handled inside
+    /// the runtime and reported with `Done`; never executed by the backend.
+    SubmitClaims {
+        claims: Vec<Claim>,
+    },
+    /// A reviewer's verdicts (spec §8.1). Runtime-local, like
+    /// `SubmitClaims`.
+    SubmitVerdicts {
+        verdicts: Vec<ClaimVerdict>,
+    },
 }
 
 /// Largest serialized hub tool argument object.
@@ -196,6 +211,8 @@ impl ToolRequest {
             ToolRequest::Grep { .. } => "grep",
             ToolRequest::RunCommand { .. } => "run_command",
             ToolRequest::Hub { .. } => "hub",
+            ToolRequest::SubmitClaims { .. } => "submit_claims",
+            ToolRequest::SubmitVerdicts { .. } => "submit_verdicts",
         }
     }
 
@@ -260,6 +277,8 @@ impl Validate for ToolRequest {
                 }
                 Ok(())
             }
+            ToolRequest::SubmitClaims { claims } => validate_claims(claims),
+            ToolRequest::SubmitVerdicts { verdicts } => validate_verdicts(verdicts),
         }
     }
 }
@@ -403,6 +422,15 @@ pub enum NoticeKind {
 #[serde(deny_unknown_fields)]
 pub struct Done {
     pub summary: String,
+    /// The executor's claims (empty for sessions that make none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claims: Vec<Claim>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Verdicts {
+    pub verdicts: Vec<ClaimVerdict>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -440,6 +468,10 @@ pub struct Task {
     /// is on the Hub, its peers, and the hub tools it may call.
     #[serde(default)]
     pub hub: Option<HubInfo>,
+    /// Set for a review session (Phase 5): the runtime routes to the review
+    /// role, gets no workspace tools, and must answer with verdicts.
+    #[serde(default)]
+    pub review: Option<Box<ReviewInput>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -502,6 +534,12 @@ impl Validate for Task {
         }
         if let Some(h) = &self.hub {
             h.validate()?;
+        }
+        if let Some(r) = &self.review {
+            if self.hub.is_some() || self.resume_from.is_some() {
+                return Err("a review session has no hub identity and no checkpoint".into());
+            }
+            r.validate()?;
         }
         Ok(())
     }

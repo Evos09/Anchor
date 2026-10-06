@@ -8,11 +8,12 @@ use anchor_checkpoint::{ContextStatus, ContextTracker};
 use anchor_protocol::{
     CHECKPOINT_FORMAT_VERSION, ChatMessage, ChatRole, Checkpoint, CheckpointReason, ContextUsage,
     Done, Failed, FileClaimState, Frame, Hello, HubInfo, Message, Notice, NoticeKind,
-    PROTOCOL_VERSION, PauseReason, Paused, ResumeChoice, Task, ToolCall, ToolOutcome, Usage,
+    PROTOCOL_VERSION, PauseReason, Paused, ResumeChoice, Task, ToolCall, ToolOutcome, ToolRequest,
+    Usage, Verdicts,
 };
 
 use crate::config::RolesConfig;
-use crate::prompt::{PrefixMonitor, SYSTEM_PROMPT, TOOLS_JSON};
+use crate::prompt::{PrefixMonitor, REVIEW_TOOLS_JSON, REVIEWER_PROMPT, SYSTEM_PROMPT, TOOLS_JSON};
 use crate::provider::{self, ChatResponse, Provider, ProviderError};
 use crate::router::{Router, TaskKind};
 
@@ -87,6 +88,10 @@ struct Session<'a, T: Transport> {
     tools: serde_json::Value,
     /// Claims this agent holds, by Hub claim id (for checkpoints).
     claims: BTreeMap<i64, FileClaimState>,
+    /// What the executor says its change does (`submit_claims`).
+    change_claims: Vec<anchor_protocol::verify::Claim>,
+    /// A review session's verdicts (`submit_verdicts`).
+    verdicts: Option<Vec<anchor_protocol::verify::ClaimVerdict>>,
 }
 
 /// Run one session: handshake, task, loop until done.
@@ -125,7 +130,14 @@ pub fn run_session<T: Transport>(
         }
     };
     let router = Router::new(&cfg);
-    let route = router.route(TaskKind::Agentic).clone();
+    // A review session runs on the review route (a different family than
+    // the executor, checked when the config was parsed).
+    let kind = if task.review.is_some() {
+        TaskKind::Review
+    } else {
+        TaskKind::Agentic
+    };
+    let route = router.route(kind).clone();
     t.send(Message::Notice(Notice {
         kind: NoticeKind::RoutingDecision,
         detail: format!(
@@ -150,6 +162,27 @@ pub fn run_session<T: Transport>(
             });
             (m, cp.turn)
         }
+        None if task.review.is_some() => (
+            vec![
+                ChatMessage {
+                    role: ChatRole::System,
+                    content: REVIEWER_PROMPT.into(),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                },
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: format!(
+                        "Review this change. Task given to the executor:\n{}\n\nClaims, diff and evidence (JSON):\n{}",
+                        task.instruction,
+                        serde_json::to_string_pretty(&task.review).unwrap_or_default()
+                    ),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                },
+            ],
+            0,
+        ),
         None => (
             vec![
                 ChatMessage {
@@ -172,7 +205,11 @@ pub fn run_session<T: Transport>(
         ),
     };
 
-    let tools = tools_for(task.hub.as_ref());
+    let tools = if task.review.is_some() {
+        REVIEW_TOOLS_JSON.clone()
+    } else {
+        tools_for(task.hub.as_ref())
+    };
     let mut s = Session {
         t,
         task,
@@ -187,6 +224,8 @@ pub fn run_session<T: Transport>(
         last_used: 0,
         tools,
         claims: BTreeMap::new(),
+        change_claims: Vec::new(),
+        verdicts: None,
     };
     let result = s.run();
     match result {
@@ -283,7 +322,10 @@ impl<T: Transport> Session<'_, T> {
             });
 
             for call in &resp.tool_calls {
-                let outcome = self.execute(call.clone())?;
+                let outcome = match self.local_tool(call) {
+                    Some(o) => o,
+                    None => self.execute(call.clone())?,
+                };
                 self.track_claims(call, &outcome);
                 let content = match outcome {
                     ToolOutcome::Ok { output } => output,
@@ -313,9 +355,17 @@ impl<T: Transport> Session<'_, T> {
             self.checkpoint(CheckpointReason::TurnBoundary, None)?;
             self.t.send(Message::TurnFinished { turn: self.turn })?;
 
-            if resp.tool_calls.is_empty() && resp.invalid_calls.is_empty() {
+            // A review ends as soon as it has verdicts; any other session
+            // when the model stops calling tools.
+            if self.task.review.is_some() && self.verdicts.is_some()
+                || resp.tool_calls.is_empty() && resp.invalid_calls.is_empty()
+            {
+                if let Some(v) = self.verdicts.take() {
+                    self.t.send(Message::Verdicts(Verdicts { verdicts: v }))?;
+                }
                 self.t.send(Message::Done(Done {
                     summary: resp.content,
+                    claims: std::mem::take(&mut self.change_claims),
                 }))?;
                 return Ok(());
             }
@@ -325,6 +375,39 @@ impl<T: Transport> Session<'_, T> {
                 return Ok(());
             }
         }
+    }
+
+    /// Handle the runtime-local tools (`submit_claims`, `submit_verdicts`);
+    /// `None` for tools the backend executes. Each is only valid in its
+    /// own kind of session.
+    fn local_tool(&mut self, call: &ToolCall) -> Option<ToolOutcome> {
+        let review = self.task.review.is_some();
+        let refuse = |detail: &str| ToolOutcome::Error {
+            detail: detail.into(),
+        };
+        Some(match &call.request {
+            ToolRequest::SubmitClaims { claims } if !review => {
+                self.change_claims = claims.clone();
+                ToolOutcome::Ok {
+                    output: format!("recorded {} claim(s)", claims.len()),
+                }
+            }
+            ToolRequest::SubmitVerdicts { verdicts } if review => {
+                if self.verdicts.is_some() {
+                    return Some(refuse("verdicts were already submitted"));
+                }
+                self.verdicts = Some(verdicts.clone());
+                ToolOutcome::Ok {
+                    output: format!("recorded {} verdict(s)", verdicts.len()),
+                }
+            }
+            ToolRequest::SubmitClaims { .. } => refuse("reviewers do not submit claims"),
+            ToolRequest::SubmitVerdicts { .. } => refuse("only a review session submits verdicts"),
+            // A reviewer has no workspace tools (ADR-0009); refused here
+            // too, and the backend ends any review that asks for one.
+            other if review => refuse(&format!("{} is not available to a reviewer", other.name())),
+            _ => return None,
+        })
     }
 
     /// Keep the checkpoint's claim list in step with successful Hub claim
@@ -529,6 +612,7 @@ impl<T: Transport> Session<'_, T> {
                          state is preserved in checkpoint {id}.",
                         ratio * 100.0
                     ),
+                    claims: std::mem::take(&mut self.change_claims),
                 }))?;
                 Ok(false)
             }

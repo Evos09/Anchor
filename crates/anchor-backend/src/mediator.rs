@@ -354,6 +354,13 @@ impl Mediator {
                 network,
             } => self.run_command(&program, args, network),
             ToolRequest::Hub { tool, args } => self.hub_tool(&tool, args),
+            // Runtime-local: the runtime records these itself and reports
+            // them with `Done`/`Verdicts`; there is nothing to execute.
+            ToolRequest::SubmitClaims { .. } | ToolRequest::SubmitVerdicts { .. } => {
+                ToolOutcome::Error {
+                    detail: "runtime-local tool; the backend does not execute it".into(),
+                }
+            }
         };
         if matches!(out, ToolOutcome::Denied { .. }) {
             self.stats.denied += 1;

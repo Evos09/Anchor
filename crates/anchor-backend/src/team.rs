@@ -406,6 +406,7 @@ pub fn run(
             resume_from: None,
             mock_script: a.mock_script.clone(),
             hub: Some(hub_info(i)),
+            review: None,
         };
         Ok::<_, String>(Prepared {
             idx: i,

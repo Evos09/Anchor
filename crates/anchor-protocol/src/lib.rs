@@ -24,8 +24,10 @@ pub mod verify;
 
 /// Wire protocol version. Bump on any incompatible change.
 /// Version 2 (Phase 4) added hub tools ([`ToolRequest::Hub`]) and
-/// [`Task::hub`].
-pub const PROTOCOL_VERSION: u32 = 2;
+/// [`Task::hub`]. Version 3 (Phase 5) added claims ([`Done::claims`],
+/// [`ToolRequest::SubmitClaims`]) and review sessions ([`Task::review`],
+/// [`ToolRequest::SubmitVerdicts`], [`Message::Verdicts`]).
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Hard upper bound on the size of one encoded frame, including the newline.
 pub const MAX_FRAME_BYTES: usize = 16 << 20;
