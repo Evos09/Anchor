@@ -522,6 +522,95 @@ fn decisions_tasks_and_artifacts_follow_permissions() {
 }
 
 #[test]
+fn evidence_is_backend_only_hashed_and_immutable() {
+    let f = fx();
+    let (a, _) = agent(&f.hub, "alpha", &["."]);
+    let log = b"Ran 1 test\n\nOK\n";
+    // Agents and the user cannot record evidence; refusals are audited.
+    for caller in [a, Caller::User] {
+        assert!(matches!(
+            f.hub.register_evidence(
+                caller,
+                ArtifactKind::TestOutput,
+                "1-1/test.log",
+                log,
+                json!({})
+            ),
+            Err(HubError::Forbidden(_))
+        ));
+    }
+    let art = f
+        .hub
+        .register_evidence(
+            Caller::System,
+            ArtifactKind::TestOutput,
+            "1-1/test.log",
+            log,
+            json!({"exit": 0}),
+        )
+        .unwrap();
+    assert_eq!(art.path, "evidence:1-1/test.log");
+    assert_eq!(art.sha256, anchor_policy::audit::sha256_hex(log));
+    assert_eq!(art.created_by_agent_id, None);
+    let file = f.db.parent().unwrap().join("evidence/1-1/test.log");
+    assert_eq!(std::fs::read(&file).unwrap(), log);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
+    }
+    assert_eq!(f.hub.read_evidence(Caller::System, &art).unwrap(), log);
+    // Written once: the same bytes again are fine, different bytes are not.
+    f.hub
+        .register_evidence(
+            Caller::System,
+            ArtifactKind::TestOutput,
+            "1-1/test.log",
+            log,
+            json!({}),
+        )
+        .unwrap();
+    assert!(
+        f.hub
+            .register_evidence(
+                Caller::System,
+                ArtifactKind::TestOutput,
+                "1-1/test.log",
+                b"forged",
+                json!({})
+            )
+            .is_err()
+    );
+    // Names cannot escape the evidence directory.
+    for bad in ["../x/y", "a/../b", "a", "a/b/c", "./x", "../x", "a/.."] {
+        assert!(
+            f.hub
+                .register_evidence(Caller::System, ArtifactKind::Log, bad, b"x", json!({}))
+                .is_err(),
+            "{bad}"
+        );
+    }
+    // A tampered file is detected on read.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    std::fs::write(&file, b"tampered").unwrap();
+    assert!(f.hub.read_evidence(Caller::System, &art).is_err());
+    let listed = f
+        .hub
+        .list_artifacts(Caller::System, Some("evidence:1-"))
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(f.hub.list_artifacts(a, None).is_err());
+    assert!(f.hub.verify().unwrap().ok());
+}
+
+#[test]
 fn verify_detects_database_tampering() {
     for attack in [
         "UPDATE message SET content_json = '\"forged\"' WHERE id = 1",

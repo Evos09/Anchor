@@ -134,6 +134,65 @@ pub struct Hub {
     cfg: HubConfig,
     project_id: i64,
     workspace: PathBuf,
+    /// Evidence files (`<state>/evidence`, next to the database).
+    evidence_dir: PathBuf,
+}
+
+/// Largest evidence file the Hub stores.
+pub const MAX_EVIDENCE_BYTES: usize = 8 << 20;
+
+/// Evidence names are `<group>/<file>`, each `[A-Za-z0-9._-]`, no dot-only
+/// components.
+fn valid_evidence_name(n: &str) -> bool {
+    let parts: Vec<&str> = n.split('/').collect();
+    parts.len() == 2
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.len() <= 128
+                && !p.chars().all(|c| c == '.')
+                && p.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        })
+}
+
+/// Write `bytes` to `path` exactly once: an existing file must already hold
+/// the same bytes. Files are owner-read-only.
+fn write_once(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Ok(existing) = std::fs::read(path) {
+        return if existing == bytes {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "evidence already recorded with different content",
+            ))
+        };
+    }
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let tmp = dir.join(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        path.file_name().and_then(|f| f.to_str()).unwrap_or("e")
+    ));
+    {
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o400);
+        }
+        let mut f = o.open(&tmp)?;
+        std::io::Write::write_all(&mut f, bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
 }
 
 /// One call's transaction plus the rows it changed.
@@ -207,6 +266,7 @@ impl Hub {
             cfg,
             project_id: 0,
             workspace: workspace.to_path_buf(),
+            evidence_dir: db_path.parent().unwrap_or(Path::new(".")).join("evidence"),
         };
         let existing: Option<(i64, String)> = hub
             .lock()
@@ -1274,6 +1334,87 @@ impl Hub {
         )
         .optional()?
         .ok_or_else(|| HubError::NotFound(format!("artifact {id}")))
+    }
+
+    /// Store tester evidence (logs, coverage, claims) under the state
+    /// directory and register it as an artifact. Backend only: the Hub
+    /// writes and hashes the bytes itself, the file is written once and
+    /// owner-read-only, and it outlives the isolated workspace it came
+    /// from. The artifact path is `evidence:<name>`.
+    pub fn register_evidence(
+        &self,
+        caller: Caller,
+        kind: ArtifactKind,
+        name: &str,
+        bytes: &[u8],
+        evidence: Value,
+    ) -> Result<Artifact> {
+        let sha256 = anchor_policy::audit::sha256_hex(bytes);
+        let args = json!({ "kind": kind, "name": name, "sha256": sha256, "bytes": bytes.len() });
+        self.mutate(caller, "register_evidence", args, |t| {
+            if caller != Caller::System {
+                return Err(HubError::Forbidden(
+                    "evidence is recorded by the backend".into(),
+                ));
+            }
+            if !valid_evidence_name(name) {
+                return Err(HubError::Invalid(format!("bad evidence name {name:?}")));
+            }
+            if bytes.len() > MAX_EVIDENCE_BYTES {
+                return Err(HubError::Invalid("evidence file too large".into()));
+            }
+            let ev = evidence.to_string();
+            if ev.len() > self.cfg.max_content_bytes {
+                return Err(HubError::Invalid("evidence too large".into()));
+            }
+            write_once(&self.evidence_dir.join(name), bytes)
+                .map_err(|e| HubError::Invalid(format!("evidence {name}: {e}")))?;
+            let path = format!("evidence:{name}");
+            t.tx.execute(
+                "INSERT INTO artifact (project_id, kind, path, sha256, created_by_agent_id, evidence_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+                params![self.project_id, kind.as_str(), path, sha256, ev, t.now as i64],
+            )?;
+            let id = t.tx.last_insert_rowid();
+            t.touch("artifact", id);
+            self.artifact_in(&t.tx, id)
+        })
+    }
+
+    /// Artifacts, newest last; `prefix` filters on the path (e.g.
+    /// `evidence:12-`).
+    pub fn list_artifacts(&self, caller: Caller, prefix: Option<&str>) -> Result<Vec<Artifact>> {
+        Self::require_backend(caller)?;
+        let conn = self.lock();
+        let mut st = conn.prepare(&format!(
+            "SELECT {ARTIFACT_COLS} FROM artifact WHERE project_id = ?1 ORDER BY id"
+        ))?;
+        let rows = st
+            .query_map(params![self.project_id], artifact_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter(|a| prefix.is_none_or(|p| a.path.starts_with(p)))
+            .collect())
+    }
+
+    /// The bytes of an evidence artifact, checked against its recorded
+    /// hash.
+    pub fn read_evidence(&self, caller: Caller, artifact: &Artifact) -> Result<Vec<u8>> {
+        Self::require_backend(caller)?;
+        let name = artifact
+            .path
+            .strip_prefix("evidence:")
+            .filter(|n| valid_evidence_name(n))
+            .ok_or_else(|| HubError::Invalid(format!("{} is not evidence", artifact.path)))?;
+        let bytes = std::fs::read(self.evidence_dir.join(name))
+            .map_err(|e| HubError::Invalid(format!("evidence {name}: {e}")))?;
+        if anchor_policy::audit::sha256_hex(&bytes) != artifact.sha256 {
+            return Err(HubError::Invalid(format!(
+                "evidence {name} does not match its recorded hash"
+            )));
+        }
+        Ok(bytes)
     }
 
     // -- merge queue entries (backend only) ----------------------------------
