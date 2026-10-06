@@ -1,0 +1,32 @@
+# Roles for the scripted team demo's second agent: its executor is in
+# family B (the reviewer moves to family A, so review stays cross-family).
+
+[providers.mock_a]
+kind = "mock"
+family = "demo-family-a"
+
+[providers.mock_b]
+kind = "mock"
+family = "demo-family-b"
+
+[roles.planner]
+provider = "mock_a"
+model_id = "demo-planner"
+context_window = 32000
+
+[roles.executor]
+provider = "mock_b"
+model_id = "demo-executor"
+context_window = 32000
+price_in_per_mtok = 3.0
+price_out_per_mtok = 15.0
+
+[roles.tester]
+provider = "mock_a"
+model_id = "demo-tester"
+context_window = 32000
+
+[roles.reviewer]
+provider = "mock_a"
+model_id = "demo-reviewer"
+context_window = 32000

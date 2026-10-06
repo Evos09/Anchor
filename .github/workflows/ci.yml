@@ -28,11 +28,12 @@ jobs:
       - name: Type-check other platforms
         run: |
           rustup target add x86_64-pc-windows-gnu aarch64-apple-darwin
-          # Crates with platform-specific code. anchor-runtime is excluded:
-          # its TLS dependency (ring) needs a C cross-compiler; it has no
-          # platform-specific code of its own beyond the cfg-gated sandbox.
+          # Crates with platform-specific code. Excluded because they need a
+          # C cross-compiler: anchor-runtime (its TLS dependency, ring) and
+          # anchor-hub / anchor-backend (bundled SQLite). Those are built and
+          # tested natively on macOS and Windows by the jobs below.
           for t in x86_64-pc-windows-gnu aarch64-apple-darwin; do
-            cargo check --tests --target "$t" -p anchor-fs -p anchor-exec -p anchor-backend -p anchor-policy -p anchor-guard -p anchor-checkpoint -p anchor-protocol -p anchor-snapshot
+            cargo check --tests --target "$t" -p anchor-fs -p anchor-exec -p anchor-policy -p anchor-guard -p anchor-checkpoint -p anchor-protocol -p anchor-snapshot
           done
 
   supply-chain:

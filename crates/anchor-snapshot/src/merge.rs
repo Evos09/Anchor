@@ -118,6 +118,84 @@ pub fn diff(store: &Store, a: &Id, b: &Id) -> Result<Vec<Change>> {
     Ok(out)
 }
 
+/// Changes from snapshot `a` to snapshot `b`, file by file: an added or
+/// removed directory is listed as every entry beneath it, never as the
+/// directory alone (what the merge queue checks claims against).
+pub fn diff_files(store: &Store, a: &Id, b: &Id) -> Result<Vec<Change>> {
+    let (ra, rb) = (store.snapshot(a)?.root, store.snapshot(b)?.root);
+    let mut out = Vec::new();
+    if ra != rb {
+        leaves(
+            store,
+            &store.tree(&ra)?,
+            &store.tree(&rb)?,
+            Path::new(""),
+            &mut out,
+        )?;
+    }
+    Ok(out)
+}
+
+fn leaves(
+    store: &Store,
+    ta: &TreeObj,
+    tb: &TreeObj,
+    prefix: &Path,
+    out: &mut Vec<Change>,
+) -> Result<()> {
+    let empty = TreeObj::default();
+    let mut names: Vec<&[u8]> = ta
+        .entries
+        .iter()
+        .chain(tb.entries.iter())
+        .map(|e| e.name.as_slice())
+        .collect();
+    names.sort();
+    names.dedup();
+    for n in names {
+        let (x, y) = (ta.get(n), tb.get(n));
+        if x == y {
+            continue;
+        }
+        let path = name_path(prefix, n)?;
+        let sub = |node: Option<&Node>| -> Result<Option<TreeObj>> {
+            match node {
+                Some(Node::Dir { id, .. }) => Ok(Some(store.tree(id)?)),
+                _ => Ok(None),
+            }
+        };
+        let (dx, dy) = (sub(x)?, sub(y)?);
+        if dx.is_some() || dy.is_some() {
+            leaves(
+                store,
+                dx.as_ref().unwrap_or(&empty),
+                dy.as_ref().unwrap_or(&empty),
+                &path,
+                out,
+            )?;
+        }
+        let kind = match (x, y) {
+            (Some(Node::Dir { mode: m, .. }), Some(Node::Dir { mode: k, .. })) => {
+                if m == k {
+                    continue;
+                }
+                ChangeKind::ModeChanged
+            }
+            // A directory's own entry: its contents are listed above.
+            (Some(Node::Dir { .. }), None) | (None, Some(Node::Dir { .. })) => continue,
+            (Some(Node::File { id: i, .. }), Some(Node::File { id: j, .. })) if i == j => {
+                ChangeKind::ModeChanged
+            }
+            (Some(_), Some(_)) => ChangeKind::Modified,
+            (None, Some(_)) => ChangeKind::Added,
+            (Some(_), None) => ChangeKind::Removed,
+            (None, None) => continue,
+        };
+        out.push(Change { path, kind });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeResult {
     /// The merged snapshot (published; not yet named by a ref). Where a

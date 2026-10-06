@@ -1,0 +1,57 @@
+# Team agent "alpha": the example roles file as is (agentic work on the
+# executor, here the local provider). Fill in the REPLACE values.
+
+# Anchor roles configuration (spec §9.1). Copy to your own location and pass
+# with `anchor run --roles FILE`.
+#
+# No model is hardcoded anywhere in Anchor. Choose models by measuring them
+# on your own tasks (ADR-0001). `family` is what the reviewer rule checks:
+# the executor's family (including fallbacks) must differ from the
+# reviewer's. Prices are yours to fill in from your provider's price list;
+# they drive the cost meter.
+
+# A local inference server exposing the OpenAI-compatible API. Run
+# `anchor detect-local` to find one on common ports.
+[providers.local]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
+family = "REPLACE-with-local-model-family"
+
+# A hosted API, bring-your-own-key. The key is read from the named
+# environment variable at runtime and never written to disk by Anchor.
+[providers.hosted]
+kind = "openai_compatible"
+base_url = "https://REPLACE-with-provider-endpoint/v1"
+api_key_env = "ANCHOR_HOSTED_API_KEY"
+family = "REPLACE-with-hosted-model-family"
+
+[roles.planner]
+provider = "hosted"
+model_id = "REPLACE"
+context_window = 128000
+params = { temperature = 0.2, max_tokens = 8192 }
+
+[roles.executor]
+provider = "local"
+model_id = "REPLACE"
+context_window = 32768
+params = { temperature = 0.1, max_tokens = 4096 }
+price_in_per_mtok = 0.0
+price_out_per_mtok = 0.0
+# fallback = ["other-provider-id"]   # every fallback is announced
+
+[roles.tester]
+provider = "local"
+model_id = "REPLACE"
+context_window = 32768
+
+[roles.reviewer]
+provider = "hosted"            # MUST be a different family than executor
+model_id = "REPLACE"
+context_window = 128000
+
+[routing]
+mechanical = "executor"
+architecture = "planner"
+agentic = "executor"
+review = "reviewer"

@@ -1,0 +1,24 @@
+# A scripted two-agent team (no API keys needed): alpha (model family A)
+# writes a function and asks beta (family B) for tests over the Hub.
+#
+#   anchor team run --workspace DIR --team examples/team/team.mock.toml \
+#       --auto-approve --auto-merge
+#
+# Agent ids are assigned by the workspace's Hub in registration order; the
+# scripts assume a fresh Hub (alpha = 1, beta = 2).
+
+schedule = "sequential"
+
+[[agent]]
+name = "alpha"
+roles = "../demo/roles.mock.toml"
+instruction = "Add a greet(name) function in src/greet.py, then ask beta to test it."
+claim_within = ["src/"]
+mock_script = "alpha.json"
+
+[[agent]]
+name = "beta"
+roles = "roles-b.mock.toml"
+instruction = "Write tests for whatever the other agent asks you to test."
+claim_within = ["tests/"]
+mock_script = "beta.json"

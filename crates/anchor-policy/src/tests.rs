@@ -510,6 +510,27 @@ fn concurrent_handles_keep_one_chain() {
     assert_eq!(a.head().0, Some(100));
 }
 
+/// Floats must survive the write/read round trip bit for bit, or verify
+/// recomputes a different hash (serde_json's `float_roundtrip`).
+#[test]
+fn float_values_verify() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.jsonl");
+    let a = AuditLog::open(&path).unwrap();
+    let mut sum = 0.0f64;
+    for i in 0..200 {
+        sum += 0.003 * (i % 7) as f64 + 1e-9 * i as f64;
+        a.append(
+            "usage",
+            serde_json::json!({ "cost_usd": sum, "x": sum / 3.0 }),
+        )
+        .unwrap();
+    }
+    a.append("x", serde_json::json!({ "cost_usd": 0.009600000000000001 }))
+        .unwrap();
+    assert_eq!(AuditLog::verify(&path).unwrap(), 201);
+}
+
 #[test]
 fn foreign_truncation_is_refused() {
     let dir = tempfile::tempdir().unwrap();

@@ -1,0 +1,64 @@
+{
+ "steps": [
+  {
+   "content": "Checking my inbox.",
+   "tool_calls": [
+    {
+     "tool": "hub_query_messages",
+     "args": {}
+    }
+   ],
+   "prompt_tokens": 800,
+   "completion_tokens": 60
+  },
+  {
+   "content": "Writing the tests.",
+   "tool_calls": [
+    {
+     "tool": "read_file",
+     "args": {
+      "path": "src/greet.py"
+     }
+    },
+    {
+     "tool": "hub_request_claim",
+     "args": {
+      "path": "tests/",
+      "claim_type": "edit"
+     }
+    },
+    {
+     "tool": "write_file",
+     "args": {
+      "path": "tests/test_greet.py",
+      "content": "from src.greet import greet\n\nassert greet(\"anchor\") == \"hello, anchor\"\n"
+     }
+    }
+   ],
+   "prompt_tokens": 800,
+   "completion_tokens": 60
+  },
+  {
+   "content": "Reporting back.",
+   "tool_calls": [
+    {
+     "tool": "hub_send_message",
+     "args": {
+      "to_agent": 1,
+      "message_type": "review",
+      "content": {
+       "text": "Tests added in tests/test_greet.py."
+      }
+     }
+    }
+   ],
+   "prompt_tokens": 800,
+   "completion_tokens": 60
+  },
+  {
+   "content": "Wrote tests for greet().",
+   "prompt_tokens": 800,
+   "completion_tokens": 40
+  }
+ ]
+}

@@ -187,6 +187,31 @@ impl Mediator {
         }
     }
 
+    /// A mediator for an isolated agent root, sharing this one's store and
+    /// execution settings.
+    pub fn isolated(
+        &self,
+        ws: Workspace,
+        snap_opts: SnapshotOptions,
+        engine: Engine,
+        guard: Guard,
+        interact: Box<dyn Interaction>,
+    ) -> Mediator {
+        let mut m = Mediator::new(
+            ws,
+            engine,
+            guard,
+            self.snapshots.clone(),
+            snap_opts,
+            self.keep_turns,
+            interact,
+            self.path_var.clone(),
+            self.exec_read_only.clone(),
+        );
+        m.exec_limits = self.exec_limits.clone();
+        m
+    }
+
     pub fn workspace(&self) -> &Workspace {
         &self.ws
     }

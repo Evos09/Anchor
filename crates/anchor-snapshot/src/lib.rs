@@ -22,7 +22,7 @@ mod store;
 
 pub use engine::{SnapshotOptions, SnapshotReport, snapshot, take_snapshot};
 pub use maint::{GcReport, VerifyReport, gc, verify};
-pub use merge::{Change, ChangeKind, MergeResult, diff, merge3};
+pub use merge::{Change, ChangeKind, MergeResult, diff, diff_files, merge3};
 pub use object::{Id, Untracked};
 pub use restore::{Authorize, RestoreReport, materialize, recover, restore, restore_expect};
 pub use store::{Journal, Root, Store, valid_ref};

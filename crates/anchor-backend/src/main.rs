@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod hubcli;
+
 use anchor_backend::interact::{Interaction, Scripted, Terminal};
 use anchor_backend::session::{self, SessionConfig};
 use anchor_backend::{StatePaths, default_exec_read_only, default_state_base, open_workspace};
@@ -35,18 +37,41 @@ USAGE:
   anchor state-dir --workspace DIR
   anchor detect-local [--agent PATH]
 
+  anchor team run --workspace DIR --team FILE [options]
+      --auto-merge           apply merges without asking (still audited)
+      --auto-approve | --auto-deny | --policy | --agent | --threshold  as for `run`
+  anchor queue list   --workspace DIR
+  anchor queue revert --workspace DIR (--seq N | --agent NAME|ID)
+  anchor hub serve    --workspace DIR [--port N]     MCP + A2A on 127.0.0.1
+  anchor hub agent add --workspace DIR --name N --model M --family F
+                       --claim-within PATH... [--role R] [--hold-messages]
+  anchor hub agent list|retire ID --workspace DIR
+  anchor hub claims [--all] | messages [--room R] | tasks | decisions --workspace DIR
+  anchor hub approve|reject MSG_ID --workspace DIR
+  anchor hub decide ID (--accept | --reject) [--reason TEXT] --workspace DIR
+  anchor hub log | verify --workspace DIR
+
 Per-workspace state (policy, audit log, checkpoints, snapshots) lives outside
 the workspace, under $ANCHOR_STATE_DIR or the per-user state directory.
 ";
 
-struct Args {
-    pos: Vec<String>,
+pub(crate) struct Args {
+    pub(crate) pos: Vec<String>,
     flags: Vec<(String, Option<String>)>,
 }
 
 impl Args {
     fn parse(raw: Vec<String>) -> Result<Self, String> {
-        const BOOL: &[&str] = &["--auto-approve", "--auto-deny", "--yes"];
+        const BOOL: &[&str] = &[
+            "--auto-approve",
+            "--auto-deny",
+            "--yes",
+            "--auto-merge",
+            "--accept",
+            "--reject",
+            "--hold-messages",
+            "--all",
+        ];
         let mut pos = Vec::new();
         let mut flags = Vec::new();
         let mut it = raw.into_iter();
@@ -64,33 +89,33 @@ impl Args {
         }
         Ok(Args { pos, flags })
     }
-    fn get(&self, k: &str) -> Option<&str> {
+    pub(crate) fn get(&self, k: &str) -> Option<&str> {
         self.flags
             .iter()
             .rev()
             .find(|(f, _)| f == k)
             .and_then(|(_, v)| v.as_deref())
     }
-    fn all(&self, k: &str) -> Vec<&str> {
+    pub(crate) fn all(&self, k: &str) -> Vec<&str> {
         self.flags
             .iter()
             .filter(|(f, _)| f == k)
             .filter_map(|(_, v)| v.as_deref())
             .collect()
     }
-    fn has(&self, k: &str) -> bool {
+    pub(crate) fn has(&self, k: &str) -> bool {
         self.flags.iter().any(|(f, _)| f == k)
     }
-    fn need(&self, k: &str) -> Result<&str, String> {
+    pub(crate) fn need(&self, k: &str) -> Result<&str, String> {
         self.get(k).ok_or_else(|| format!("missing {k}"))
     }
 }
 
-fn read(path: &str) -> Result<String, String> {
+pub(crate) fn read(path: &str) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))
 }
 
-fn interaction(a: &Args) -> Result<Box<dyn Interaction>, String> {
+pub(crate) fn interaction(a: &Args) -> Result<Box<dyn Interaction>, String> {
     match (a.has("--auto-approve"), a.has("--auto-deny")) {
         (true, true) => Err("--auto-approve and --auto-deny are exclusive".into()),
         (true, false) | (false, true) => {
@@ -458,6 +483,9 @@ fn main() -> ExitCode {
         Some("mark-not-append-only") => cmd_mark(&a),
         Some("state-dir") => cmd_state_dir(&a),
         Some("detect-local") => cmd_detect(&a),
+        Some("team") => hubcli::cmd_team(&a),
+        Some("hub") => hubcli::cmd_hub(&a),
+        Some("queue") => hubcli::cmd_queue(&a),
         _ => {
             print!("{USAGE}");
             return ExitCode::from(2);

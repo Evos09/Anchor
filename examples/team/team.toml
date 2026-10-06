@@ -1,0 +1,19 @@
+# The same team with real models: alpha's agentic route is the local
+# provider, beta's the hosted one, so they are of different families.
+# Fill in roles-a.toml and roles-b.toml and export the API key variable.
+#
+#   anchor team run --workspace DIR --team examples/team/team.toml
+
+schedule = "sequential"
+
+[[agent]]
+name = "alpha"
+roles = "roles-a.toml"
+instruction = "Add a greet(name) function in src/greet.py. Claim the file first. When done, ask the other agent (see the team preamble) to write tests for it, with hub_send_message."
+claim_within = ["src/"]
+
+[[agent]]
+name = "beta"
+roles = "roles-b.toml"
+instruction = "Read your Hub messages (hub_query_messages) and do what the other agent asks. Claim tests/ before writing there; report back with hub_send_message."
+claim_within = ["tests/"]

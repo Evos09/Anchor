@@ -11,8 +11,11 @@ use anchor_guard::Guard;
 use anchor_policy::{AuditLog, Engine};
 
 pub mod interact;
+pub mod iso;
 pub mod mediator;
+pub mod queue;
 pub mod session;
+pub mod team;
 
 use interact::Interaction;
 use mediator::Mediator;
@@ -103,7 +106,7 @@ impl StatePaths {
     }
 }
 
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
