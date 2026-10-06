@@ -17,10 +17,10 @@ Check date: **2026-10-06**. Sources and how each step was performed:
 | serde / serde_json | 1.0.229 / 1.0.151 | 1 / 1 | MIT OR Apache-2.0 (standard) | protocol, audit, checkpoints | `anchor-protocol` tests (unknown fields, versions) |
 | toml | 1.1.6 | 4 | MIT OR Apache-2.0 (standard) | policy, roles, workspace config | `policy_rejects_unknown_keys_and_bad_rules` |
 | thiserror | 2.0.21 | 3 | MIT OR Apache-2.0 (standard) | error types | compile-time only |
-| sha2 | 0.11.0 | 0 (last 2026-03-25) | MIT OR Apache-2.0 (standard) | content hashes, audit chain | `audit_chain_detects_tampering`, append verification |
+| sha2 | 0.11.0 | 0 (last 2026-03-25) | MIT OR Apache-2.0 (standard) | content hashes, audit chain, snapshot object ids | `audit_chain_detects_tampering`, append verification, `poisoned_store_is_refused` |
 | regex | 1.13.1 | 2 | MIT OR Apache-2.0 (standard) | grep parameter (linear time) | `regex_redos_patterns_are_linear`, `regex_size_limit_enforced` |
 | globset / ignore | 0.4.20 / 0.4.33 | 2 / 6 | Unlicense OR MIT (standard; COPYING states dual license) | policy globs, workspace walk | policy glob tests, e2e grep/glob |
-| rustix | 1.1.5 | 1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT (standard + LLVM exception) | openat2, F_GETPATH, renameat2, Dir | 23 `anchor-fs` tests |
+| rustix | 1.1.5 | 1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT (standard + LLVM exception) | openat2, F_GETPATH, renameat2, Dir, symlinkat, fchmod; snapshot store flock and syncfs | 31 `anchor-fs` tests, 22 `anchor-snapshot` tests |
 | libc | 0.2.190 | 6 | MIT OR Apache-2.0 (standard) | setrlimit, unshare, prctl, killpg, landlock syscall | 11 `anchor-exec` tests |
 | landlock | 0.4.7 | 2 | MIT OR Apache-2.0 (standard) | runtime self-sandbox, command confinement | `filesystem_confinement_enforced`, `runtime_process_cannot_touch_the_filesystem` |
 | ureq | 3.4.2 | 3 | MIT OR Apache-2.0 (standard) | OpenAI-compatible HTTP client | parsing tests only (no live endpoint reachable) |
@@ -62,4 +62,6 @@ unmaintained:
 | `reqwest` | See ADR-0017. |
 | `nix` | rustix covers the surface with safe APIs (ADR-0013). |
 | `clap` | The CLI is a thin harness; hand-rolled parsing avoids a large tree. Revisit for the shipped CLI. |
-| `rmcp`, `fastcdc`, `tauri`, editor packages | Phase 3+ candidates. Existence only recorded (ADRs 0002, 0004, 0006, 0008); five-step records pending. |
+| `fastcdc` 5.0.0 | Evaluated for Phase 3 (ADR-0006). (1) Exists: crates.io `fastcdc`, repository `github.com/nlfiedler/fastcdc-rs`. (2) Maintained: 5.0.0 on 2026-08-22, 4.0.1 on 2026-04-26. (3) MIT. **Not adopted**: chunk boundaries are part of our on-disk format, and the algorithm (gear hash plus normalized masks) is about 150 lines that our own tests cover fully (`chunker_*`). Owning it removes a format-defining dependency. |
+| `zstd` (compression) | Not needed in Phase 3. A future candidate for compressing chunks; it would need a five-step record (and it binds a C library). |
+| `rmcp`, `tauri`, editor packages | Phase 4+ candidates. Existence only recorded (ADRs 0002, 0004, 0008); five-step records pending. |

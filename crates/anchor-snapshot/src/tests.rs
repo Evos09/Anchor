@@ -506,6 +506,8 @@ fn symlink_loops_snapshot_and_restore() {
         let store = Store::open(&sd).unwrap();
         let ws = Workspace::open(&wsp).unwrap();
         let r = take_snapshot(&store, &ws, &opts(), "turns/1", "").unwrap();
+        // Release the store lock before the main thread reopens it.
+        drop(store);
         let _ = tx.send(r);
     });
     let s = rx

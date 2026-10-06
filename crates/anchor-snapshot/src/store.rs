@@ -130,31 +130,35 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 fn lock_file(path: &Path) -> Result<File> {
-    let f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?;
     #[cfg(unix)]
     {
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
         use rustix::fs::{FlockOperation, flock};
         flock(&f, FlockOperation::NonBlockingLockExclusive).map_err(|_| Error::Locked)?;
+        Ok(f)
     }
     #[cfg(windows)]
     {
-        // Re-open without sharing: a second opener fails while we hold it.
+        // An open without sharing is the lock: a second opener gets
+        // ERROR_SHARING_VIOLATION (32) while we hold it.
         use std::os::windows::fs::OpenOptionsExt;
-        drop(f);
-        return OpenOptions::new()
+        OpenOptions::new()
             .read(true)
             .write(true)
+            .create(true)
+            .truncate(false)
             .share_mode(0)
             .open(path)
-            .map_err(|_| Error::Locked);
+            .map_err(|e| match e.raw_os_error() {
+                Some(32) | Some(33) => Error::Locked,
+                _ => e.into(),
+            })
     }
-    #[allow(unreachable_code)]
-    Ok(f)
 }
 
 /// A valid ref name: one or two `/`-separated segments of

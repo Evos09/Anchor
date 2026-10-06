@@ -33,7 +33,13 @@ impl std::fmt::Display for Change {
             ChangeKind::Modified => "modified",
             ChangeKind::ModeChanged => "mode changed",
         };
-        write!(f, "{k}: {}", self.path.display())
+        // Store paths always use `/`, on every platform.
+        let p: Vec<_> = self
+            .path
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect();
+        write!(f, "{k}: {}", p.join("/"))
     }
 }
 

@@ -21,7 +21,7 @@ legend:
 | 6 | Network egress | Commands default to network-denied: user+net namespace, or a seccomp socket filter where user namespaces are restricted (Ubuntu ≥ 23.10, GitHub runners); macOS Seatbelt; `network = true` requires a prompt | `network_denied_process_has_no_network` (both Linux methods, asserting the mechanism's errno), `network_allowed_process_can_open_inet_sockets` | ✅ Linux · 🟡 macOS (Seatbelt rule applied, no egress test yet) · ⛔ Windows |
 | 7 | Resource exhaustion | rlimits (NPROC, AS, CPU, FSIZE, CORE), wall timeout, process-group kill, root drop | `fork_bomb_is_contained`, `process_limit_refuses_excess_forks`, `memory_limit_enforced` (Linux), `wall_timeout_kills`, `output_is_capped` | ✅ Linux · ✅ macOS except memory (RLIMIT_AS unsupported, ADR-0003) · ⛔ Windows |
 | 8 | Malicious MCP/A2A peer | Hub RPC authentication and authorisation | — | ⏳ Phase 4 |
-| 9 | Snapshot poisoning | State (policy, audit, store) lives outside the workspace, beyond every command sandbox (ADR-0022); hash-verified blobs; manifest paths re-confined on restore | `command_cannot_touch_state_dir`, `crafted_manifest_cannot_escape_on_restore` (interim store) | ✅ Linux, macOS · ⏳ Phase 3 engine |
+| 9 | Snapshot poisoning | The store lives outside the workspace, beyond every command sandbox (ADR-0022). Type-tagged, hash-verified objects; strict canonical decoding refuses escaping names and setuid bits; restore is approval-gated, descriptor-based, never follows symlinks and runs a pre-flight. Dedup re-verifies existing objects and heals damaged ones (ADR-0006) | `command_cannot_touch_state_dir`, `crafted_snapshot_cannot_escape_on_restore`, `poisoned_store_is_refused`, `crafted_tree_names_are_refused`, `symlink_planted_in_store_is_refused` | ✅ Linux, macOS · 🟡 Windows (store tests pass; commands refuse anyway) |
 
 ## §5 primitive test bullets
 
@@ -50,7 +50,16 @@ legend:
 | 5.4 checkpoint has required fields | `checkpoint_contains_required_fields` | ✅ |
 | 5.4 fresh session from checkpoint | `fresh_session_seeded_from_checkpoint_resumes`, e2e | ✅ |
 | 5.4 kill mid-turn leaves valid checkpoint | `kill_mid_write_leaves_valid_checkpoint` (SIGKILL during 2 MiB writes), e2e `kill_mid_turn_leaves_valid_checkpoint_and_resumes` | ✅ |
-| 5.5 all | Snapshot engine | ⏳ Phase 3 (interim: ADR-0018) |
+| 5.5(a) snapshot before every mutating turn | mediator `ensure_turn_snapshot`; e2e `end_to_end_session_enforces_every_primitive` (snapshot audit entries), `rollback_after_command_restores_gitignored_and_dotgit` | ✅ Linux, macOS |
+| 5.5 100k files within target | `examples/bench.rs`, CI `snapshot-bench` (Linux gate: 2 s); [benchmark](benchmarks/snapshot.md) | ✅ Linux (container: no change 0.77 s, 100 changed 1.10 s) |
+| 5.5 kill mid-snapshot → no partial snapshot | `kill_mid_snapshot_leaves_no_partial_snapshot` (child process aborted after 50 objects published), e2e `kill_mid_turn_…` (store `verify` after SIGKILL) | ✅ Linux, macOS, Windows |
+| 5.5 kill mid-restore → workspace pre-restore | `kill_mid_restore_recovers_to_pre_restore_state` (child aborted after 4 operations; `recover()` on next open), `failed_restore_reverts_to_pre_restore_state` | ✅ Linux, macOS, Windows |
+| 5.5 symlink loop doesn't hang | `scan_never_follows_symlinks_or_loops` (anchor-fs), `symlink_loops_snapshot_and_restore` | ✅ Linux, macOS |
+| 5.5 revert restores exactly | `revert_restores_exactly` (bytes, modes, symlinks, empty dirs, type changes; rescan tree id equals the original), e2e exact-state rollback | ✅ Linux, macOS · 🟡 Windows (no modes or symlinks) |
+| 5.5 crafted file cannot escape the store | `crafted_tree_names_are_refused`, `poisoned_store_is_refused`, `symlink_planted_in_store_is_refused`, e2e `crafted_snapshot_cannot_escape_on_restore` | ✅ |
+| 5.5(c) dedup / unchanged files not re-stored | `unchanged_files_are_neither_reread_nor_restored`, `chunker_*`, `index_catches_backdated_and_replaced_files` | ✅ |
+| 5.5(d) concurrent change never clobbered | `concurrent_change_is_detected_and_preserved`, `damaged_objects_are_healed_from_the_workspace` | ✅ |
+| 5.5(f) merge-queue substrate | `diff_merge3_and_materialize` | ✅ (queue itself: Phase 4) |
 
 ## Phase 2 "verified by instrumentation"
 
@@ -69,6 +78,11 @@ legend:
 - Run 37447560545: Linux green after the seccomp fallback. The Windows
   credential-glob bug was found in the policy tests.
 - Run 37448154072: all jobs green; macOS and Windows made blocking.
+- Run 37450990863: state directory moved out of the workspace (ADR-0022);
+  green on all platforms.
+- Run 37453554617 (Phase 3 integration): one Linux test race (two `Store`
+  handles in one test) and three Windows failures; fixed in the next
+  push.
 
 ## Out of scope for this push
 

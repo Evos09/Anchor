@@ -1,6 +1,6 @@
 # ADR-0018: Interim durability before the snapshot engine
 
-- Status: Accepted (temporary; superseded when ADR-0006 lands)
+- Status: Superseded by ADR-0006 (Phase 3 snapshot engine)
 - Date: 2026-10-06
 
 ## Context
@@ -31,3 +31,13 @@ non-negotiable, but the full snapshot engine is Phase 3.
 - A restore interrupted halfway leaves a partially restored workspace;
   per-file atomicity holds, whole-restore atomicity does not. The Phase 3
   engine adds a restore journal (§5.5(d)).
+
+## Superseded
+
+The Phase 3 engine (ADR-0006) addresses all three limits listed above:
+
+- incremental snapshots instead of O(workspace) capture;
+- no 50k-file cap (configurable, default 1,000,000 entries);
+- a journaled, verified, all-or-nothing restore.
+
+`preimage.rs` was removed.

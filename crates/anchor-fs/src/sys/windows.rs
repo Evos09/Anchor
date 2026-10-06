@@ -157,10 +157,12 @@ fn info(h: &impl AsRawHandle) -> Result<(Meta, u32), FsError> {
     ))
 }
 
-/// FILETIME (100 ns ticks) to ns. Windows has no inode change time; the
+/// FILETIME (100 ns ticks since 1601) to ns since 1970. Windows has no inode change time; the
 /// last-write time stands in for both ctime and mtime.
+/// Converted to the Unix epoch, so times compare with `SystemTime`.
 fn filetime_ns(t: u64) -> i128 {
-    t as i128 * 100
+    const UNIX_EPOCH_IN_FILETIME: i128 = 116_444_736_000_000_000;
+    (t as i128 - UNIX_EPOCH_IN_FILETIME) * 100
 }
 
 pub(crate) fn names_equivalent(a: &OsStr, b: &OsStr) -> bool {
