@@ -7,6 +7,7 @@ members = [
     "crates/anchor-guard",
     "crates/anchor-checkpoint",
     "crates/anchor-exec",
+    "crates/anchor-snapshot",
     "crates/anchor-runtime",
     "crates/anchor-backend",
 ]
@@ -42,6 +43,7 @@ anchor-policy = { path = "crates/anchor-policy", version = "0.1.0" }
 anchor-guard = { path = "crates/anchor-guard", version = "0.1.0" }
 anchor-checkpoint = { path = "crates/anchor-checkpoint", version = "0.1.0" }
 anchor-exec = { path = "crates/anchor-exec", version = "0.1.0" }
+anchor-snapshot = { path = "crates/anchor-snapshot", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

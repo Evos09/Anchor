@@ -123,6 +123,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "anchor-snapshot"
+version = "0.1.0"
+dependencies = [
+ "anchor-fs",
+ "anchor-policy",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
