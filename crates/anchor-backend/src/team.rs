@@ -19,6 +19,22 @@
 //!
 //! An agent's model and family come from its roles file (the agentic
 //! route), never from the team file.
+//!
+//! Merges are verified when the file has a `[verify]` section (spec §8,
+//! [`crate::verify`]):
+//!
+//! ```toml
+//! [verify]
+//! build = ["python3", "-I", "-m", "compileall", "-q", "."]
+//! test = ["python3", "-I", "-m", "unittest", "discover", "-v"]
+//! coverage = ["python3", "-I", "-m", "trace", "--count", "--missing",
+//!             "--coverdir", "{coverdir}", "--ignore-dir", "$prefix",
+//!             "--ignore-dir", "$exec_prefix", "--module", "unittest", "discover"]
+//! protected = ["tests/**"]         # existing files here may not change
+//! max_attempts = 3                 # submissions per agent (self-repair)
+//! reviewer = "rule"                # or "model" (with reviewer_roles)
+//! # reviewer_roles = "reviewer.toml"
+//! ```
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -35,6 +51,7 @@ use crate::interact::{Interaction, PromptView};
 use crate::mediator::{HubBinding, Mediator, lock_store};
 use crate::queue::{MergeGate, MergeQueue, Outcome};
 use crate::session::{self, SessionConfig, SessionReport};
+use crate::verify::{ModelReviewer, ReviewerKind, VerifyFile, VerifyGate, VerifySpec};
 use crate::{Opened, StatePaths, iso};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
@@ -55,6 +72,9 @@ struct TeamFile {
     schedule: Schedule,
     #[serde(rename = "agent", default)]
     agents: Vec<AgentSpec>,
+    /// The verification pipeline (spec §8, ADR-0024).
+    #[serde(default)]
+    verify: Option<VerifyFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +105,9 @@ pub struct TeamAgent {
 pub struct Team {
     pub schedule: Schedule,
     pub agents: Vec<TeamAgent>,
+    /// `None`: merges are not verified (the CLI then requires
+    /// `--unverified`).
+    pub verify: Option<VerifySpec>,
 }
 
 fn valid_name(n: &str) -> bool {
@@ -120,6 +143,7 @@ impl Team {
         let team = Team {
             schedule: file.schedule,
             agents,
+            verify: file.verify.map(|v| VerifySpec::load(v, dir)).transpose()?,
         };
         team.validate()?;
         Ok(team)
@@ -155,7 +179,24 @@ impl Team {
             }
             roles_identity(&a.roles_toml).map_err(|e| format!("agent {:?}: {e}", a.name))?;
         }
+        if let Some(v) = &self.verify {
+            v.validate()?;
+            v.check_families(&self.executor_families()?)?;
+        }
         Ok(())
+    }
+
+    /// Every family any agent's executor can run on (primary or fallback).
+    pub fn executor_families(&self) -> Result<Vec<String>, String> {
+        let mut out: Vec<String> = Vec::new();
+        for a in &self.agents {
+            for f in roles_view(&a.roles_toml)?.families(Route::Agentic) {
+                if !out.contains(&f) {
+                    out.push(f);
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -290,6 +331,60 @@ fn finished_ok(r: &Result<SessionReport, String>) -> bool {
     matches!(r, Ok(rep) if rep.done.is_some() && rep.failed.is_none())
 }
 
+/// The verification gate of a team run.
+fn verify_gate(
+    opened: &Opened,
+    hub: &Arc<Hub>,
+    spec: &VerifySpec,
+    team: &Team,
+    opts: &TeamOptions,
+) -> Result<VerifyGate, String> {
+    let main = &opened.mediator;
+    let ws_root = main.workspace().root().to_path_buf();
+    let scratch = crate::verify::scratch_base(&opts.state_base, &ws_root);
+    let reviewer: crate::verify::BoxedReviewer = match spec.reviewer {
+        ReviewerKind::Rule => crate::verify::rule_reviewer(),
+        ReviewerKind::Model => {
+            // Review sessions get no tools; their mediator is a formality,
+            // over an empty private directory.
+            let dir = iso::iso_base(&opts.state_base, &ws_root).join("reviewer");
+            crate::create_private_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            let ws = anchor_fs::Workspace::open(&dir).map_err(|e| e.to_string())?;
+            let guard = Guard::load(&opened.paths.workspace_config).map_err(|e| e.to_string())?;
+            let mut snap = main.snapshot_options().clone();
+            snap.root = anchor_snapshot::Root::named("reviewer").unwrap_or_default();
+            let mediator = main.isolated(
+                ws,
+                snap,
+                main.engine().for_agent("reviewer"),
+                guard,
+                Box::new(crate::interact::Scripted::new(
+                    false,
+                    ResumeChoice::FreshSession,
+                )),
+            );
+            let checkpoints = CheckpointStore::open(&opened.paths.checkpoints.join("reviewer"))
+                .map_err(|e| e.to_string())?;
+            Box::new(ModelReviewer::new(
+                mediator,
+                checkpoints,
+                opts.agent_bin.clone(),
+                spec.reviewer_roles.clone().unwrap_or_default(),
+                spec.reviewer_mock_script.clone(),
+                team.executor_families()?,
+            )?)
+        }
+    };
+    VerifyGate::new(
+        spec.clone(),
+        scratch,
+        Some(hub.clone()),
+        reviewer,
+        main.path_var().to_string(),
+        main.exec_read_only().to_vec(),
+    )
+}
+
 /// Run `team` on the opened workspace. `interact` answers every prompt of
 /// every agent (and the merge approvals), one at a time.
 pub fn run(
@@ -357,7 +452,10 @@ pub fn run(
         tools: tools.clone(),
     };
 
-    let gate = std::mem::replace(&mut opts.gate, Box::new(crate::queue::NoGate));
+    let gate: Box<dyn MergeGate> = match &team.verify {
+        Some(spec) => Box::new(verify_gate(opened, &hub, spec, team, &opts)?),
+        None => std::mem::replace(&mut opts.gate, Box::new(crate::queue::NoGate)),
+    };
     let paths = opened.paths.clone();
     let mut queue = MergeQueue::new(hub.clone(), &mut opened.mediator, gate, opts.auto_merge);
     let mut report = TeamReport::default();

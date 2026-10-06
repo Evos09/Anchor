@@ -195,6 +195,7 @@ fn two_agents_of_different_families_collaborate() {
     ]});
     let team = Team {
         schedule: Schedule::Sequential,
+        verify: None,
         agents: vec![
             agent("alpha", roles_a(), &["src/"], alpha),
             agent("beta", roles_b(), &["tests/"], beta),
@@ -290,6 +291,7 @@ fn claims_prevent_conflicts() {
     };
     let team = Team {
         schedule: Schedule::Parallel,
+        verify: None,
         agents: vec![
             agent("alpha", roles_a(), &["."], script("from alpha\n")),
             agent("beta", roles_b(), &["."], script("from beta\n")),
@@ -331,6 +333,7 @@ fn concurrent_isolated_agents_merge_adjacent_files() {
     };
     let team = Team {
         schedule: Schedule::Parallel,
+        verify: None,
         agents: vec![
             agent(
                 "alpha",
@@ -743,6 +746,7 @@ fn messages_persist_across_restart() {
         ]});
         let team = Team {
             schedule: Schedule::Sequential,
+            verify: None,
             agents: vec![agent("alpha", roles_a(), &["src/"], script)],
         };
         let r = run_team(&fx, &mut opened, &team);
@@ -796,7 +800,7 @@ fn kill_mid_merge_recovers() {
         .arg(&fx.ws)
         .arg("--team")
         .arg(dir.join("team.toml"))
-        .args(["--auto-approve", "--auto-merge", "--agent"])
+        .args(["--auto-approve", "--auto-merge", "--unverified", "--agent"])
         .arg(agent_bin())
         .env("ANCHOR_STATE_DIR", fx.state_base())
         .env("ANCHOR_TEST_FAULT", "merge:2")

@@ -51,6 +51,20 @@ pub fn cmd_team(a: &Args) -> Result<ExitCode, String> {
         return Err("usage: anchor team run --workspace DIR --team FILE [options]".into());
     }
     let team = Team::load(Path::new(a.need("--team")?))?;
+    match (&team.verify, a.has("--unverified")) {
+        (None, false) => {
+            return Err(
+                "the team file has no [verify] section, so merges would not be \
+                        verified: add one (spec §8), or pass --unverified to merge without \
+                        verification"
+                    .into(),
+            );
+        }
+        (Some(_), true) => {
+            return Err("--unverified conflicts with the team file's [verify] section".into());
+        }
+        _ => {}
+    }
     let ws = PathBuf::from(a.need("--workspace")?);
     let mut ro = default_exec_read_only();
     ro.extend(a.all("--exec-read-only").into_iter().map(PathBuf::from));
@@ -240,6 +254,31 @@ pub fn cmd_hub(a: &Args) -> Result<ExitCode, String> {
             for t in hub.tasks(user).map_err(e)? {
                 json_line(&t);
             }
+        }
+        Some("artifacts") => {
+            // Evidence the verification gate stored (and other artifacts).
+            let prefix = a.get("--prefix").map(|p| format!("evidence:{p}"));
+            for art in hub.list_artifacts(user, prefix.as_deref()).map_err(e)? {
+                println!(
+                    "{:>5}  {:<15} {}  {}  {}",
+                    art.id,
+                    art.kind,
+                    &art.sha256[..16.min(art.sha256.len())],
+                    art.path,
+                    art.evidence
+                );
+            }
+        }
+        Some("show") => {
+            let path = a.pos.get(2).ok_or("usage: anchor hub show EVIDENCE_PATH")?;
+            let art = hub
+                .list_artifacts(user, Some(path))
+                .map_err(e)?
+                .into_iter()
+                .find(|x| &x.path == path)
+                .ok_or_else(|| format!("no artifact {path}"))?;
+            let bytes = hub.read_evidence(user, &art).map_err(e)?;
+            print!("{}", String::from_utf8_lossy(&bytes));
         }
         Some("log") => {
             // The full, replayable history of the Hub: every call, refusals

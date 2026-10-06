@@ -39,6 +39,7 @@ USAGE:
 
   anchor team run --workspace DIR --team FILE [options]
       --auto-merge           apply merges without asking (still audited)
+      --unverified           merge without verification (only without [verify])
       --auto-approve | --auto-deny | --policy | --agent | --threshold  as for `run`
   anchor queue list   --workspace DIR
   anchor queue revert --workspace DIR (--seq N | --agent NAME|ID)
@@ -50,6 +51,8 @@ USAGE:
   anchor hub approve|reject MSG_ID --workspace DIR
   anchor hub decide ID (--accept | --reject) [--reason TEXT] --workspace DIR
   anchor hub log | verify --workspace DIR
+  anchor hub artifacts [--prefix GROUP] --workspace DIR   verification evidence
+  anchor hub show EVIDENCE_PATH --workspace DIR          print one evidence file
 
 Per-workspace state (policy, audit log, checkpoints, snapshots) lives outside
 the workspace, under $ANCHOR_STATE_DIR or the per-user state directory.
@@ -67,6 +70,7 @@ impl Args {
             "--auto-deny",
             "--yes",
             "--auto-merge",
+            "--unverified",
             "--accept",
             "--reject",
             "--hold-messages",

@@ -50,6 +50,9 @@ impl Default for Limits {
     }
 }
 
+/// The uid commands run as when the backend runs as root.
+pub const NOBODY_UID: u32 = 65534;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Network {
     Deny,
@@ -312,6 +315,17 @@ mod sys {
 
     const NOBODY: libc::uid_t = 65534;
 
+    /// Whether this process runs as root, so its commands run as
+    /// [`NOBODY_UID`](super::NOBODY_UID).
+    pub fn running_as_root() -> bool {
+        effective_uid() == Some(0)
+    }
+
+    pub fn effective_uid() -> Option<u32> {
+        // SAFETY: geteuid has no preconditions.
+        Some(unsafe { libc::geteuid() })
+    }
+
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     type Resource = libc::__rlimit_resource_t;
     #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
@@ -430,8 +444,7 @@ mod sys {
         spec: &CommandSpec,
     ) -> Result<(Command, Isolation, Option<StepPipe>), ExecError> {
         let mut isolation = Isolation::default();
-        // SAFETY: geteuid has no preconditions.
-        let is_root = unsafe { libc::geteuid() } == 0;
+        let is_root = running_as_root();
         isolation.dropped_root = is_root;
 
         let mut cmd =
@@ -969,9 +982,17 @@ mod sys {
     pub fn group_alive(_pgid: u32) -> bool {
         false
     }
+
+    pub fn running_as_root() -> bool {
+        false
+    }
+
+    pub fn effective_uid() -> Option<u32> {
+        None
+    }
 }
 
-pub use sys::group_alive;
+pub use sys::{effective_uid, group_alive, running_as_root};
 
 #[cfg(test)]
 mod tests;

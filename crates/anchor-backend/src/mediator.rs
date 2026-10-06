@@ -215,6 +215,14 @@ impl Mediator {
     pub fn workspace(&self) -> &Workspace {
         &self.ws
     }
+    /// `PATH` used to resolve and run commands.
+    pub fn path_var(&self) -> &str {
+        &self.path_var
+    }
+    /// Read-only view granted to commands.
+    pub fn exec_read_only(&self) -> &[PathBuf] {
+        &self.exec_read_only
+    }
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
