@@ -917,3 +917,41 @@ fn kill_mid_restore_recovers_to_pre_restore_state() {
     assert!(store.journal().unwrap().is_none());
     assert!(recover(&store, &ws, &opts(), &mut auth).unwrap().is_none());
 }
+
+/// A corrupted object shared by the current workspace is healed: the next
+/// snapshot that stores that content again replaces the damaged copy, and
+/// a restore pre-flight re-hashes the workspace if the damage is in what
+/// an undo would need.
+#[test]
+fn damaged_objects_are_healed_from_the_workspace() {
+    let e = env();
+    let store = Store::open(&e.store_dir).unwrap();
+    let ws = Workspace::open(&e.ws).unwrap();
+    let empty = snap(&store, &ws, "turns/1");
+    fs::write(e.ws.join("keep"), "precious").unwrap();
+    let s1 = snap(&store, &ws, "turns/2");
+    let root = store.snapshot(&s1.id()).unwrap().root;
+    let Some(Node::File { id, .. }) = store.tree(&root).unwrap().get(b"keep").cloned() else {
+        panic!()
+    };
+    let (cid, _) = store.file(&id).unwrap().chunks[0];
+    let cpath = store
+        .dir()
+        .join("objects")
+        .join(&cid.hex()[..2])
+        .join(cid.hex());
+    let mut bytes = fs::read(&cpath).unwrap();
+    bytes[2] ^= 1;
+    fs::write(&cpath, &bytes).unwrap();
+    assert!(!verify(&store).unwrap().ok());
+    // Restoring the empty state removes `keep`; undoing that would need its
+    // damaged content, so the pre-flight re-hashes the workspace (which
+    // still holds it) and repairs the object before touching anything.
+    let mut auth = approver(&e.engine, ws.root());
+    restore(&store, &ws, &opts(), &empty.id(), &mut auth).unwrap();
+    assert!(!e.ws.join("keep").exists());
+    let v = verify(&store).unwrap();
+    assert!(v.ok(), "{:?}", v.errors);
+    restore(&store, &ws, &opts(), &s1.id(), &mut auth).unwrap();
+    assert_eq!(fs::read_to_string(e.ws.join("keep")).unwrap(), "precious");
+}

@@ -37,6 +37,9 @@ pub struct SnapshotOptions {
     /// Files modified within this window before the scan are re-hashed
     /// next time (see [`crate::index`]).
     pub racy_window_ns: i128,
+    /// Ignore the change-detection index and re-hash every file (used to
+    /// heal a damaged store).
+    pub rehash_all: bool,
 }
 
 impl Default for SnapshotOptions {
@@ -47,6 +50,7 @@ impl Default for SnapshotOptions {
             exclude: Vec::new(),
             threads: 0,
             racy_window_ns: RACY_NS,
+            rehash_all: false,
         }
     }
 }
@@ -257,7 +261,11 @@ pub fn snapshot(
     let scan_ms = t0.elapsed().as_millis() as u64;
 
     let t1 = Instant::now();
-    let index = Index::load(&store.index_path());
+    let index = if opts.rehash_all {
+        Index::default()
+    } else {
+        Index::load(&store.index_path())
+    };
     let mut report = SnapshotReport {
         scan_ms,
         ..Default::default()

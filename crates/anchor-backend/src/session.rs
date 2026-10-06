@@ -111,6 +111,7 @@ pub fn run(
     mediator: &mut Mediator,
     checkpoints: &CheckpointStore,
 ) -> Result<SessionReport, SessionError> {
+    mediator.set_session(&cfg.session_id);
     let mut child = Command::new(&cfg.agent_bin)
         .env_clear()
         .envs(runtime_env(&cfg.roles_toml))

@@ -8,7 +8,8 @@
 //! 3. append-only guard / read ledger checked (mutations);
 //! 4. structured `PermissionRequest` decided by the engine (prompting with
 //!    the canonical path only);
-//! 5. pre-image captured (mutations);
+//! 5. the workspace snapshotted, once per turn, before its first mutation
+//!    (spec §5.5(a); `anchor-snapshot`);
 //! 6. the operation executed on descriptors, consuming the approval;
 //! 7. the outcome audited.
 
@@ -24,7 +25,7 @@ use anchor_policy::{
 use anchor_protocol::{DeniedBy, EditOp, ToolOutcome, ToolRequest};
 
 use crate::interact::{Interaction, PromptView};
-use crate::preimage::{ManifestKind, PreimageStore};
+use anchor_snapshot::{Change, Id, RestoreReport, SnapshotOptions, SnapshotReport, Store};
 
 /// Largest tool output returned to the model in one result.
 pub const MAX_OUTPUT_BYTES: usize = 1 << 20;
@@ -74,7 +75,12 @@ pub struct Mediator {
     ws: Workspace,
     engine: Engine,
     guard: Guard,
-    preimages: PreimageStore,
+    snapshots: Store,
+    snap_opts: SnapshotOptions,
+    keep_turns: usize,
+    session: String,
+    /// The turn whose pre-turn snapshot has been taken.
+    snapshotted: Option<u64>,
     interact: Box<dyn Interaction>,
     turn: u64,
     path_var: String,
@@ -116,11 +122,14 @@ fn deletion_diff(old: &[u8], new: &[u8]) -> String {
 }
 
 impl Mediator {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ws: Workspace,
         engine: Engine,
         guard: Guard,
-        preimages: PreimageStore,
+        snapshots: Store,
+        snap_opts: SnapshotOptions,
+        keep_turns: usize,
         interact: Box<dyn Interaction>,
         path_var: String,
         exec_read_only: Vec<PathBuf>,
@@ -129,7 +138,11 @@ impl Mediator {
             ws,
             engine,
             guard,
-            preimages,
+            snapshots,
+            snap_opts,
+            keep_turns,
+            session: String::new(),
+            snapshotted: None,
             interact,
             turn: 0,
             path_var,
@@ -148,7 +161,20 @@ impl Mediator {
     pub fn interact(&mut self) -> &mut dyn Interaction {
         self.interact.as_mut()
     }
+    /// Label future snapshots with this session id.
+    pub fn set_session(&mut self, id: &str) {
+        self.session = id.to_string();
+        self.snapshotted = None;
+    }
+
+    pub fn snapshots(&self) -> &Store {
+        &self.snapshots
+    }
+
     pub fn set_turn(&mut self, turn: u64) {
+        if turn != self.turn {
+            self.snapshotted = None;
+        }
         self.turn = turn;
     }
     pub fn set_exec_limits(&mut self, l: Limits) {
@@ -514,11 +540,8 @@ impl Mediator {
             Ok(a) => a,
             Err(o) => return o,
         };
-        if let Err(e) =
-            self.preimages
-                .record(self.turn, &r.rel, cur.as_ref().map(|c| c.bytes.as_slice()))
-        {
-            return error(format!("refusing to mutate: pre-image capture failed: {e}"));
+        if let Err(e) = self.ensure_turn_snapshot() {
+            return error(format!("refusing to mutate: snapshot failed: {e}"));
         }
         let expect = match &cur {
             None => Expect::Absent,
@@ -615,8 +638,8 @@ impl Mediator {
             Ok(a) => a,
             Err(o) => return o,
         };
-        if let Err(e) = self.preimages.record(self.turn, &r.rel, Some(&cur.bytes)) {
-            return error(format!("refusing to mutate: pre-image capture failed: {e}"));
+        if let Err(e) = self.ensure_turn_snapshot() {
+            return error(format!("refusing to mutate: snapshot failed: {e}"));
         }
         let id = approval.decision_id();
         let result = match &edit {
@@ -657,29 +680,6 @@ impl Mediator {
         }
     }
 
-    /// Capture every workspace file before a command runs (interim
-    /// whole-workspace snapshot; see `preimage`).
-    fn capture_workspace(&mut self) -> Result<(), String> {
-        let files = self.walk();
-        let mut contents = Vec::with_capacity(files.len());
-        for rel in files {
-            let r = self
-                .ws
-                .resolve(&rel.to_string_lossy())
-                .map_err(|e| format!("{}: {e}", rel.display()))?;
-            if r.meta.is_some_and(|m| m.kind == Kind::File && m.nlink <= 1) {
-                let c = self
-                    .ws
-                    .read(&r)
-                    .map_err(|e| format!("{}: {e}", rel.display()))?;
-                contents.push((rel, c.bytes));
-            }
-        }
-        self.preimages
-            .record_full(self.turn, contents.into_iter())
-            .map_err(|e| e.to_string())
-    }
-
     fn run_command(&mut self, program: &str, args: Vec<String>, network: bool) -> ToolOutcome {
         let prog = match anchor_exec::resolve_program(program, &self.path_var) {
             Ok(p) => p,
@@ -706,7 +706,7 @@ impl Mediator {
             Err(o) => return o,
         };
         drop(approval);
-        if let Err(e) = self.capture_workspace() {
+        if let Err(e) = self.ensure_turn_snapshot() {
             return error(format!("refusing to run: workspace snapshot failed: {e}"));
         }
         let spec = CommandSpec {
@@ -783,100 +783,175 @@ impl Mediator {
     // Rollback (user-initiated)
     // ---------------------------------------------------------------------
 
-    /// Restore the workspace to its state before `turn` by undoing every
-    /// recorded turn >= `turn`, newest first. Each restore goes through the
-    /// same descriptor-based, approval-consuming path as agent writes.
-    pub fn rollback_to(&mut self, turn: u64) -> Result<Vec<String>, String> {
-        let turns: Vec<u64> = self
-            .preimages
-            .turns()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(|t| *t >= turn)
-            .rev()
-            .collect();
-        let mut log = Vec::new();
-        for t in turns {
-            let m = self.preimages.manifest(t).map_err(|e| e.to_string())?;
-            if m.kind == ManifestKind::Full {
-                // Files created by the command did not exist before it.
-                for rel in self.walk() {
-                    let key = rel.to_string_lossy().replace('\\', "/");
-                    if !m.entries.contains_key(&key) {
-                        self.restore_one(&key, None, &mut log)?;
-                    }
-                }
-            }
-            for (rel, sha) in &m.entries {
-                let content = match sha {
-                    Some(s) => Some(self.preimages.get_blob(s).map_err(|e| e.to_string())?),
-                    None => None,
-                };
-                self.restore_one(rel, content.as_deref(), &mut log)?;
-            }
-            let _ = self.engine.audit().append(
-                "rollback_turn",
-                serde_json::json!({ "turn": t, "entries": m.entries.len() }),
-            );
+    /// Snapshot the workspace before the first mutation of the current
+    /// turn (spec §5.5(a): every mutating turn is snapshotted first). The
+    /// ref is numbered by the backend, never by the runtime; the session
+    /// and turn go in the label.
+    fn ensure_turn_snapshot(&mut self) -> Result<(), String> {
+        if self.snapshotted == Some(self.turn) {
+            return Ok(());
         }
-        Ok(log)
-    }
-
-    fn restore_one(
-        &mut self,
-        rel: &str,
-        content: Option<&[u8]>,
-        log: &mut Vec<String>,
-    ) -> Result<(), String> {
-        // Confinement is re-checked here: a crafted manifest cannot make a
-        // restore write outside the workspace (Threat 9).
-        let r = self.ws.resolve(rel).map_err(|e| format!("{rel}: {e}"))?;
-        let cur = self.current(&r).map_err(|_| format!("{rel}: unreadable"))?;
-        let user_req = |op: Operation| PermissionRequest {
-            tool: Tool::UserAction,
-            operation: op,
-            canonical_target: Some(r.canonical.clone()),
-            workspace_root: self.ws.root().to_path_buf(),
-            target_exists: r.exists(),
-            is_append_only: false,
-            blast_radius_count: 1,
-            network: false,
-        };
-        match (content, &cur) {
-            (Some(want), Some(c)) if c.bytes == want => {}
-            (Some(want), _) => {
-                let op = if r.exists() {
-                    Operation::Write
-                } else {
-                    Operation::Create
-                };
-                let a = self
-                    .engine
-                    .user_initiated(UserAction::Rollback, &user_req(op))
-                    .map_err(|d| format!("{rel}: {}", d.rule))?;
-                let expect = match &cur {
-                    None => Expect::Absent,
-                    Some(c) => Expect::Existing {
-                        id: c.meta.id,
-                        sha256: c.sha256,
-                    },
-                };
-                self.ws
-                    .write(&r, want, expect, a)
-                    .map_err(|e| format!("{rel}: {e}"))?;
-                log.push(format!("restored {}", r.canonical.display()));
+        let seq = self
+            .snapshots
+            .list_refs("turns")
+            .map_err(|e| e.to_string())?
+            .last()
+            .and_then(|(n, _)| n.strip_prefix("turns/")?.parse::<u64>().ok())
+            .unwrap_or(0)
+            + 1;
+        let label = format!("session {} turn {}", self.session, self.turn);
+        let r = anchor_snapshot::take_snapshot(
+            &self.snapshots,
+            &self.ws,
+            &self.snap_opts,
+            &format!("turns/{seq:010}"),
+            &label,
+        )
+        .map_err(|e| e.to_string())?;
+        self.audit_snapshot(&label, &r);
+        self.snapshotted = Some(self.turn);
+        if seq as usize > self.keep_turns + 20 {
+            // Amortised: prune old turns and unreachable objects.
+            match anchor_snapshot::gc(&self.snapshots, self.keep_turns, 20) {
+                Ok(g) => {
+                    let _ = self.engine.audit().append(
+                        "snapshot_gc",
+                        serde_json::json!({
+                            "refs_pruned": g.refs_pruned,
+                            "objects_removed": g.objects_removed,
+                            "bytes_freed": g.bytes_freed,
+                        }),
+                    );
+                }
+                Err(e) => self.interact.notify(&format!("snapshot gc skipped: {e}")),
             }
-            (None, Some(_)) => {
-                let a = self
-                    .engine
-                    .user_initiated(UserAction::Rollback, &user_req(Operation::Delete))
-                    .map_err(|d| format!("{rel}: {}", d.rule))?;
-                self.ws.remove(&r, a).map_err(|e| format!("{rel}: {e}"))?;
-                log.push(format!("removed {}", r.canonical.display()));
-            }
-            (None, None) => {}
         }
         Ok(())
+    }
+
+    fn audit_snapshot(&self, label: &str, r: &SnapshotReport) {
+        let _ = self.engine.audit().append(
+            "snapshot",
+            serde_json::json!({
+                "label": label,
+                "id": r.id().hex(),
+                "files": r.files,
+                "bytes": r.bytes,
+                "hashed_files": r.hashed_files,
+                "new_objects": r.new_objects,
+                "new_bytes": r.new_bytes,
+                "untracked": r.untracked.iter().map(|(p, u)| format!("{p} ({u:?})")).collect::<Vec<_>>(),
+                "ms": r.total_ms,
+            }),
+        );
+    }
+
+    /// The snapshot taken before `turn` of the most recent session that
+    /// has snapshots.
+    pub fn snapshot_for_turn(&self, turn: u64) -> Result<Id, String> {
+        let refs = self
+            .snapshots
+            .list_refs("turns")
+            .map_err(|e| e.to_string())?;
+        let mut latest_session: Option<String> = None;
+        for (_, id) in refs.iter().rev() {
+            let label = self
+                .snapshots
+                .snapshot(id)
+                .map_err(|e| e.to_string())?
+                .label;
+            let Some((session, t)) = parse_label(&label) else {
+                continue;
+            };
+            let s = latest_session.get_or_insert_with(|| session.to_string());
+            if s != session {
+                break;
+            }
+            if t == turn {
+                return Ok(*id);
+            }
+        }
+        Err(format!(
+            "no snapshot before turn {turn} in the latest session (turns that made no changes have none)"
+        ))
+    }
+
+    /// What restoring `target` would change.
+    pub fn preview_restore(&mut self, target: &Id) -> Result<Vec<Change>, String> {
+        let now = anchor_snapshot::snapshot(&self.snapshots, &self.ws, &self.snap_opts, "preview")
+            .map_err(|e| e.to_string())?;
+        anchor_snapshot::diff(&self.snapshots, &now.id(), target).map_err(|e| e.to_string())
+    }
+
+    /// Restore the workspace to its state before `turn` (latest session).
+    pub fn rollback_to(&mut self, turn: u64) -> Result<Vec<String>, String> {
+        let id = self.snapshot_for_turn(turn)?;
+        self.rollback_to_snapshot(&id)
+    }
+
+    /// Restore the workspace to snapshot `id`, atomically and verified
+    /// (user-initiated; every operation is approved, audited and executed
+    /// through `anchor-fs`).
+    pub fn rollback_to_snapshot(&mut self, id: &Id) -> Result<Vec<String>, String> {
+        let root = self.ws.root().to_path_buf();
+        let engine = &self.engine;
+        let mut auth = |r: &Resolved, op: Operation| {
+            engine
+                .user_initiated(UserAction::Rollback, &user_request(&root, r, op))
+                .map_err(|d| d.rule)
+        };
+        let result =
+            anchor_snapshot::restore(&self.snapshots, &self.ws, &self.snap_opts, id, &mut auth);
+        self.snapshotted = None;
+        match result {
+            Ok(r) => {
+                self.audit_restore("rollback", &r);
+                let mut log = r.ops.clone();
+                log.extend(
+                    r.skipped
+                        .iter()
+                        .map(|p| format!("left alone (untracked): {p}")),
+                );
+                Ok(log)
+            }
+            Err(e) => {
+                let _ = self.engine.audit().append(
+                    "rollback_failed",
+                    serde_json::json!({ "target": id.hex(), "error": e.to_string() }),
+                );
+                Err(e.to_string())
+            }
+        }
+    }
+
+    /// Finish an interrupted restore by returning to its pre-restore state.
+    pub fn recover(&mut self) -> Result<Option<RestoreReport>, String> {
+        let root = self.ws.root().to_path_buf();
+        let engine = &self.engine;
+        let mut auth = |r: &Resolved, op: Operation| {
+            engine
+                .user_initiated(UserAction::Rollback, &user_request(&root, r, op))
+                .map_err(|d| d.rule)
+        };
+        let r = anchor_snapshot::recover(&self.snapshots, &self.ws, &self.snap_opts, &mut auth)
+            .map_err(|e| e.to_string())?;
+        if let Some(r) = &r {
+            self.audit_restore("restore_recovered", r);
+        }
+        Ok(r)
+    }
+
+    fn audit_restore(&self, kind: &str, r: &RestoreReport) {
+        let _ = self.engine.audit().append(
+            kind,
+            serde_json::json!({
+                "pre": r.pre.map(|i| i.hex()),
+                "target": r.target.map(|i| i.hex()),
+                "post": r.post.map(|i| i.hex()),
+                "operations": r.ops.len(),
+                "skipped": r.skipped,
+            }),
+        );
     }
 
     /// User action: persist a "not append-only" override.
@@ -889,5 +964,25 @@ impl Mediator {
             serde_json::json!({ "action": "not_append_only", "path": rel }),
         );
         Ok(self.guard.classify(rel, None))
+    }
+}
+
+/// `session <id> turn <n>` → (id, n).
+fn parse_label(label: &str) -> Option<(&str, u64)> {
+    let rest = label.strip_prefix("session ")?;
+    let (session, turn) = rest.rsplit_once(" turn ")?;
+    Some((session, turn.parse().ok()?))
+}
+
+fn user_request(root: &Path, r: &Resolved, op: Operation) -> PermissionRequest {
+    PermissionRequest {
+        tool: Tool::UserAction,
+        operation: op,
+        canonical_target: Some(r.canonical.clone()),
+        workspace_root: root.to_path_buf(),
+        target_exists: r.exists(),
+        is_append_only: false,
+        blast_radius_count: 1,
+        network: false,
     }
 }

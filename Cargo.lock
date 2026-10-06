@@ -27,6 +27,7 @@ dependencies = [
  "anchor-guard",
  "anchor-policy",
  "anchor-protocol",
+ "anchor-snapshot",
  "globset",
  "ignore",
  "regex",

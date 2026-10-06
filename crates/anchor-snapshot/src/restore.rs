@@ -388,6 +388,84 @@ fn run_with_fallback(
     }
 }
 
+enum Preflight {
+    Ok,
+    TargetDamaged(Error),
+    PreDamaged(Error),
+}
+
+/// Read (and so hash-verify) every object a restore from `pre` to `target`
+/// needs: trees on both sides, the target's new content, and the pre-state
+/// content of every file it replaces or removes.
+fn preflight(store: &Store, pre: &Id, target: &Id) -> Result<Preflight> {
+    let t = match root_of(store, target) {
+        Ok(t) => t,
+        Err(e) => return Ok(Preflight::TargetDamaged(e)),
+    };
+    let p = match root_of(store, pre) {
+        Ok(p) => p,
+        Err(e) => return Ok(Preflight::PreDamaged(e)),
+    };
+    let mut out = Preflight::Ok;
+    preflight_dir(store, Some(&p), Some(&t), &mut out);
+    Ok(out)
+}
+
+fn preflight_dir(store: &Store, cur: Option<&TreeObj>, tgt: Option<&TreeObj>, out: &mut Preflight) {
+    let empty = TreeObj::default();
+    let (cur, tgt) = (cur.unwrap_or(&empty), tgt.unwrap_or(&empty));
+    let mut names: Vec<&[u8]> = cur
+        .entries
+        .iter()
+        .chain(tgt.entries.iter())
+        .map(|e| e.name.as_slice())
+        .collect();
+    names.sort();
+    names.dedup();
+    for name in names {
+        if !matches!(out, Preflight::Ok) {
+            return;
+        }
+        let (c, t) = (cur.get(name), tgt.get(name));
+        if c == t || c.is_some_and(untouchable) || t.is_some_and(untouchable) {
+            continue;
+        }
+        let load_tree = |id: &Id| store.tree(id);
+        let sub = |c: Option<&Node>, t: Option<&Node>, out: &mut Preflight| {
+            let ct = match c {
+                Some(Node::Dir { id, .. }) => match load_tree(id) {
+                    Ok(x) => Some(x),
+                    Err(e) => return *out = Preflight::PreDamaged(e),
+                },
+                _ => None,
+            };
+            let tt = match t {
+                Some(Node::Dir { id, .. }) => match load_tree(id) {
+                    Ok(x) => Some(x),
+                    Err(e) => return *out = Preflight::TargetDamaged(e),
+                },
+                _ => None,
+            };
+            if ct.is_some() || tt.is_some() {
+                preflight_dir(store, ct.as_ref(), tt.as_ref(), out);
+            }
+        };
+        if let Some(Node::File { id, .. }) = c {
+            if let Err(e) = store.file(id).and_then(|f| store.file_content(&f)) {
+                *out = Preflight::PreDamaged(e);
+                return;
+            }
+        }
+        if let Some(Node::File { id, .. }) = t {
+            if let Err(e) = store.file(id).and_then(|f| store.file_content(&f)) {
+                *out = Preflight::TargetDamaged(e);
+                return;
+            }
+        }
+        sub(c, t, out);
+    }
+}
+
 /// Restore the workspace to snapshot `target`. See the module docs.
 pub fn restore(
     store: &Store,
@@ -401,7 +479,26 @@ pub fn restore(
     }
     // Fail before touching anything if the target is unreadable.
     root_of(store, target)?;
-    let pre = snapshot(store, ws, opts, "pre-restore")?.id();
+    let mut pre = snapshot(store, ws, opts, "pre-restore")?.id();
+    // Pre-flight, read-only: everything the forward pass writes must be
+    // intact, and so must everything the undo pass would need. A damaged
+    // pre-restore object (a dedup hit on a corrupted object) is healed by
+    // re-hashing the workspace, which still holds that content.
+    match preflight(store, &pre, target)? {
+        Preflight::Ok => {}
+        Preflight::TargetDamaged(e) => return Err(e),
+        Preflight::PreDamaged(_) => {
+            let heal = SnapshotOptions {
+                rehash_all: true,
+                ..opts.clone()
+            };
+            pre = snapshot(store, ws, &heal, "pre-restore")?.id();
+            match preflight(store, &pre, target)? {
+                Preflight::Ok => {}
+                Preflight::TargetDamaged(e) | Preflight::PreDamaged(e) => return Err(e),
+            }
+        }
+    }
     store.set_ref(&format!("restore/{}", unix_ms()), &pre)?;
     store.write_journal(&pre, target)?;
     let mut report = RestoreReport {

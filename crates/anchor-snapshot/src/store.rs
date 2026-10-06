@@ -397,8 +397,18 @@ impl Store {
     /// Every ref, in every namespace.
     pub fn all_refs(&self) -> Result<Vec<(String, Id)>> {
         let mut v = self.list_refs("")?;
-        v.extend(self.list_refs("turns")?);
-        v.extend(self.list_refs("restore")?);
+        let mut namespaces = Vec::new();
+        for e in fs::read_dir(self.dir.join("refs"))? {
+            let e = e?;
+            let n = e.file_name().to_string_lossy().into_owned();
+            if e.file_type()?.is_dir() && valid_ref(&n) {
+                namespaces.push(n);
+            }
+        }
+        namespaces.sort();
+        for ns in namespaces {
+            v.extend(self.list_refs(&ns)?);
+        }
         Ok(v)
     }
 
@@ -486,7 +496,9 @@ impl Batch<'_> {
                 return Ok(id);
             }
         }
-        if self.store.has(&id) {
+        // An existing object is trusted only if it still verifies; a
+        // damaged one is replaced by this fresh copy on publish.
+        if self.store.has(&id) && self.store.read_raw(&id).is_ok_and(|(t, _)| t == ty) {
             return Ok(id);
         }
         let tmp = self.store.dir.join("tmp").join(format!(

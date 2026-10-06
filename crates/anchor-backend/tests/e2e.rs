@@ -146,6 +146,36 @@ const SCRIPT: &str = r###"{"steps": [
   {"content": "done", "prompt_tokens": 400, "completion_tokens": 10}
 ]}"###;
 
+/// Exact observable state of a directory tree (symlinks not followed).
+fn tree_state(root: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    fn go(
+        root: &std::path::Path,
+        rel: &std::path::Path,
+        out: &mut std::collections::BTreeMap<String, String>,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        for e in std::fs::read_dir(root.join(rel)).unwrap() {
+            let e = e.unwrap();
+            let r = rel.join(e.file_name());
+            let p = root.join(&r);
+            let m = std::fs::symlink_metadata(&p).unwrap();
+            let mode = m.permissions().mode() & 0o777;
+            let v = if m.file_type().is_symlink() {
+                format!("link {}", std::fs::read_link(&p).unwrap().display())
+            } else if m.is_dir() {
+                go(root, &r, out);
+                format!("dir {mode:o}")
+            } else {
+                format!("file {mode:o} {:?}", std::fs::read(&p).unwrap())
+            };
+            out.insert(r.display().to_string(), v);
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    go(root, std::path::Path::new(""), &mut out);
+    out
+}
+
 fn entries(opened: &Opened) -> Vec<anchor_policy::AuditEntry> {
     AuditLog::read_entries(&opened.paths.audit).unwrap()
 }
@@ -159,6 +189,7 @@ fn end_to_end_session_enforces_every_primitive() {
     let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let fx = fixture();
     let mut opened = open(&fx, true, ResumeChoice::FreshSession);
+    let initial = tree_state(&fx.ws);
     let mutations_before = anchor_fs::mutations_performed();
     let report = run(&fx, &mut opened, SCRIPT, 0.8, ROLES);
 
@@ -274,6 +305,17 @@ fn end_to_end_session_enforces_every_primitive() {
         "# Changelog\n\n## 2026-10-01\n- initial\n"
     );
     assert!(!fx.ws.join("src/new_module.py").exists());
+    // Turns 1–2 changed nothing, so this is exactly the initial state.
+    assert_eq!(tree_state(&fx.ws), initial);
+    // Mutating turns were snapshotted (turn 2 ran a command; turn 3
+    // edited), and the store verifies.
+    let snaps: Vec<_> = es.iter().filter(|e| e.kind == "snapshot").collect();
+    assert_eq!(snaps.len(), 2, "{snaps:?}");
+    assert!(
+        anchor_snapshot::verify(opened.mediator.snapshots())
+            .unwrap()
+            .ok()
+    );
     assert!(AuditLog::verify(&opened.paths.audit).is_ok());
 }
 
@@ -392,52 +434,162 @@ fn same_family_reviewer_refused() {
 
 /// Threat 9: a crafted pre-image manifest cannot make a restore write
 /// outside the workspace, and a tampered blob is rejected.
+/// Threat 9: a poisoned snapshot store cannot make a restore write outside
+/// the workspace, and tampered content is refused by its hash.
 #[test]
-fn crafted_manifest_cannot_escape_on_restore() {
+fn crafted_snapshot_cannot_escape_on_restore() {
+    use anchor_snapshot::object::{FileObj, Node, ObjType, SnapshotObj, TreeEntry, TreeObj};
     let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let fx = fixture();
     let mut opened = open(&fx, true, ResumeChoice::FreshSession);
-    let blobs = opened.paths.preimages.join("blobs");
+    let outside =
+        || std::fs::read_to_string(fx.base.join("fake_home/.ssh/authorized_keys")).unwrap();
     let payload = b"pwned\n";
-    let sha = anchor_policy::audit::hex(&anchor_fs::sha256(payload));
-    std::fs::create_dir_all(&blobs).unwrap();
-    std::fs::write(blobs.join(&sha), payload).unwrap();
-    for rel in [
-        "../fake_home/.ssh/authorized_keys",
-        "config_link/authorized_keys",
-        "/etc/hostname",
-    ] {
-        let manifest = serde_json::json!({
-            "turn": 99, "kind": "files", "entries": { rel: sha }
-        });
-        std::fs::write(
-            opened.paths.preimages.join("turns/0000000099.json"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
+    let crafted = |entries: Vec<TreeEntry>, store: &anchor_snapshot::Store| {
+        let b = store.batch();
+        let root = b.put(ObjType::Tree, &TreeObj { entries }.encode()).unwrap();
+        let snap = SnapshotObj {
+            root,
+            created_unix_ms: 0,
+            files: 1,
+            bytes: 6,
+            label: String::new(),
+        };
+        let id = b.put(ObjType::Snapshot, &snap.encode()).unwrap();
+        b.publish().unwrap();
+        id
+    };
+    let store = opened.mediator.snapshots();
+    let b = store.batch();
+    let chunk = b.put(ObjType::Chunk, payload).unwrap();
+    let file = FileObj {
+        size: payload.len() as u64,
+        sha256: anchor_fs::sha256(payload),
+        chunks: vec![(chunk, payload.len() as u32)],
+    };
+    let fid = b.put(ObjType::File, &file.encode()).unwrap();
+    b.publish().unwrap();
+    let file_node = Node::File {
+        id: fid,
+        mode: 0o644,
+    };
+
+    // `..` and absolute names never decode.
+    for name in [&b".."[..], b"/etc/hostname", b"../fake_home"] {
+        let id = crafted(
+            vec![TreeEntry {
+                name: name.to_vec(),
+                node: file_node.clone(),
+            }],
+            opened.mediator.snapshots(),
+        );
         assert!(
-            opened.mediator.rollback_to(99).is_err(),
-            "{rel} should be refused"
+            opened.mediator.rollback_to_snapshot(&id).is_err(),
+            "{name:?}"
         );
     }
-    assert_eq!(
-        std::fs::read_to_string(fx.base.join("fake_home/.ssh/authorized_keys")).unwrap(),
-        "ssh-ed25519 AAAA user@host\n"
+    // A directory named like the workspace symlink to ~/.ssh: the restore
+    // replaces the symlink with a real directory inside the workspace; it
+    // never writes through it.
+    let store = opened.mediator.snapshots();
+    let b = store.batch();
+    let inner = b
+        .put(
+            ObjType::Tree,
+            &TreeObj {
+                entries: vec![TreeEntry {
+                    name: b"authorized_keys".to_vec(),
+                    node: file_node.clone(),
+                }],
+            }
+            .encode(),
+        )
+        .unwrap();
+    b.publish().unwrap();
+    let id = crafted(
+        vec![TreeEntry {
+            name: b"config_link".to_vec(),
+            node: Node::Dir {
+                id: inner,
+                mode: 0o755,
+            },
+        }],
+        opened.mediator.snapshots(),
     );
-    // Tampered blob content is detected by its hash.
-    let manifest =
-        serde_json::json!({"turn": 99, "kind": "files", "entries": {"src/util.py": sha}});
-    std::fs::write(
-        opened.paths.preimages.join("turns/0000000099.json"),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
-    std::fs::write(blobs.join(&sha), b"different").unwrap();
-    assert!(opened.mediator.rollback_to(99).is_err());
-    assert_eq!(
-        std::fs::read_to_string(fx.ws.join("src/util.py")).unwrap(),
-        "def helper():\n    return 42\n"
+    opened.mediator.rollback_to_snapshot(&id).unwrap();
+    assert_eq!(outside(), "ssh-ed25519 AAAA user@host\n");
+    let m = std::fs::symlink_metadata(fx.ws.join("config_link")).unwrap();
+    assert!(m.is_dir() && !m.file_type().is_symlink());
+
+    // Tampered content (present only in the store) is refused by its hash
+    // before anything is touched.
+    let store = opened.mediator.snapshots();
+    let only_in_store = b"content that exists only in the store\n";
+    let b = store.batch();
+    let c2 = b.put(ObjType::Chunk, only_in_store).unwrap();
+    let f2 = FileObj {
+        size: only_in_store.len() as u64,
+        sha256: anchor_fs::sha256(only_in_store),
+        chunks: vec![(c2, only_in_store.len() as u32)],
+    };
+    let f2id = b.put(ObjType::File, &f2.encode()).unwrap();
+    b.publish().unwrap();
+    let cpath = store
+        .dir()
+        .join("objects")
+        .join(&c2.hex()[..2])
+        .join(c2.hex());
+    let mut bytes = std::fs::read(&cpath).unwrap();
+    bytes[1] ^= 1;
+    std::fs::write(&cpath, &bytes).unwrap();
+    let id = crafted(
+        vec![TreeEntry {
+            name: b"src".to_vec(),
+            node: Node::File {
+                id: f2id,
+                mode: 0o644,
+            },
+        }],
+        opened.mediator.snapshots(),
     );
+    let before = tree_state(&fx.ws);
+    let err = opened.mediator.rollback_to_snapshot(&id).unwrap_err();
+    assert!(err.contains("hash"), "{err}");
+    assert_eq!(tree_state(&fx.ws), before);
+    assert_eq!(outside(), "ssh-ed25519 AAAA user@host\n");
+    assert!(opened.mediator.snapshots().journal().unwrap().is_none());
+}
+
+/// Snapshots cover `.gitignore`d files and `.git/`: a command that deletes
+/// them is fully undone (ADR-0006).
+#[test]
+fn rollback_after_command_restores_gitignored_and_dotgit() {
+    use std::os::unix::fs::PermissionsExt;
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    std::fs::create_dir_all(fx.ws.join(".git/refs")).unwrap();
+    std::fs::write(fx.ws.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(fx.ws.join(".git/refs/main"), "abc123\n").unwrap();
+    std::fs::write(fx.ws.join(".gitignore"), ".env\n").unwrap();
+    std::fs::write(fx.ws.join(".env"), "API_KEY=secret\n").unwrap();
+    for d in [".git", ".git/refs"] {
+        std::fs::set_permissions(fx.ws.join(d), std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+    let initial = tree_state(&fx.ws);
+    let mut opened = open(&fx, true, ResumeChoice::FreshSession);
+    let script = r#"{"steps": [
+      {"content": "", "tool_calls": [
+        {"tool": "run_command", "args": {"program": "rm", "args": [".env"]}},
+        {"tool": "run_command", "args": {"program": "rm", "args": ["-r", ".git"]}}
+      ]},
+      {"content": "done"}
+    ]}"#;
+    let report = run(&fx, &mut opened, script, 0.8, ROLES);
+    assert_eq!(report.stats.commands, 2, "{report:?}");
+    assert!(!fx.ws.join(".env").exists());
+    assert!(!fx.ws.join(".git").exists());
+    opened.mediator.rollback_to(1).unwrap();
+    assert_eq!(tree_state(&fx.ws), initial);
 }
 
 /// Spec §16.4 durability: kill the backend mid-turn; a valid checkpoint and
@@ -500,6 +652,14 @@ fn kill_mid_turn_leaves_valid_checkpoint_and_resumes() {
     assert_eq!(latest.turn, 1, "sandbox refusals: {refused:?}");
     assert!(AuditLog::verify(&audit).is_ok());
     assert!(ok.iter().all(|c| c.turn == 1));
+    // No partial snapshot: every ref resolves to a complete, hash-valid
+    // snapshot, and the turn-2 snapshot (taken before the command) exists.
+    {
+        let store = anchor_snapshot::Store::open(&fx.state().snapshots).unwrap();
+        let v = anchor_snapshot::verify(&store).unwrap();
+        assert!(v.ok(), "{:?}", v.errors);
+        assert_eq!(store.list_refs("turns").unwrap().len(), 1);
+    }
 
     // Resume in a fresh session.
     let mut opened = open(&fx, true, ResumeChoice::FreshSession);

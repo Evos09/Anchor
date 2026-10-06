@@ -28,7 +28,9 @@ USAGE:
   anchor audit query  --workspace DIR [--kind KIND]
   anchor policy check FILE
   anchor checkpoint list --workspace DIR
-  anchor rollback --workspace DIR --turn N [--yes]
+  anchor rollback --workspace DIR (--turn N | --snapshot REF|ID) [--yes]
+  anchor snapshot list|create|verify --workspace DIR
+  anchor snapshot gc --workspace DIR [--keep N]
   anchor mark-not-append-only --workspace DIR PATH
   anchor state-dir --workspace DIR
   anchor detect-local [--agent PATH]
@@ -246,14 +248,61 @@ fn cmd_checkpoint(a: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_rollback(a: &Args) -> Result<ExitCode, String> {
+fn open_cli(a: &Args) -> Result<anchor_backend::Opened, String> {
     let ws = PathBuf::from(a.need("--workspace")?);
-    let turn: u64 = a
-        .need("--turn")?
-        .parse()
-        .map_err(|e| format!("--turn: {e}"))?;
+    let opened =
+        open_workspace(&ws, None, Box::new(Terminal), vec![]).map_err(|e| e.to_string())?;
+    if let Some(r) = &opened.recovered {
+        eprintln!(
+            "anchor: finished an interrupted restore: the workspace is back to its state before it ({} operation(s))",
+            r.ops.len()
+        );
+    }
+    Ok(opened)
+}
+
+/// A snapshot named by ref (`turns/0000000003`, `HEAD`) or full id.
+fn resolve_snapshot(
+    store: &anchor_snapshot::Store,
+    s: &str,
+) -> Result<anchor_snapshot::Id, String> {
+    if let Some(id) = anchor_snapshot::Id::parse(s) {
+        return Ok(id);
+    }
+    store
+        .get_ref(s)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no snapshot named {s:?}"))
+}
+
+fn cmd_rollback(a: &Args) -> Result<ExitCode, String> {
+    let mut opened = open_cli(a)?;
+    let m = &mut opened.mediator;
+    let (target, what) = match (a.get("--turn"), a.get("--snapshot")) {
+        (Some(t), None) => {
+            let turn: u64 = t.parse().map_err(|e| format!("--turn: {e}"))?;
+            (m.snapshot_for_turn(turn)?, format!("before turn {turn}"))
+        }
+        (None, Some(s)) => (resolve_snapshot(m.snapshots(), s)?, format!("snapshot {s}")),
+        _ => return Err("give exactly one of --turn N or --snapshot REF".into()),
+    };
+    let changes = m.preview_restore(&target)?;
+    if changes.is_empty() {
+        println!("the workspace already matches the state {what}");
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!(
+        "Rolling back to the state {what} changes {} path(s):",
+        changes.len()
+    );
+    for c in changes.iter().take(50) {
+        println!("  {c}");
+    }
+    if changes.len() > 50 {
+        println!("  ... and {} more", changes.len() - 50);
+    }
     if !a.has("--yes") {
-        eprint!("Roll back every change from turn {turn} onward? [y/N] ");
+        eprint!("Proceed? The current state is kept and can be restored. [y/N] ");
         let mut s = String::new();
         let _ = std::io::stdin().read_line(&mut s);
         if s.trim() != "y" {
@@ -261,24 +310,98 @@ fn cmd_rollback(a: &Args) -> Result<ExitCode, String> {
             return Ok(ExitCode::FAILURE);
         }
     }
-    let mut opened =
-        open_workspace(&ws, None, Box::new(Terminal), vec![]).map_err(|e| e.to_string())?;
-    let log = opened.mediator.rollback_to(turn)?;
+    let log = m.rollback_to_snapshot(&target)?;
     for l in &log {
         println!("{l}");
     }
-    println!("rollback complete: {} change(s) undone", log.len());
+    println!("rollback complete and verified: {} operation(s)", log.len());
     Ok(ExitCode::SUCCESS)
 }
 
+fn cmd_snapshot(a: &Args) -> Result<ExitCode, String> {
+    let opened = open_cli(a)?;
+    let store = opened.mediator.snapshots();
+    match a.pos.get(1).map(String::as_str) {
+        Some("list") => {
+            for (name, id) in store.all_refs().map_err(|e| e.to_string())? {
+                match store.snapshot(&id) {
+                    Ok(s) => println!(
+                        "{name:<24} {}  {:>7} files  {}",
+                        &id.hex()[..16],
+                        s.files,
+                        s.label
+                    ),
+                    Err(e) => println!("{name:<24} {}  INVALID: {e}", &id.hex()[..16]),
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Some("create") => {
+            let ws = opened.mediator.workspace();
+            let r = anchor_snapshot::take_snapshot(
+                store,
+                ws,
+                &anchor_snapshot::SnapshotOptions::default(),
+                &format!(
+                    "manual/{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0)
+                ),
+                "manual",
+            )
+            .map_err(|e| e.to_string())?;
+            println!(
+                "snapshot {} : {} files, {} re-hashed, {} new objects, {} ms",
+                r.id().hex(),
+                r.files,
+                r.hashed_files,
+                r.new_objects,
+                r.total_ms
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Some("verify") => {
+            let v = anchor_snapshot::verify(store).map_err(|e| e.to_string())?;
+            for e in &v.errors {
+                println!("ERROR {e}");
+            }
+            println!(
+                "snapshot store {}: {} refs, {} objects checked",
+                if v.ok() { "OK" } else { "DAMAGED" },
+                v.refs,
+                v.objects
+            );
+            Ok(if v.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Some("gc") => {
+            let keep = a
+                .get("--keep")
+                .map(|k| k.parse::<usize>().map_err(|e| format!("--keep: {e}")))
+                .transpose()?
+                .unwrap_or(200);
+            let g = anchor_snapshot::gc(store, keep, 20).map_err(|e| e.to_string())?;
+            println!(
+                "gc: {} ref(s) pruned, {} object(s) removed, {} bytes freed",
+                g.refs_pruned, g.objects_removed, g.bytes_freed
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        _ => Err("usage: anchor snapshot list|create|verify|gc --workspace DIR".into()),
+    }
+}
+
 fn cmd_mark(a: &Args) -> Result<ExitCode, String> {
-    let ws = PathBuf::from(a.need("--workspace")?);
     let rel = a
         .pos
         .get(1)
         .ok_or("usage: anchor mark-not-append-only --workspace DIR PATH")?;
-    let mut opened =
-        open_workspace(&ws, None, Box::new(Terminal), vec![]).map_err(|e| e.to_string())?;
+    let mut opened = open_cli(a)?;
     let r = opened
         .mediator
         .workspace()
@@ -326,6 +449,7 @@ fn main() -> ExitCode {
         Some("policy") => cmd_policy(&a),
         Some("checkpoint") => cmd_checkpoint(&a),
         Some("rollback") => cmd_rollback(&a),
+        Some("snapshot") => cmd_snapshot(&a),
         Some("mark-not-append-only") => cmd_mark(&a),
         Some("state-dir") => cmd_state_dir(&a),
         Some("detect-local") => cmd_detect(&a),

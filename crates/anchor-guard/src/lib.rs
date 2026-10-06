@@ -85,7 +85,7 @@ pub enum GuardError {
     Config(String),
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceConfig {
     /// Workspace-relative globs of files that are append-only.
@@ -95,6 +95,10 @@ pub struct WorkspaceConfig {
     /// overrode.
     #[serde(default)]
     pub not_append_only: Vec<String>,
+    /// Snapshot settings, interpreted by the backend (ADR-0006). Kept
+    /// opaque here so the guard round-trips it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<toml::Table>,
 }
 
 /// How a write was authorised by the guard.

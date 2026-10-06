@@ -12,12 +12,10 @@ use anchor_policy::{AuditLog, Engine};
 
 pub mod interact;
 pub mod mediator;
-pub mod preimage;
 pub mod session;
 
 use interact::Interaction;
 use mediator::Mediator;
-use preimage::PreimageStore;
 
 /// The policy shipped with Anchor; copied into a workspace on first use.
 pub const DEFAULT_POLICY: &str = include_str!("../../../config/policy.default.toml");
@@ -34,7 +32,7 @@ pub struct StatePaths {
     pub audit: PathBuf,
     pub workspace_config: PathBuf,
     pub checkpoints: PathBuf,
-    pub preimages: PathBuf,
+    pub snapshots: PathBuf,
 }
 
 /// Environment override for the state base directory.
@@ -78,7 +76,7 @@ impl StatePaths {
             audit: dir.join("audit.jsonl"),
             workspace_config: dir.join("workspace.toml"),
             checkpoints: dir.join("checkpoints"),
-            preimages: dir.join("preimages"),
+            snapshots: dir.join("snapshots"),
             dir,
         }
     }
@@ -137,8 +135,12 @@ pub enum OpenError {
     Audit(#[from] anchor_policy::AuditError),
     #[error("guard: {0}")]
     Guard(#[from] anchor_guard::GuardError),
-    #[error("pre-image store: {0}")]
-    Preimage(#[from] preimage::PreimageError),
+    #[error("snapshot store: {0}")]
+    Snapshot(#[from] anchor_snapshot::Error),
+    #[error("workspace.toml [snapshot]: {0}")]
+    SnapshotConfig(String),
+    #[error("an interrupted restore could not be recovered; refusing to open: {0}")]
+    Recovery(String),
     #[error("checkpoints: {0}")]
     Checkpoint(#[from] anchor_checkpoint::CheckpointError),
     #[error(
@@ -151,6 +153,8 @@ pub struct Opened {
     pub paths: StatePaths,
     pub mediator: Mediator,
     pub checkpoints: CheckpointStore,
+    /// Set if opening finished an interrupted restore.
+    pub recovered: Option<anchor_snapshot::RestoreReport>,
 }
 
 impl std::fmt::Debug for Opened {
@@ -169,7 +173,8 @@ pub fn home_dir() -> PathBuf {
 
 /// Open a workspace with the default state location: canonical root, state
 /// directory, policy (installing the default if none exists), audit log,
-/// guard, pre-image and checkpoint stores.
+/// guard, snapshot and checkpoint stores. Finishes any interrupted restore
+/// first.
 pub fn open_workspace(
     root: &Path,
     policy_override: Option<&Path>,
@@ -212,23 +217,85 @@ pub fn open_workspace_in(
     let mut engine = Engine::from_file(&policy_path, &home_dir(), audit)?;
     engine.protect(paths.dir.clone());
     let guard = Guard::load(&paths.workspace_config)?;
-    let preimages = PreimageStore::open(&paths.preimages)?;
+    let snap = SnapshotConfig::load(&paths.workspace_config, &ws)?;
+    let snapshots = anchor_snapshot::Store::open(&paths.snapshots)?;
     let checkpoints = CheckpointStore::open(&paths.checkpoints)?;
     let path_var = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
-    let mediator = Mediator::new(
+    let mut mediator = Mediator::new(
         ws,
         engine,
         guard,
-        preimages,
+        snapshots,
+        snap.options,
+        snap.keep_turns,
         interact,
         path_var,
         exec_read_only,
     );
+    // A restore killed part-way must be undone before anything else
+    // touches the workspace (spec §5.5(d)).
+    let recovered = mediator.recover().map_err(OpenError::Recovery)?;
     Ok(Opened {
         paths,
         mediator,
         checkpoints,
+        recovered,
     })
+}
+
+/// `[snapshot]` in `workspace.toml`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotSection {
+    /// Workspace-relative paths left out of snapshots (and so never
+    /// restored).
+    #[serde(default)]
+    exclude: Vec<String>,
+    max_files: Option<usize>,
+    max_file_mb: Option<u64>,
+    keep_turns: Option<usize>,
+}
+
+struct SnapshotConfig {
+    options: anchor_snapshot::SnapshotOptions,
+    keep_turns: usize,
+}
+
+impl SnapshotConfig {
+    fn load(path: &Path, ws: &Workspace) -> Result<Self, OpenError> {
+        let bad = |m: String| OpenError::SnapshotConfig(m);
+        let section: SnapshotSection = match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let table: toml::Table = toml::from_str(&text).map_err(|e| bad(e.to_string()))?;
+                match table.get("snapshot") {
+                    Some(v) => v.clone().try_into().map_err(|e| bad(format!("{e}")))?,
+                    None => SnapshotSection::default(),
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => SnapshotSection::default(),
+            Err(e) => return Err(e.into()),
+        };
+        let mut options = anchor_snapshot::SnapshotOptions::default();
+        for e in &section.exclude {
+            let rel = ws
+                .confine(e)
+                .map_err(|err| bad(format!("exclude {e:?}: {err}")))?;
+            if rel.as_os_str().is_empty() {
+                return Err(bad("exclude must not be the whole workspace".into()));
+            }
+            options.exclude.push(rel);
+        }
+        if let Some(n) = section.max_files {
+            options.max_entries = n;
+        }
+        if let Some(mb) = section.max_file_mb {
+            options.max_file_bytes = mb << 20;
+        }
+        Ok(SnapshotConfig {
+            options,
+            keep_turns: section.keep_turns.unwrap_or(200).max(1),
+        })
+    }
 }
 
 /// Default read-only view for agent commands: system directories plus every

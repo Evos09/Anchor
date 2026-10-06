@@ -69,6 +69,7 @@ fn marker_and_explicit_config() {
     let cfg = WorkspaceConfig {
         append_only: vec!["logs/*.md".into()],
         not_append_only: vec![],
+        snapshot: None,
     };
     let g = Guard::with_config(&d.path().join("w.toml"), cfg).unwrap();
     assert_eq!(
