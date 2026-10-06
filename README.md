@@ -40,7 +40,8 @@ Every tool call the agent makes goes through this pipeline in the backend:
 | `anchor-snapshot` | Content-addressed, chunked snapshots; journaled, verified restore; diff / merge3 | §5.5 |
 | `anchor-runtime` | `anchor-agent`: agent loop, deterministic router, OpenAI-compatible + mock providers | §3.7, §9 |
 | `anchor-hub` | Coordination Hub: SQLite shared state, claims, message bus, permissions, audit anchoring; MCP 2026-07-28 and A2A 1.0 endpoints | §6 |
-| `anchor-backend` | `anchor`: mediator, session supervisor, rollback, isolated workspaces, merge queue, team runner, CLI | §3.2, §7 |
+| `anchor-verify` | Verification logic: unittest and coverage parsing, claim resolution, the rule reviewer, the merge decision and feedback | §8 |
+| `anchor-backend` | `anchor`: mediator, session supervisor, rollback, isolated workspaces, merge queue, team runner, verification gate, seeded-bug harness, CLI | §3.2, §7, §8 |
 
 ## Try it
 
@@ -107,6 +108,28 @@ claimed (ADR-0007). External agents connect with
 `anchor hub agent add` (prints a token) and `anchor hub serve` (MCP and A2A
 on 127.0.0.1, ADR-0004).
 
+### Verified merges and the seeded-bug harness (Phase 5)
+
+[`examples/verify`](examples/verify/README.md) is a team whose scripted
+executor ships a bug:
+
+1. Verification rejects it with structured feedback: the failing test,
+   the command output and the diff. Verification here means the build,
+   test and coverage commands the user put in `[verify]`, run on the merge
+   candidate in a sandbox, then a reviewer of another model family.
+2. The repair attempt fixes the bug and merges.
+3. Every command's output and every decision is stored as Hub evidence
+   (`anchor hub artifacts`).
+
+```sh
+./target/debug/anchor eval run --corpus examples/eval/corpus             # rule baseline
+./target/debug/anchor eval run --corpus examples/eval/corpus --reviewer oracle
+```
+
+The harness checks every seeded bug (48, in 12 tasks) with the same gate
+and reports how many would merge, overall and per bug category
+([results](docs/benchmarks/reviewer.md)).
+
 For real models, copy `config/roles.example.toml`. Point it at a local
 OpenAI-compatible server (`anchor detect-local`) and/or a hosted API with
 your own key (`api_key_env`).
@@ -114,7 +137,7 @@ your own key (`api_key_env`).
 ## Tests
 
 ```sh
-cargo test --workspace                       # 184 tests on Linux, including the attack suites
+cargo test --workspace                       # 231 tests on Linux, including the attack suites
 cargo run --release -p anchor-snapshot --example bench   # 100k-file snapshot benchmark
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check                             # advisories, licenses, bans, sources
@@ -171,6 +194,27 @@ every §11 threat to its test and its per-platform status.
     - messages persisting across restart;
     - the Threat 8 rogue-agent suite.
 
+- Phase 5, the verification pipeline (ADR-0024). Verified locally on
+  Linux; the confirming CI run is pending.
+  - **Deterministic Tester:** build, test and coverage commands from the
+    user's `[verify]`, sandboxed.
+  - **Claims and evidence:** claims resolved to evidence, and claims
+    without evidence rejected automatically.
+  - **Hard rules:** protected tests, no test regressions, and spoofed-exit
+    and stdlib-shadowing detection.
+  - **Reviewers:** the rule baseline, or a model reviewer of another
+    family. The family check runs at start and again on what the review
+    session actually ran on.
+  - **Evidence:** Hub evidence for every check.
+  - **Self-repair:** bounded, with structured feedback.
+  - **Gate behaviour:** runs without the store lock, re-verifies when main
+    drifts, and fails closed on Windows.
+  - **Seeded-bug harness:** the rule baseline lets 15 of 48 bugs through
+    (FN 31.2%: every semantic and vacuous-test bug) and rejects no correct
+    change ([benchmark](docs/benchmarks/reviewer.md)).
+  - **Done-when tests:** `crates/anchor-backend/tests/verify.rs` and
+    `tests/eval.rs`.
+
 **Known platform gaps:**
 
 - Windows: agent commands refuse to run (no AppContainer sandbox yet), and
@@ -190,9 +234,24 @@ every §11 threat to its test and its per-platform status.
   normal user. As root, commands run as `nobody` and cannot enter the
   0700 isolated directory.
 
+**Phase 5 limits:**
+
+- **LLM reviewer not measured.** Its false-negative rate, the §8.5 stop
+  decision, the launch roster (ADR-0001) and the freeze of the verifier
+  interface (ADR-0009) all wait for a model key. Only the plumbing is
+  tested, with scripted reviewers.
+- **Python only.** The corpus and the rule reviewer's coverage parsing are
+  for Python (unittest, trace). Other languages can configure their own
+  commands, but get no line coverage.
+- **Results can be forged.** Test results come from the process that runs
+  the code under test, so that code can forge them beyond the checks above
+  (ADR-0024, residual risks).
+- **Pipeline completion not measured.** Completion with real executors
+  (§16.3) needs a model; in review-only mode, every correct solution is
+  approved.
+
 **Not started (later phases):**
 
-- Verification pipeline and seeded-bug harness (Phase 5).
 - Desktop UI (Phase 6).
 - General seccomp syscall filter, Windows sandbox, external audit (Phase 7).
 

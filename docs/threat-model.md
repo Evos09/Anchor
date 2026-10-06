@@ -75,6 +75,51 @@ legend:
 | Claims are checked per file | `new_directories_are_checked_file_by_file` | ✅ |
 | MCP and A2A conformance | `mcp_discover_list_and_call_conform_to_2026_07_28`, `mcp_protocol_errors`, `a2a_card_send_and_tasks` | ✅ |
 
+## §8 verification pipeline (Phase 5)
+
+Tests are in `crates/anchor-backend/tests/verify.rs` and `tests/eval.rs`.
+They use real commands (Python unittest and trace) in the sandbox, as root
+in CI containers (commands run as uid 65534). Design: ADR-0024.
+
+| Requirement / threat | Test | Status |
+|---|---|---|
+| The pipeline refuses to start if executor and reviewer share a family | `pipeline_refuses_same_family`: same primary family, or overlap only through a fallback | ✅ Linux (local) · CI pending |
+| | `reviewer_falling_back_into_executor_family_is_refused` | ✅ Linux (local) · CI pending |
+| | `verdicts_from_an_executor_family_are_refused`: a session that fell back mid-review | ✅ Linux (local) · CI pending |
+| A failing build does not merge | `failing_build_does_not_merge` | ✅ Linux (local) · CI pending |
+| Failing tests do not merge | `failing_tests_do_not_merge`, with structured feedback (failing test, hunks) | ✅ Linux (local) · CI pending |
+| A failed review does not merge | `refuted_claim_does_not_merge` (mock model reviewer) | ✅ Linux (local) · CI pending |
+| | `uncovered_change_is_not_supported` (rule reviewer) | ✅ Linux (local) · CI pending |
+| A claim without evidence is rejected automatically (§8.2(b)) | `claim_without_evidence_rejected_automatically` | ✅ Linux (local) · CI pending |
+| Test tampering | `tampered_tests_rejected`: protected tests edited | ✅ Linux (local) · CI pending |
+| | `regressed_test_rejected`: a passing test deleted, with no protected paths | ✅ Linux (local) · CI pending |
+| Spoofed success (exit 0 before the tests can fail) | `spoofed_exit_rejected` (`tests_inconclusive`) | ✅ Linux (local) · CI pending |
+| Stdlib shadowing (`unittest.py` in the workspace) | `stdlib_shadowing_rejected` | ✅ Linux (local) · CI pending |
+| Verification commands are confined | `verification_commands_cannot_write_outside_scratch`; `verified_change_merges_with_evidence` (the test log records `fs_confined` and the network-isolation method) | ✅ Linux (local) · CI pending |
+| Evidence is durable, hashed and backend-only | `verified_change_merges_with_evidence`, `evidence_is_backend_only_hashed_and_immutable` | ✅ Linux (local) · CI pending |
+| §8.2(c) self-repair with feedback, bounded | `self_repair_merges_on_second_attempt` (the feedback is in the repair instruction) | ✅ Linux (local) · CI pending |
+| | `retries_are_bounded`, `user_decline_is_not_retried` | ✅ Linux (local) · CI pending |
+| What is applied is what was verified | `drift_reverifies_candidate`: main edited mid-check; the applied tree is the one verified last | ✅ Linux (local) · CI pending |
+| | `crash_after_gate_reverifies_on_recover`: a child `anchor team run` killed mid-apply; re-verified before applying | ✅ Linux (local) · CI pending |
+| Verification never stalls other agents | `slow_gate_does_not_block_other_agents`: the store stays available during a 1.5 s check | ✅ Linux (local) · CI pending |
+| Unverified merges are explicit | `unverified_team_needs_explicit_flag`; `merge_unverified` audited | ✅ Linux (local) · CI pending |
+| Windows fails closed | `verify_gate_fails_closed_on_windows` | CI pending |
+| §8.5 reviewer false-negative rate measured | `seeded_bug_harness_measures_reviewers`: accept-all lets through exactly what reaches review, oracle 0%, rule baseline matrix locked | ✅ Linux (local) · CI pending |
+| | `corpus_ground_truth_holds`, `eval_cli_with_mock_model_reviewer`; results in the [benchmark](benchmarks/reviewer.md) | ✅ Linux (local) · CI pending |
+
+**Residual risks** (ADR-0024):
+
+- code under test can still forge results in its own process, beyond
+  the checks above;
+- coverage measures execution, not correctness: vacuous tests and
+  semantic bugs pass the rule baseline (measured: FN 100% in both
+  categories);
+- configured commands read workspace files an agent can change, unless
+  those files are protected.
+
+**LLM reviewer:** its false-negative rate is not yet measured, pending a
+model key.
+
 ## Phase 2 "verified by instrumentation"
 
 - *No filesystem mutation bypasses the permission engine*: mutations
@@ -118,5 +163,5 @@ legend:
 
 ## Out of scope for this push
 
-External audit (§11.2), seccomp, Windows sandbox, and verification-pipeline
-threats.
+External audit (§11.2), seccomp, the Windows sandbox, and the LLM
+reviewer's measured false-negative rate (pending a model key).

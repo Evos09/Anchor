@@ -34,6 +34,14 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace --no-fail-fast
+      - name: Seeded-bug harness (spec §8.5)
+        run: |
+          # The rule baseline on the whole corpus, reported in the job
+          # summary; the oracle must let no bug through (harness self-check).
+          cargo run -q -p anchor-backend --bin anchor -- eval run \
+            --corpus examples/eval/corpus --reviewer rule --md "$GITHUB_STEP_SUMMARY"
+          cargo run -q -p anchor-backend --bin anchor -- eval run \
+            --corpus examples/eval/corpus --reviewer oracle --max-fn-rate 0
       - name: Type-check other platforms
         run: |
           rustup target add x86_64-pc-windows-gnu aarch64-apple-darwin

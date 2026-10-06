@@ -7,7 +7,8 @@
 
 The spec forbids trusting marketing or third-party benchmark tables. It
 requires that launch models be chosen by measuring them on our own eval
-harness (§16.3), which does not exist yet (Phase 5).
+harness (§16.3). The harness exists since Phase 5 (`anchor eval run`,
+ADR-0024); measuring candidate models needs API keys, which are pending.
 
 ## Decision
 

@@ -19,6 +19,16 @@
 - The runtime receives everything it needs (roles config, mock script,
   resume checkpoint) inside the `Task` frame, because it cannot read files.
 
+## Versions
+
+| Version | Phase | Change |
+|---|---|---|
+| 1 | 1 | Initial protocol |
+| 2 | 4 | Hub tools and identity (`HubInfo`, ADR-0023) |
+| 3 | 5 | `Done.claims` and the runtime-local `submit_claims` tool; review tasks (`Task.review`, no workspace tools, `submit_verdicts`, `Message::Verdicts`) (ADR-0024) |
+
+A peer of another version is refused at the handshake.
+
 ## Alternatives rejected
 
 - *gRPC / Cap'n Proto*: schema tooling we do not need for a two-party,

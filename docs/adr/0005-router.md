@@ -31,3 +31,7 @@ audits it.
 Quantify the cost-control benefit on our own workload once the eval harness
 exists (§16.3). Also pending: the pre-operation projected-cost estimate
 (§9.5) and the per-agent breakdown once multiple agents exist (Phase 4).
+
+(Phase 5: the harness exists (`anchor eval run`, ADR-0024) and reports
+cost per task for model reviewers; executor cost measurements await
+model keys.)

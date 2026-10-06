@@ -5,6 +5,9 @@
 //! unittest and trace) in the sandbox.
 
 #![allow(clippy::unwrap_used)]
+// Most of these tests run commands, which only Unix sandboxes; on Windows
+// the gate fails closed and the helpers go unused.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_macros))]
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -918,5 +921,155 @@ fn reviewer_falling_back_into_executor_family_is_refused() {
     let interact = team::Shared::wrap(Box::new(Scripted::new(true, ResumeChoice::FreshSession)));
     let e = team::run(&mut opened, &team, opts, interact).unwrap_err();
     assert!(e.contains("family"), "{e}");
+    assert_eq!(fx.read("calc.py"), CALC);
+}
+
+/// A child `anchor team run` with [verify] dies part-way through applying
+/// a verified merge. Reopening undoes the half-applied merge; the queue
+/// re-queues it and verifies it again (with the claims persisted at
+/// submit) before applying it.
+#[cfg(unix)]
+#[test]
+fn crash_after_gate_reverifies_on_recover() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let dir = fx.base.join("team");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("roles.toml"), roles_a()).unwrap();
+    std::fs::write(dir.join("alpha.json"), executor_script(GOOD_CALC)).unwrap();
+    std::fs::write(
+        dir.join("team.toml"),
+        format!(
+            "[[agent]]\nname = \"alpha\"\nroles = \"roles.toml\"\ninstruction = \"clamp\"\n\
+             claim_within = [\"calc.py\", \"tests/\"]\nmock_script = \"alpha.json\"\n\n{}",
+            include_str!("../../../examples/eval/corpus/corpus.toml")
+        ),
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_anchor"))
+        .args(["team", "run", "--workspace"])
+        .arg(&fx.ws)
+        .arg("--team")
+        .arg(dir.join("team.toml"))
+        .args(["--auto-approve", "--auto-merge", "--agent"])
+        .arg(agent_bin())
+        .env("ANCHOR_STATE_DIR", fx.state_base())
+        .env("ANCHOR_TEST_FAULT", "merge:1")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "the child must die mid-merge: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let mut opened = fx.open();
+    assert!(
+        opened.recovered.is_some(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fx.read("calc.py"), CALC);
+    let hub = hub_of(&opened);
+    let g = gate(&fx, &opened, spec());
+    let mut q = MergeQueue::new(hub.clone(), &mut opened.mediator, Box::new(g), true);
+    let queued = q.recover().unwrap();
+    assert_eq!(queued.len(), 1);
+    let o = q.process(queued[0]).unwrap();
+    assert!(o.is_merged(), "{o:?}");
+    drop(q);
+    assert_eq!(fx.read("calc.py"), GOOD_CALC);
+    let audit = anchor_policy::AuditLog::read_entries(&opened.paths.audit).unwrap();
+    // Verified once before the crash and again before the apply that held.
+    assert_eq!(
+        audit.iter().filter(|e| e.kind == "merge_verified").count(),
+        2
+    );
+    assert!(hub.verify().unwrap().ok());
+    anchor_policy::AuditLog::verify(&opened.paths.audit).unwrap();
+}
+
+/// A verification that takes a while never holds the snapshot store: other
+/// agents keep snapshotting and writing meanwhile.
+#[cfg(unix)]
+#[test]
+fn slow_gate_does_not_block_other_agents() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = fx.open();
+    let hub = hub_of(&opened);
+    let mut s = spec();
+    // A test command that takes ~1.5 s.
+    s.build = Some(vec![
+        "python3".into(),
+        "-I".into(),
+        "-c".into(),
+        "import time; time.sleep(1.5)".into(),
+    ]);
+    let g = gate(&fx, &opened, s);
+    let store = opened.mediator.shared_store();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe = {
+        let (store, stop) = (store.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut worst = std::time::Duration::ZERO;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let t = std::time::Instant::now();
+                drop(lock_store(&store));
+                worst = worst.max(t.elapsed());
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            worst
+        })
+    };
+    let mut q = MergeQueue::new(hub, &mut opened.mediator, Box::new(g), true);
+    let t = std::time::Instant::now();
+    let o = submit_change(
+        &mut q,
+        &fx,
+        |r| {
+            write(r, "calc.py", GOOD_CALC);
+            write(r, "tests/test_clamp.py", TEST_CLAMP);
+        },
+        &[clamp_claim()],
+    );
+    let took = t.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let worst = probe.join().unwrap();
+    assert!(o.is_merged(), "{o:?}");
+    assert!(took >= std::time::Duration::from_millis(1500));
+    assert!(
+        worst < std::time::Duration::from_millis(1000),
+        "the store was held for {worst:?} during a {took:?} merge"
+    );
+}
+
+/// A team without [verify] needs an explicit --unverified.
+#[test]
+fn unverified_team_needs_explicit_flag() {
+    let fx = fixture();
+    let dir = fx.base.join("team");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("roles.toml"), roles_a()).unwrap();
+    std::fs::write(
+        dir.join("team.toml"),
+        "[[agent]]\nname = \"alpha\"\nroles = \"roles.toml\"\ninstruction = \"x\"\n\
+         claim_within = [\"calc.py\"]\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_anchor"))
+        .args(["team", "run", "--workspace"])
+        .arg(&fx.ws)
+        .arg("--team")
+        .arg(dir.join("team.toml"))
+        .arg("--auto-approve")
+        .env("ANCHOR_STATE_DIR", fx.state_base())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--unverified"), "{err}");
     assert_eq!(fx.read("calc.py"), CALC);
 }

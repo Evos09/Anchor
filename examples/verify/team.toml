@@ -1,0 +1,23 @@
+# A verified team run (spec §8): the scripted executor ships a bug, the
+# verification gate rejects it with structured feedback, and the repair
+# attempt fixes it and merges. See README.md in this directory.
+schedule = "sequential"
+
+[[agent]]
+name = "alpha"
+roles = "../demo/roles.mock.toml"
+instruction = "Make clamp(x, lo, hi) in calc.py limit x to [lo, hi], with tests."
+claim_within = ["calc.py", "tests/"]
+mock_script = "alpha.json"
+repair_mock_scripts = ["alpha-fix.json"]
+
+[verify]
+build = ["python3", "-I", "-m", "compileall", "-q", "."]
+test = ["python3", "-I", "-m", "unittest", "discover", "-v"]
+coverage = ["python3", "-I", "-m", "trace", "--count", "--missing",
+            "--coverdir", "{coverdir}",
+            "--ignore-dir", "$prefix", "--ignore-dir", "$exec_prefix",
+            "--module", "unittest", "discover"]
+protected = ["tests/**"]
+max_attempts = 3
+reviewer = "rule"
