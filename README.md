@@ -75,7 +75,7 @@ your own key (`api_key_env`).
 ## Tests
 
 ```sh
-cargo test --workspace                       # 113 tests, including the attack suites
+cargo test --workspace                       # 115 tests on Linux, including the attack suites
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check                             # advisories, licenses, bans, sources
 ```
@@ -85,21 +85,28 @@ every §11 threat to its test and its per-platform status.
 
 ## What is and isn't done
 
-**Done and verified on Linux (kernel 6.18):**
+**Done and verified in blocking CI on Linux, macOS and Windows**
+(per-platform detail in [`docs/threat-model.md`](docs/threat-model.md)):
 
-- §5.1–5.4 with their attack suites.
-- Threats 1–7 and 9 (interim store).
+- §5.1–5.4 with their attack suites. The symlink and hardlink attacks run
+  on Linux and macOS; case and Unicode collisions on macOS and Windows.
+- Threats 1–7 and 9 (interim store) on Linux. On stock Ubuntu ≥ 23.10,
+  where user namespaces are restricted, network denial falls back to a
+  seccomp socket filter. macOS covers the same threats except memory limits
+  and a direct egress test.
 - Phase 2's instrumentation criteria.
-- The runtime as a separate, Landlock-confined process.
+- The runtime as a separate, Landlock-confined process (Linux).
 - The versioned, validated protocol.
 - Kill-mid-turn recovery.
 
-**Written but not yet observed passing:**
+**Known platform gaps:**
 
-- The macOS and Windows back ends: type-checked, with CI jobs non-blocking
-  until validated.
-- The OpenAI-compatible adapter against a live endpoint: there was no local
-  server or API key in the build environment.
+- Windows: agent commands refuse to run (no AppContainer sandbox yet), and
+  there are no junction/reparse-point attack tests yet.
+- macOS: memory is not limited (`RLIMIT_AS` is unsupported), and Seatbelt
+  network/read confinement has no direct test yet.
+- The OpenAI-compatible adapter has not been run against a live endpoint:
+  there was no local server or API key in the build environment.
 
 **Not started (later phases):**
 
@@ -107,7 +114,7 @@ every §11 threat to its test and its per-platform status.
 - Coordination Hub, MCP/A2A, worktrees (Phase 4).
 - Verification pipeline and seeded-bug harness (Phase 5).
 - Desktop UI (Phase 6).
-- Seccomp, Windows sandbox, external audit (Phase 7).
+- General seccomp syscall filter, Windows sandbox, external audit (Phase 7).
 
 The architecture decisions, including those still pending evaluation, are
 in [`docs/adr/`](docs/adr/0000-adr-process.md). Dependency vetting is in

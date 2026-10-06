@@ -46,17 +46,14 @@ jobs:
         run: cargo deny check
 
   other-platforms:
-    # The macOS and Windows back ends of anchor-fs/anchor-exec are written and
-    # type-checked but have not yet been observed passing the attack suite
-    # (docs/threat-model.md, ADR-0013). These jobs run the full suite and
-    # report, but do not block until a first green run validates them.
-    name: ${{ matrix.os }} (validation, non-blocking)
+    # Blocking since CI run 37448154072, the first in which the macOS and
+    # Windows back ends passed the suite (docs/threat-model.md).
+    name: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - name: Toolchain

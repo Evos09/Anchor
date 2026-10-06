@@ -56,6 +56,11 @@ network is denied; writes allowed only under the workspace; reads of
 still present. App Sandbox (needed for App Store distribution) is a separate
 decision for the commercial shell.
 
+Resource limits use the same rlimits as Linux, except `RLIMIT_AS`:
+macOS rejects lowering it (`EINVAL`, found by CI run 37447560545), so
+memory is **not** limited on macOS. A per-process memory cap would need a
+supervisor that polls and kills, which is tracked for Phase 7.
+
 ### Windows (not implemented — fails closed)
 
 A command that requires network or filesystem confinement returns
