@@ -1,0 +1,19 @@
+[package]
+name = "anchor-exec"
+description = "Argument-vector process runner with resource limits and network isolation (threats 4, 6, 7)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,67 @@
+# Anchor default permission policy (format: ADR-0015, evaluation: ADR-0011).
+#
+# Evaluation order:
+#   1. Capability floor (built in, not editable here).
+#   2. Deny overrides: if ANY deny rule matches, the request is denied.
+#   3. First match: otherwise the first matching rule, in file order, wins.
+#   4. [default].
+#
+# Rules match on structured request fields only. Every condition in a rule's
+# `match` table must hold. Paths are canonical (symlinks resolved).
+# A leading `~/` in target_matches expands to the user's home directory.
+
+version = 1
+
+[default]
+action = "prompt"
+
+# --- Deny rules (always win) -------------------------------------------------
+
+[[rule]]
+name = "deny_credentials"
+action = "deny"
+match = { target_matches = [
+  "~/.ssh/**", "~/.aws/**", "~/.config/gh/**", "~/.gnupg/**",
+  "~/.docker/config.json", "~/.kube/**", "~/.netrc", "~/.npmrc", "~/.pypirc",
+  "**/keychain*", "**/Library/Keychains/**",
+  "~/.mozilla/**", "~/.config/google-chrome/**", "~/.config/chromium/**",
+  "~/Library/Application Support/Google/Chrome/**",
+  "~/Library/Application Support/Firefox/**",
+] }
+
+[[rule]]
+name = "deny_file_tools_outside_workspace"
+action = "deny"
+match = { tool = ["read_file", "write_file", "edit_file", "list_dir", "glob", "grep"], target_outside = "workspace" }
+
+[[rule]]
+name = "deny_git_internals_mutation"
+action = "deny"
+match = { operation = ["create", "write", "append", "edit"], target_matches = ["**/.git/**"] }
+
+# --- Allow / prompt rules (first match wins) ---------------------------------
+
+[[rule]]
+name = "allow_reads_in_workspace"
+action = "allow"
+match = { tool = ["read_file", "list_dir", "glob", "grep"], target_within = "workspace" }
+
+[[rule]]
+name = "allow_append_to_append_only"
+action = "allow"
+match = { tool = ["edit_file"], operation = ["append"], append_only = true, target_within = "workspace" }
+
+[[rule]]
+name = "prompt_on_write"
+action = "prompt"
+match = { tool = ["write_file", "edit_file"], target_within = "workspace" }
+
+[[rule]]
+name = "prompt_on_network_commands"
+action = "prompt"
+match = { tool = ["run_command"], network = true }
+
+[[rule]]
+name = "prompt_on_shell_interpreters"
+action = "prompt"
+match = { program = ["sh", "bash", "zsh", "dash", "fish", "ksh", "csh", "tcsh", "pwsh", "powershell.exe", "cmd.exe"] }

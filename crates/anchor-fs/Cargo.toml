@@ -1,0 +1,27 @@
+[package]
+name = "anchor-fs"
+description = "Canonical path resolution and TOCTOU-safe, descriptor-based file operations (spec 5.1)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anchor-policy.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+unicode-normalization.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_IO"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

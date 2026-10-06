@@ -1,0 +1,33 @@
+[package]
+name = "anchor-backend"
+description = "Layer 1 backend: the sole OS authority. Mediates every tool call through path resolution, policy, guard and durability."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "anchor"
+path = "src/main.rs"
+
+[dependencies]
+anchor-protocol.workspace = true
+anchor-fs.workspace = true
+anchor-policy.workspace = true
+anchor-guard.workspace = true
+anchor-checkpoint.workspace = true
+anchor-exec.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+regex.workspace = true
+globset.workspace = true
+ignore.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

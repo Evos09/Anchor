@@ -1,0 +1,56 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/anchor-protocol",
+    "crates/anchor-fs",
+    "crates/anchor-policy",
+    "crates/anchor-guard",
+    "crates/anchor-checkpoint",
+    "crates/anchor-exec",
+    "crates/anchor-runtime",
+    "crates/anchor-backend",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/evos09/anchor"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Every entry here has a five-step record in docs/deps/ (spec §0).
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.6"
+thiserror = "2.0.21"
+sha2 = "0.11.0"
+regex = "1.13.1"
+globset = "0.4.20"
+ignore = "0.4.33"
+rustix = { version = "1.1.5", features = ["fs", "process", "std"] }
+libc = "0.2.190"
+ureq = "3.4.2"
+landlock = "0.4.7"
+unicode-normalization = "0.1.25"
+windows-sys = "0.61.2"
+tempfile = "3.27.0"
+
+anchor-protocol = { path = "crates/anchor-protocol" }
+anchor-fs = { path = "crates/anchor-fs" }
+anchor-policy = { path = "crates/anchor-policy" }
+anchor-guard = { path = "crates/anchor-guard" }
+anchor-checkpoint = { path = "crates/anchor-checkpoint" }
+anchor-exec = { path = "crates/anchor-exec" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "warn"
+
+[profile.release]
+debug = 1

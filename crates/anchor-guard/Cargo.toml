@@ -1,0 +1,21 @@
+[package]
+name = "anchor-guard"
+description = "Append-only file guard and session read ledger (spec 5.3)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+regex.workspace = true
+globset.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

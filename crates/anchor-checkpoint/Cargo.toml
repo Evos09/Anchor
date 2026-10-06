@@ -1,0 +1,18 @@
+[package]
+name = "anchor-checkpoint"
+description = "Context-window tracking and atomic checkpoint persistence (spec 5.4)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anchor-protocol.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
