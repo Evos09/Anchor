@@ -26,7 +26,9 @@ use interact::Interaction;
 use mediator::Mediator;
 
 /// The policy shipped with Anchor; copied into a workspace on first use.
-pub const DEFAULT_POLICY: &str = include_str!("../../../config/policy.default.toml");
+/// A copy of `config/policy.default.toml`, kept in the crate so it builds
+/// on its own; a test keeps the two identical.
+pub const DEFAULT_POLICY: &str = include_str!("../assets/policy.default.toml");
 
 /// Per-workspace backend state: policy, audit log, checkpoints, the
 /// durability store. It lives **outside** the workspace (ADR-0022): agent

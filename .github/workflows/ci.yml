@@ -68,6 +68,10 @@ jobs:
               verifier check examples/verifier-python/verifier.toml
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Crates build from their packages (release readiness)
+        # Each publishable crate must build from its own .crate file alone;
+        # nothing is published (that waits for the external audit, ADR-0021).
+        run: cargo package --workspace --exclude anchor-sandbox-validation
       - name: Dashboard end to end (spec §14 Phase 6, Chromium)
         working-directory: ui
         run: |

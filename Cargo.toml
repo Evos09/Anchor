@@ -21,6 +21,7 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/evos09/anchor"
+readme = "README.md"
 rust-version = "1.89"
 
 [workspace.dependencies]

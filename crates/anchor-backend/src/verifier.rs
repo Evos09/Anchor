@@ -352,24 +352,25 @@ pub fn with_plugins(
     Ok(Box::new(anchor_verify::Combined::new(all)))
 }
 
-/// The review inputs the conformance check sends, as published in
-/// `docs/verifier/fixtures/` (the same files a plugin author tests with).
+/// The review inputs the conformance check sends: copies of the published
+/// `docs/verifier/fixtures/` (the files a plugin author tests with), kept
+/// in the crate so it builds on its own; a test keeps them identical.
 pub const FIXTURES: &[(&str, &str)] = &[
     (
         "passing",
-        include_str!("../../../docs/verifier/fixtures/passing.json"),
+        include_str!("../assets/verifier-fixtures/passing.json"),
     ),
     (
         "failing-test",
-        include_str!("../../../docs/verifier/fixtures/failing-test.json"),
+        include_str!("../assets/verifier-fixtures/failing-test.json"),
     ),
     (
         "debug-leftover",
-        include_str!("../../../docs/verifier/fixtures/debug-leftover.json"),
+        include_str!("../assets/verifier-fixtures/debug-leftover.json"),
     ),
     (
         "truncated",
-        include_str!("../../../docs/verifier/fixtures/truncated.json"),
+        include_str!("../assets/verifier-fixtures/truncated.json"),
     ),
 ];
 

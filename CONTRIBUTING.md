@@ -103,6 +103,13 @@ Other runs:
 | The seeded-bug harness (§8.5) | `cargo run -p anchor-backend --bin anchor -- eval run --corpus examples/eval/corpus` |
 | The dashboard end to end (Chromium) | `cargo build --workspace --bins`, then in `ui/`: `npx playwright install chromium && npx playwright test` |
 | The snapshot benchmark (§5.5) | `cargo run --release -p anchor-snapshot --example bench -- --files 100000` |
+| Every publishable crate builds from its package alone (CI runs this; nothing is published) | `cargo package --workspace --exclude anchor-sandbox-validation` |
+
+**Files bundled into a crate.** A crate can only embed files inside its own directory, so `anchor-backend/assets/` holds copies of:
+- `config/policy.default.toml`;
+- `docs/verifier/fixtures/`.
+
+Edit the originals, then copy them over. `bundled_copies_match_the_published_files` fails until you do. The dashboard bundle (`ui/dist`) is not in the crate, so a build from the crates.io package serves the notice page. Release binaries are built from the repository.
 
 **Rules for tests:**
 

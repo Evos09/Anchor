@@ -4,6 +4,8 @@ description = "Argument-vector process runner with resource limits and network i
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
 rust-version.workspace = true
 
 [dependencies]

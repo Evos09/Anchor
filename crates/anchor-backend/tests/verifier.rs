@@ -27,6 +27,47 @@ fn runner() -> Runner {
     )
 }
 
+/// The crate builds from its own files (crates.io packages hold nothing
+/// else), so it bundles copies of the published fixtures and the default
+/// policy. They must stay byte-identical to what users and plugin authors
+/// read.
+#[test]
+fn bundled_copies_match_the_published_files() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let pairs = [
+        (
+            "assets/policy.default.toml",
+            "../../config/policy.default.toml",
+        ),
+        (
+            "assets/verifier-fixtures/passing.json",
+            "../../docs/verifier/fixtures/passing.json",
+        ),
+        (
+            "assets/verifier-fixtures/failing-test.json",
+            "../../docs/verifier/fixtures/failing-test.json",
+        ),
+        (
+            "assets/verifier-fixtures/debug-leftover.json",
+            "../../docs/verifier/fixtures/debug-leftover.json",
+        ),
+        (
+            "assets/verifier-fixtures/truncated.json",
+            "../../docs/verifier/fixtures/truncated.json",
+        ),
+    ];
+    for (copy, published) in pairs {
+        let a = std::fs::read(root.join(copy)).unwrap();
+        let b = std::fs::read(root.join(published)).unwrap();
+        assert!(a == b, "{copy} differs from {published}: copy it over");
+    }
+    // Every published fixture is bundled (the checker runs them all).
+    let published = std::fs::read_dir(root.join("../../docs/verifier/fixtures"))
+        .unwrap()
+        .count();
+    assert_eq!(published, anchor_backend::verifier::FIXTURES.len());
+}
+
 /// Done-when (spec §14 Phase 8): a third party can build a verifier plugin
 /// from the docs alone. The example, written that way, passes every
 /// conformance check in the real sandbox.
