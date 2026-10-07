@@ -12,9 +12,9 @@ snapshots undo. An accepted risk weakens one layer, never all of them.
 
 | ID | Sev. | From | Platform | Summary |
 |---|---|---|---|---|
-| AR-1 | Medium | S-5 | Linux < 6.12 | Commands can signal other same-user processes (not Anchor's own) |
+| AR-1 | Medium | S-5, K-1 | Linux < 6.12 | Commands can signal other same-user processes, and backend threads started after the command |
 | AR-2 | Medium | S-7 | all | Limits are per process or per file: disk fill, aggregate memory |
-| AR-3 | Low | S-1 | macOS | With network *allowed*, unix-socket connects are not refused |
+| AR-3 | — | S-1 | macOS | *Closed in round 2 (M-2)* |
 | AR-4 | Medium | V-1 | all | Runner-tampering detection is pattern-based |
 | AR-5 | Low | T-6 | all | Audit-log volume and runtime-reported cost are not bounded |
 | AR-6 | Medium | P-5 | all | A huge number of workspace entries slows or blocks snapshots |
@@ -25,6 +25,9 @@ snapshots undo. An accepted risk weakens one layer, never all of them.
 | AR-11 | Low | P-9 | all | A torn final audit line marks the log corrupt |
 | AR-12 | Low | I-2 | all | One of the two §5.3(a) append-only heuristics is missing |
 | AR-13 | Low | round 2 | Windows | AppContainer ACEs persist on workspace and PATH directories |
+| AR-14 | Medium | F-2..F-13 | Windows | `anchor-fs` hardening beyond the pinned chain |
+| AR-15 | Medium | W-4..W-7, W-11, W-13, W-14 | Windows | Command-runner hygiene |
+| AR-16 | Medium | M-4, M-7..M-9, K-4 | macOS, Linux | Preference reads, executable data roots, rule order |
 
 ---
 
@@ -32,10 +35,13 @@ snapshots undo. An accepted risk weakens one layer, never all of them.
 
 - **Exposure.** On kernels before 6.12 (no Landlock signal scope) a
   confined command can `kill` any other process of the same user, except
-  the ones the seccomp filter protects: the backend, its process group,
-  its session leader and its parent, plus `kill(-1)` and
-  `pidfd_send_signal`. An editor or a shell elsewhere in the session can
-  be killed.
+  the ones the seccomp filter protects. Those are the backend and every
+  thread it has when the command starts, its process group, its session
+  leader, its parent and the parent's threads. `kill(-1)`,
+  `pidfd_send_signal` and `F_SETOWN` are also refused. An editor or a
+  shell elsewhere in the session can be killed. So can a backend thread
+  started while the command runs (round 2 K-1), which takes the backend
+  down; the command itself stays confined and CPU-limited.
 - **Still holds.** The command cannot ptrace, read memory of, or open
   `/proc/<pid>/{mem,environ}` of those processes (Landlock refuses
   cross-domain ptrace access on every supported kernel). Nothing is read
@@ -66,19 +72,12 @@ snapshots undo. An accepted risk weakens one layer, never all of them.
 - **Would close it.** A cgroup v2 leaf (`memory.max`, `pids.max`) where
   delegated; a workspace-size check after each command.
 
-### AR-3: unix sockets on macOS when the network is allowed
+### AR-3: unix sockets on macOS when the network is allowed (closed)
 
-- **Exposure.** A command the user explicitly ran with `network = true`
-  (a prompt, §11 threat 6) gets `(allow network*)`, which includes
-  connecting to pathname unix sockets it can see (Docker, ssh-agent).
-- **Still holds.** The default, network-denied, profile refuses every
-  socket connect (validation suite: "connect to a unix socket outside").
-  File reads remain confined, so socket paths under `$HOME` are not
-  even listable.
-- **Why accepted.** Seatbelt's `remote unix-socket` filter is
-  undocumented; restricting it risks breaking the resolver.
-- **Would close it.** `(deny network-outbound (remote unix-socket))`
-  with an allowlist for `mDNSResponder`, once tested on CI.
+Closed in round 2 (M-2): with the network allowed, the profile permits
+IP connections and the resolver's socket only.
+`seatbelt_closes_unix_sockets_data_volume_and_keychains_macos` and the
+validation suite check it.
 
 ### AR-4: runner-tampering detection is pattern-based (V-1 residual)
 
@@ -198,3 +197,60 @@ snapshots undo. An accepted risk weakens one layer, never all of them.
   no other process holds it.
 - **Would close it.** `anchor workspace forget` removing the ACEs and
   calling `DeleteAppContainerProfile` (ADR-0026).
+
+### AR-14: Windows `anchor-fs` beyond the pinned chain (F-2..F-13)
+
+- **Exposure.**
+  - **F-2:** name comparison uses Unicode lowercasing rather than NTFS's
+    upcase table.
+  - **F-3, F-4, F-8:** the final rename and `ReplaceFileW` find the temp
+    file by path. A process writing in the same (pinned) directory at
+    that instant could make the receipt's hash differ from what lands.
+  - **F-5, F-6:** `readlink` and the scan's readability probe go by path.
+  - **F-7:** lossy conversion of invalid UTF-16 names.
+  - **F-9:** new directories are created by path, then pinned.
+  - **F-10 to F-13:** the change time, 128-bit ReFS ids, a no-op
+    `chmod`, the final-path check skipped for links being deleted, and
+    stream or device names inside the workspace.
+- **Still holds.** Every directory from the root to the parent is pinned,
+  so no operation can leave the workspace. The worst case is an
+  integrity mismatch *inside* the workspace, between two writers that
+  both have access to it, and snapshots record what is actually there.
+- **Would close it.** Rename and create relative to the pinned parent
+  handle (`FileRenameInfo`, `NtCreateFile`), keeping every handle open
+  to the end.
+
+### AR-15: Windows command-runner hygiene (W-4..W-7, W-11, W-13, W-14)
+
+- **Exposure.**
+  - **W-4:** read and execute ACEs are added to PATH directories that may
+    already be readable.
+  - **W-5:** the verify gate's scratch folders would each create a
+    profile. This is not active, because Windows verify still fails
+    closed.
+  - **W-6:** the stdio handles are inheritable for the instant of
+    creation.
+  - **W-7:** the job CPU limit counts user time and reports exit 1816.
+  - **W-11:** stripping `\\?\` can re-normalise a path.
+  - **W-13:** the profile's own `AC` folder persists between runs.
+  - **W-14:** unconfined Windows commands get no job.
+- **Still holds.**
+  - Commands are confined; none of these reaches outside the grants.
+  - W-5 must be fixed before the Windows verify gate is enabled.
+
+### AR-16: macOS preference reads and executable roots, pid 1 (M-4, M-7..M-9, K-4)
+
+- **Exposure.**
+  - **M-4:** `user-preference-read` lets a command read any preference
+    domain through `cfprefsd`. Some applications keep tokens there.
+  - **M-7:** the data roots macOS needs to read are also executable.
+  - **M-8, M-9:** the profiles rely on SBPL's "last rule wins", and they
+    leave metadata reads, `/usr/local` and local IP addresses open.
+  - **K-4:** a same-user pid 1 (inside a container) is not protected;
+    init ignores unhandled signals from inside its namespace.
+- **Still holds.**
+  - The keychain and data-volume denies are tested on macOS CI, which
+    pins the rule-order assumption.
+  - Preference files themselves are not readable.
+- **Would close it.** Narrow `user-preference-read` to the domains
+  toolchains need, once measured on CI.

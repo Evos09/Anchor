@@ -28,7 +28,17 @@ fn spec(program: &str, args: &[&str], network: Network) -> CommandSpec {
 
 #[test]
 fn program_must_be_bare_name() {
-    for bad in ["/bin/sh", "./x", "../x", "a/b", "", "-rf", "a\\b"] {
+    for bad in [
+        "/bin/sh",
+        "./x",
+        "../x",
+        "a/b",
+        "",
+        "-rf",
+        "a\\b",
+        "C:sh",
+        "sh:stream",
+    ] {
         assert!(
             matches!(
                 resolve_program(bad, "/bin"),
@@ -41,6 +51,16 @@ fn program_must_be_bare_name() {
         resolve_program("definitely-not-a-program-xyz", "/bin"),
         Err(ExecError::ProgramNotFound(_))
     ));
+    #[cfg(windows)]
+    for bad in ["cmd.", "cmd ", "x.bat."] {
+        assert!(
+            matches!(
+                resolve_program(bad, "C:\\Windows\\System32"),
+                Err(ExecError::ProgramNotBareName(_))
+            ),
+            "{bad}"
+        );
+    }
     // Relative PATH entries are ignored (no resolution against the cwd).
     assert!(resolve_program("sh", ".:bin").is_err());
 }
@@ -562,8 +582,83 @@ fn seatbelt_profile_denies_by_default() {
         if fs {
             assert!(p.contains("(allow process-exec (subpath"), "{p}");
             assert!(p.contains("Keychains"), "{p}");
+            // Round 2 M-1: the data volume is denied, and last.
+            assert!(p.ends_with(")") && p.contains("(subpath \"/System/Volumes/Data\")"));
+            let last_allow = p.rfind("(allow").unwrap();
+            assert!(p.rfind("/System/Volumes/Data").unwrap() > last_allow, "{p}");
         }
+        // Round 2 M-2: never every network operation (unix sockets).
+        assert!(!p.contains("(allow network*"), "{p}");
     }
+    // Round 2 M-3: no write grant at all, not an unfiltered one.
+    let mut none = s.clone();
+    none.fs.as_mut().unwrap().read_write.clear();
+    let p = sys::macos_profile(&none);
+    assert!(!p.contains("(allow file-write*)"), "{p}");
+    assert!(!p.contains("(allow file-write* "), "{p}");
+    assert!(!p.contains("(allow process-exec)"), "{p}");
+}
+
+/// Round 2 findings M-1, M-2 and M-5 on macOS: with the network allowed a
+/// command still cannot connect to a unix socket outside (only IP), the
+/// data volume's path to the home directory is closed, and keychains stay
+/// unreadable even when the whole home is granted (the deny comes last).
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_closes_unix_sockets_data_volume_and_keychains_macos() {
+    if resolve_program("python3", &path_var()).is_err() {
+        eprintln!("SKIPPED: python3 not available");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(d.path()).unwrap();
+    let ws = base.join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let sock = base.join("agent.sock");
+    let _unix = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = tcp.local_addr().unwrap().port();
+    let home = std::env::var("HOME").unwrap();
+    let script = format!(
+        r#"
+import os, socket
+def tryit(label, f):
+    try:
+        f(); print(label, "allowed")
+    except OSError as e:
+        print(label, "refused", e.errno)
+def unix():
+    s = socket.socket(socket.AF_UNIX); s.connect("{sock}")
+def tcp():
+    s = socket.create_connection(("127.0.0.1", {port}), timeout=3)
+tryit("unix", unix)
+tryit("tcp", tcp)
+tryit("data", lambda: os.listdir("/System/Volumes/Data{home}"))
+tryit("home", lambda: os.listdir("{home}"))
+tryit("keychains", lambda: os.listdir("{home}/Library/Keychains"))
+"#,
+        sock = sock.display(),
+    );
+    let mut s = spec("python3", &["-c", &script], Network::Allow);
+    s.cwd = ws.clone();
+    s.fs = Some(FsConfinement {
+        read_write: vec![ws],
+        read_only: FsConfinement::system_read_only()
+            .into_iter()
+            .chain(path_var().split(':').map(PathBuf::from))
+            .chain([PathBuf::from(&home)])
+            .filter(|p| p.is_absolute() && p.exists())
+            .collect(),
+    });
+    let out = run(&s).unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(text.contains("unix refused"), "{text} {err}");
+    assert!(text.contains("tcp allowed"), "{text} {err}");
+    assert!(text.contains("data refused"), "{text} {err}");
+    assert!(text.contains("home allowed"), "{text} {err}");
+    assert!(text.contains("keychains refused"), "{text} {err}");
+    drop(tcp);
 }
 
 /// Review finding S-4 on macOS: a confined command cannot reach Mach
@@ -725,4 +820,18 @@ print("done", os.getpgrp() == os.getpid(), os.getsid(0) == os.getpid())
         !ws.join("late.txt").exists(),
         "a background process outlived the command"
     );
+}
+
+/// Round 2 finding W-9: an environment entry cannot smuggle in another.
+#[test]
+fn malformed_environment_is_refused() {
+    let base = spec("sh", &["-c", "true"], Network::Allow);
+    for (k, v) in [("A=B", "x"), ("", "x"), ("A\0B", "x"), ("A", "x\0B=y")] {
+        let mut s = base.clone();
+        s.env.push((k.into(), v.into()));
+        assert!(
+            matches!(run(&s), Err(ExecError::InvalidEnvironment(_))),
+            "{k:?}={v:?}"
+        );
+    }
 }

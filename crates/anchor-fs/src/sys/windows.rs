@@ -218,12 +218,17 @@ fn paths_equivalent(a: &Path, b: &Path) -> bool {
     starts_with_equivalent(a, b) && a.components().count() == b.components().count()
 }
 
+/// The access a pinning handle holds: listing the directory is data
+/// access, so the missing `FILE_SHARE_DELETE` is enforced against every
+/// later rename or delete of it (round 2 F-1).
+const PIN_ACCESS: u32 = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+
 pub(crate) fn open_root(path: &Path) -> Result<(Root, PathBuf), FsError> {
     // Pinned for the workspace's lifetime: the root cannot be renamed or
     // replaced by a junction while it is open.
     let h = open_shared(
         path,
-        FILE_READ_ATTRIBUTES,
+        PIN_ACCESS,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         0,
         OPEN_EXISTING,
@@ -272,7 +277,9 @@ fn open_strict(root_path: &Path, rel: &Path, access: u32) -> Result<(OwnedHandle
 fn pin_dir(full: &Path, access: u32) -> Result<(OwnedHandle, Meta), FsError> {
     let h = open_shared(
         full,
-        access,
+        // Sharing is only enforced on opens that ask for data access: an
+        // attribute-only handle would not stop a rename (round 2 F-1).
+        access | PIN_ACCESS,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         FILE_FLAG_OPEN_REPARSE_POINT,
         OPEN_EXISTING,

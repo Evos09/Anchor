@@ -157,7 +157,7 @@ each attack through the backend's real command confinement:
 | Allocate past the memory limit; spin the CPU | stopped | CI pending | CI pending |
 | Write a file past the size limit | stopped | CI pending | not enforced (AR-2) |
 | Inherit the caller's environment | stopped | CI pending | CI pending |
-| Unix socket outside; signal the backend | stopped | CI pending | n/a |
+| Unix socket outside (network denied, and allowed); signal the backend | stopped | CI pending | n/a |
 | `ptrace`, `bpf`, `keyctl`, `mount`, `unshare` | stopped | n/a | n/a |
 
 Each CI job appends its platform's table to the job summary.
@@ -170,6 +170,9 @@ Each CI job appends its platform's table to the job summary.
 | T-1 git hooks planted by commands | `commands_cannot_plant_git_hooks_or_config` | ✅ Linux (local) |
 | P-1 append-only reshaping; P-2 restore skipped | `heuristic_detection_is_sticky`, `tracked_files_replaced_by_untracked_entries_are_restored` | ✅ Linux (local) |
 | V-1 verdict forged by runner tampering; V-2 startup hooks | `runner_tampering_rejected`, `startup_hooks_rejected_and_home_is_empty` | ✅ Linux (local); residual AR-4 |
+| Round 2: W-1 workspace ACLs rewritable; F-1 pins did not block renames | ACE mask and `SET_ACCESS`; `open_workspace_root_cannot_be_renamed` | 🟡 Windows (CI pending) |
+| Round 2: M-1 `/System/Volumes/Data`; M-2 unix sockets with network | `seatbelt_closes_unix_sockets_data_volume_and_keychains_macos` | 🟡 macOS (CI pending) |
+| Round 2: K-1 backend threads signalled | `protected_processes_cannot_be_signalled` (tkill to a thread) | ✅ Linux (local) |
 
 ## Phase 2 "verified by instrumentation"
 

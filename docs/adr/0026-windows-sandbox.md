@@ -26,11 +26,15 @@ through `crates/anchor-exec/src/windows.rs`.
     network and no loopback.
   - With the network allowed (a prompt) it gets `internetClient` only.
 - **File access.**
-  - The container SID gets inheritable ACEs: full access on
-    `read_write`, and read and execute on `read_only` entries (absolute
-    PATH directories).
-  - An ACE is added only when no explicit one already grants that
-    access, so repeated runs do not grow the ACL.
+  - The container SID gets inheritable ACEs. On `read_write` it gets
+    "Modify": read, write, execute and delete. It does not get
+    `WRITE_DAC` or `WRITE_OWNER`, so a command cannot rewrite the
+    workspace's ACLs (round 2 finding W-1). On `read_only` entries
+    (absolute PATH directories) it gets read and execute.
+  - Drive roots and the user profile are never granted.
+  - An ACE is written (`SET_ACCESS`) unless one with exactly that mask
+    and inheritance exists, so repeated runs neither grow the ACL nor
+    keep a broader grant.
   - System directories are readable through ALL APPLICATION PACKAGES, as
     for any AppContainer.
   - The user's profile, credentials, other workspaces and other
@@ -60,8 +64,11 @@ through `crates/anchor-exec/src/windows.rs`.
   stdio pipe ends are inherited.
 - **Arguments.** The command line is built with the inverse of
   `CommandLineToArgvW`, so backslashes and quotes round-trip.
-- **Batch files.** `.bat` and `.cmd` are refused: `cmd.exe` re-parses
-  their arguments (the BatBadBut class), which would reopen threat 4.
+- **Programs.** Only `.exe` and `.com` run, judged on the real path:
+  Windows drops trailing dots, so `x.bat.` is a batch file. `cmd.exe`
+  re-parses a batch file's arguments (the BatBadBut class), which would
+  reopen threat 4. Program names with `:` (drive-relative paths, streams)
+  or a trailing dot or space are refused at resolution.
 - **Environment.** Cleared and set explicitly. Only `SystemRoot` is
   added, because Windows DLL loading needs it.
 

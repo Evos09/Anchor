@@ -116,10 +116,36 @@ The "Fix" column names the commit; each test there fails without that fix.
 
 ## Round 2
 
-_In progress: the review of the Phase 7 sandbox code. This section is
-filled in when it completes._
+Scope: the sandbox code written during Phase 7. Three independent reviews:
+
+- the Windows command runner (`W-`);
+- the Windows `anchor-fs` pinning (`F-`);
+- the macOS Seatbelt profiles and the seccomp signal rule (`M-`, `K-`).
+
+The macOS and Windows findings come from reading the code against the
+platform's documented behaviour. Only CI runs that code. Each fix below
+has a test that runs on that platform's CI job.
+
+| ID | Sev. | Finding | Status | Fix / test |
+|---|---|---|---|---|
+| W-1 | High | The container got `FILE_ALL_ACCESS` on the workspace. That includes `WRITE_DAC`/`WRITE_OWNER`, so a command could rewrite ACLs, lock the user out of files (defeating `gitguard` and restores), or drop its own grant | Fixed | "Modify" rights only (no ACL or owner changes), set with `SET_ACCESS`, which replaces a broader ACE. The ACE check requires the exact mask and inheritance (W-10). Drive roots and the user profile are never granted |
+| F-1 | High | Pins opened with attribute access only. Windows does not enforce share modes on such opens, so a pinned directory could still be renamed (P-3 not actually fixed) | Fixed | Pins and the root hold `FILE_LIST_DIRECTORY`. `open_workspace_root_cannot_be_renamed` (Windows CI) |
+| M-1 | High | A `/System` grant (system read list and runtime profile) covers `/System/Volumes/Data`, which is a second path to every home directory | Fixed | `/System/Library` only, plus a final deny of `/System/Volumes/Data`. `seatbelt_profile_denies_by_default`, `seatbelt_closes_unix_sockets_data_volume_and_keychains_macos` (macOS CI) |
+| M-2 | High | With the network allowed, `(allow network*)` let commands connect to any unix socket (docker.sock, ssh-agent) | Fixed | IP and the resolver socket only, as on Linux. Same macOS test; validation suite row "unix socket outside, network allowed". Closes AR-3 |
+| K-1 | High | The signal rule protected pids but not thread ids, and a fatal signal to any backend thread kills the backend (kernels before 6.12) | Fixed in part; residual accepted | The backend's and its parent's thread ids, taken at spawn, are protected as compact ranges. The BPF program now uses local returns, so it can exceed 255 instructions. `protected_processes_cannot_be_signalled` (tkill to a thread), `pid_ranges_are_merged_and_bounded`. Threads started later: AR-1 |
+| K-2 | Medium | The runtime shared the backend's process group, so `kill(0)` from it reached the backend | Fixed | The runtime gets its own process group. Its filter also protects the backend's group |
+| K-3 | Medium | `fcntl(F_SETOWN*)` and `ioctl(FIOSETOWN, SIOCSPGRP)` let the kernel deliver `SIGIO` to any same-user process | Fixed | Refused with `EPERM`. Same seccomp test |
+| M-3 | Medium | An empty write list made `(allow file-write*)` with no filter, which allows every write | Fixed | Allows are emitted only with paths. `seatbelt_profile_denies_by_default` |
+| M-5 | Low | Keychains were read-denied only, and the home directory was taken from `$HOME` | Fixed | Reads and writes denied; home from `getpwuid_r` |
+| M-6 | Low | A path that does not exist yet was not canonicalised; non-UTF-8 paths were quoted lossily | Fixed | Resolved through the deepest existing ancestor; a non-UTF-8 path gets no grant |
+| W-2 | Medium | Program names like `C:python.exe` (drive-relative) or with a trailing dot passed the bare-name check | Fixed | `:` refused everywhere; a trailing dot or space refused on Windows. `program_must_be_bare_name` |
+| W-3 | Medium | The batch-file check read the literal extension (`x.bat.` slipped through) | Fixed | The real path's extension must be `.exe` or `.com` |
+| W-8 | Low | `limit * 95` could overflow | Fixed | Saturating |
+| W-9 | Low | Environment names or values with `=`/NUL could smuggle in variables | Fixed | Refused on every platform. `malformed_environment_is_refused` |
+| W-12 | Low | The error code was read after `TerminateJobObject`, and a failed `GetExitCodeProcess` read as exit 0 | Fixed | |
+| F-2..F-13, W-4..W-7, W-11, W-13, W-14, M-4, M-7..M-9, K-4 | Medium–Info | Windows `anchor-fs` and runner hardening; macOS preference reads and executable roots | Accepted | AR-14, AR-15, AR-16 |
 
 ## Result
 
-- **Critical and High findings:** none is open. Each is fixed with a regression test. Where a residual remains (S-5, V-1), it is narrower than the original finding, it is Medium at most, and it is recorded in [accepted-risks.md](accepted-risks.md).
+- **Critical and High findings:** none is open, in either round. Each is fixed with a regression test. Where a residual remains (S-5, V-1, K-1), it is narrower than the original finding, it is Medium at most, and it is recorded in [accepted-risks.md](accepted-risks.md).
 - **CI:** the macOS and Windows parts are verified there (see [README.md](README.md#status)).

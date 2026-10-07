@@ -29,6 +29,8 @@ pub fn restrict_self() -> SandboxStatus {
         ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
         RulesetStatus, Scope, path_beneath_rules,
     };
+    // Taken first: Landlock below hides `/proc` (thread ids).
+    let protect = anchor_seccomp::protected_pids(false);
     let abi = ABI::V5;
     let existing: Vec<&str> = READABLE_SYSTEM_PATHS
         .iter()
@@ -60,7 +62,7 @@ pub fn restrict_self() -> SandboxStatus {
     // The syscall denylist, and no unix sockets: the user's D-Bus or ssh
     // agent would otherwise be reachable (review finding S-1). The network
     // stays allowed: the runtime talks to model providers.
-    match anchor_seccomp::install_self(false) {
+    match anchor_seccomp::install_self(false, &protect) {
         Ok(()) => fs,
         Err(e) => SandboxStatus::NotEnforced(e),
     }
@@ -69,14 +71,16 @@ pub fn restrict_self() -> SandboxStatus {
 /// The runtime's Seatbelt profile on macOS: nothing by default; reads of
 /// system paths only (dyld, frameworks, resolver and timezone data), no
 /// writes, outbound IP connections (model providers) and the DNS
-/// resolver. Unix-socket connects other than the resolver's are refused
-/// (later rules win in SBPL), as are Mach services beyond name lookup and
-/// logging, process creation and signals.
+/// resolver. Unix-socket connects other than the resolver's are refused,
+/// as are Mach services beyond name lookup and logging, process creation
+/// and signals. `/System/Library`, not `/System`: `/System/Volumes/Data`
+/// reaches every home directory (round 2 M-1), and is denied last (in
+/// SBPL the last matching rule wins).
 #[cfg(any(target_os = "macos", test))]
 pub const MACOS_PROFILE: &str = "(version 1)(deny default)\
 (allow sysctl-read)\
 (allow file-read-metadata)\
-(allow file-read* (literal \"/\") (subpath \"/usr\") (subpath \"/System\") \
+(allow file-read* (literal \"/\") (subpath \"/usr\") (subpath \"/System/Library\") \
   (subpath \"/Library/Apple\") (subpath \"/Library/Preferences\") \
   (subpath \"/private/etc\") (subpath \"/private/var/db/dyld\") \
   (subpath \"/private/var/db/timezone\") (subpath \"/System/Volumes/Preboot/Cryptexes\") \
@@ -84,15 +88,15 @@ pub const MACOS_PROFILE: &str = "(version 1)(deny default)\
   (literal \"/dev/null\"))\
 (allow file-write-data (literal \"/dev/null\"))\
 (allow system-socket)\
-(allow network-outbound)\
-(deny network-outbound (subpath \"/\"))\
-(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\
+(allow network-outbound (remote ip \"*:*\") \
+  (literal \"/private/var/run/mDNSResponder\"))\
 (allow mach-lookup (global-name \"com.apple.dnssd.service\") \
   (global-name \"com.apple.SystemConfiguration.configd\") \
   (global-name \"com.apple.system.opendirectoryd.libinfo\") \
   (global-name \"com.apple.system.notification_center\") \
   (global-name \"com.apple.system.logger\") (global-name \"com.apple.logd\"))\
-(allow ipc-posix-shm-read-data (ipc-posix-name \"apple.shm.notification_center\"))";
+(allow ipc-posix-shm-read-data (ipc-posix-name \"apple.shm.notification_center\"))\
+(deny file-read* (subpath \"/System/Volumes/Data\"))";
 
 #[cfg(target_os = "macos")]
 pub fn restrict_self() -> SandboxStatus {

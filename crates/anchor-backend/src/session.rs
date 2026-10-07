@@ -191,7 +191,12 @@ pub fn run(
     checkpoints: &CheckpointStore,
 ) -> Result<SessionReport, SessionError> {
     mediator.set_session(&cfg.session_id);
-    let mut child = Command::new(&cfg.agent_bin)
+    let mut cmd = Command::new(&cfg.agent_bin);
+    // Its own process group: `kill(0, ..)` from the runtime then reaches
+    // only itself, never the backend's group (round 2 finding K-2).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = cmd
         .env_clear()
         .envs(runtime_env(&cfg.roles_toml))
         // The runtime never needs the workspace as its cwd.

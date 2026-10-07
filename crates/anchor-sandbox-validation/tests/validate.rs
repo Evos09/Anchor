@@ -121,17 +121,24 @@ fn report_path() -> PathBuf {
 fn every_attack_is_stopped() {
     let e = env();
     let mut rows: Vec<Row> = Vec::new();
-    let mut run_attack =
-        |attack: &'static str, args: &[&str], judge: &dyn Fn(&Output) -> Row| match run(&spec(
-            &e, args,
-        )) {
+    // A leading "+net" runs the attack with the network allowed (a
+    // command the user approved for network access).
+    let mut run_attack = |attack: &'static str, args: &[&str], judge: &dyn Fn(&Output) -> Row| {
+        let (args, network) = match args.split_first() {
+            Some((&"+net", rest)) => (rest, Network::Allow),
+            _ => (args, Network::Deny),
+        };
+        let mut s = spec(&e, args);
+        s.network = network;
+        match run(&s) {
             Ok(o) => rows.push(judge(&o)),
             Err(err) => rows.push(Row {
                 attack,
                 stopped: false,
                 how: format!("the sandbox refused to run: {err}"),
             }),
-        };
+        }
+    };
     let plain = |attack: &'static str| move |o: &Output| judged(attack, o);
 
     // Threat 6: network egress, external and loopback.
@@ -242,6 +249,11 @@ fn every_attack_is_stopped() {
             "connect to a unix socket outside",
             &["unix-connect", &sock_s],
             &plain("connect to a unix socket outside"),
+        );
+        run_attack(
+            "unix socket outside, network allowed",
+            &["+net", "unix-connect", &sock_s],
+            &plain("unix socket outside, network allowed"),
         );
         let me = std::process::id().to_string();
         run_attack(

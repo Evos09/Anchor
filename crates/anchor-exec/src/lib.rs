@@ -87,7 +87,9 @@ impl FsConfinement {
             "/dev/full",
             "/dev/random",
             "/dev/urandom",
-            "/System",
+            // Not `/System` itself: `/System/Volumes/Data` is the whole
+            // data volume, home directories included (round 2 M-1).
+            "/System/Library",
             "/Library/Developer",
             "/private/etc",
             "/Applications/Xcode.app",
@@ -191,6 +193,8 @@ pub enum ExecError {
     ProgramNotAbsolute,
     #[error("argument contains NUL")]
     NulInArgument,
+    #[error("invalid environment variable: {0:?}")]
+    InvalidEnvironment(String),
     #[error("required isolation unavailable: {0}")]
     SandboxUnavailable(String),
     #[error("failed to spawn: {0}")]
@@ -204,8 +208,12 @@ pub enum ExecError {
 /// at arbitrary binaries by path; the policy then decides on the resolved
 /// program.
 pub fn resolve_program(name: &str, path_var: &str) -> Result<PathBuf, ExecError> {
+    // `:` names a drive-relative path (`C:python.exe`) or a data stream
+    // on Windows; a trailing dot or space is dropped by Windows, so the
+    // policy would judge a different name (round 2 W-2).
     if name.is_empty()
-        || name.contains(['/', '\\', '\0'])
+        || name.contains(['/', '\\', '\0', ':'])
+        || (cfg!(windows) && name.ends_with(['.', ' ']))
         || name == "."
         || name == ".."
         || name.starts_with('-')
@@ -251,6 +259,15 @@ pub fn run(spec: &CommandSpec) -> Result<Output, ExecError> {
     }
     if spec.args.iter().any(|a| a.contains('\0')) {
         return Err(ExecError::NulInArgument);
+    }
+    // A NUL or a `=` in a name would let one entry smuggle in another
+    // (round 2 W-9).
+    if let Some((k, _)) = spec
+        .env
+        .iter()
+        .find(|(k, v)| k.is_empty() || k.contains(['=', '\0']) || v.contains('\0'))
+    {
+        return Err(ExecError::InvalidEnvironment(k.clone()));
     }
     #[cfg(windows)]
     if spec.network == Network::Deny || spec.fs.is_some() {
@@ -793,16 +810,7 @@ mod sys {
     pub(super) fn macos_profile(spec: &CommandSpec) -> String {
         // Seatbelt profile (ADR-0003). Paths are quoted with escaping.
         // Seatbelt matches real paths: `/var/...` is `/private/var/...`.
-        let q = |p: &Path| {
-            let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-            format!(
-                "\"{}\"",
-                p.display()
-                    .to_string()
-                    .replace('\\', "\\\\")
-                    .replace('"', "\\\"")
-            )
-        };
+        let q = |p: &Path| quote_real(p);
         // Everything not allowed below is denied (review finding S-4):
         // in particular Mach services (the pasteboard, Apple Events to
         // other apps, the keychain daemon, launchd job control), IOKit,
@@ -831,8 +839,14 @@ mod sys {
         if spec.network == Network::Deny {
             prof.push_str("(deny network*)");
         } else {
+            // IP only, plus the resolver's socket: never other unix
+            // sockets (docker.sock, an ssh agent), as on Linux (round 2
+            // M-2).
             prof.push_str(
-                "(allow network* system-socket)\
+                "(allow system-socket)\
+                 (allow network-outbound (remote ip \"*:*\"))\
+                 (allow network-bind network-inbound (local ip \"*:*\"))\
+                 (allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\
                  (allow mach-lookup (global-name \"com.apple.dnssd.service\") \
                     (global-name \"com.apple.SystemConfiguration.configd\"))",
             );
@@ -840,11 +854,17 @@ mod sys {
         match &spec.fs {
             None => prof.push_str("(allow process-exec file-read* file-write*)"),
             Some(fs) => {
-                prof.push_str("(allow file-write*");
-                for p in &fs.read_write {
-                    prof.push_str(&format!(" (subpath {})", q(p)));
+                // A rule without a filter would allow everything: emit
+                // one only with paths (round 2 M-3).
+                let writable: String = fs
+                    .read_write
+                    .iter()
+                    .filter_map(|p| q(p))
+                    .map(|p| format!(" (subpath {p})"))
+                    .collect();
+                if !writable.is_empty() {
+                    prof.push_str(&format!("(allow file-write*{writable})"));
                 }
-                prof.push(')');
                 // Reads mirror Landlock: nothing but the granted roots and
                 // what macOS needs to start a process. Metadata stays
                 // readable, as path lookup needs it (Landlock likewise does
@@ -857,25 +877,89 @@ mod sys {
                     .map(PathBuf::as_path)
                     .chain(MACOS_READ.iter().map(Path::new))
                 {
-                    if p.exists() {
-                        roots.push_str(&format!(" (subpath {})", q(p)));
+                    if let Some(p) = q(p).filter(|_| p.exists()) {
+                        roots.push_str(&format!(" (subpath {p})"));
                     }
                 }
                 prof.push_str(&format!("(allow file-read* (literal \"/\"){roots})"));
-                prof.push_str(&format!("(allow process-exec{roots})"));
+                if !roots.is_empty() {
+                    prof.push_str(&format!("(allow process-exec{roots})"));
+                }
             }
         }
         if spec.fs.is_some() {
-            // Keychains stay unreadable even under a granted root.
-            prof.push_str("(deny file-read* (subpath \"/Library/Keychains\"))");
-            if let Some(home) = std::env::var_os("HOME") {
-                prof.push_str(&format!(
-                    "(deny file-read* (subpath {}))",
-                    q(&Path::new(&home).join("Library/Keychains"))
-                ));
+            // Last, so they win over any grant above (in SBPL the last
+            // matching rule decides): keychains, and the data volume's
+            // second path to every home directory (round 2 M-1, M-5).
+            prof.push_str(
+                "(deny file-read* file-write* process-exec \
+                    (subpath \"/Library/Keychains\") (subpath \"/System/Volumes/Data\"))",
+            );
+            if let Some(k) = account_home().and_then(|h| q(&h.join("Library/Keychains"))) {
+                prof.push_str(&format!("(deny file-read* file-write* (subpath {k}))"));
             }
         }
         prof
+    }
+
+    /// `p` as an SBPL string literal naming its real path (Seatbelt
+    /// matches real paths: `/var/...` is `/private/var/...`). A path that
+    /// does not exist yet is resolved through its deepest existing
+    /// ancestor. `None` for a path that is not UTF-8, which cannot be
+    /// written into a profile faithfully (round 2 M-6).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn quote_real(p: &Path) -> Option<String> {
+        let mut real = None;
+        let mut rest = Vec::new();
+        let mut cur = p;
+        while real.is_none() {
+            match std::fs::canonicalize(cur) {
+                Ok(r) => real = Some(r),
+                Err(_) => match (cur.parent(), cur.file_name()) {
+                    (Some(parent), Some(name)) => {
+                        rest.push(name.to_os_string());
+                        cur = parent;
+                    }
+                    _ => real = Some(p.to_path_buf()),
+                },
+            }
+        }
+        let mut real = real.unwrap_or_else(|| p.to_path_buf());
+        for name in rest.iter().rev() {
+            real.push(name);
+        }
+        let s = real.to_str()?;
+        Some(format!(
+            "\"{}\"",
+            s.replace('\\', "\\\\").replace('"', "\\\"")
+        ))
+    }
+
+    /// The account's home directory from the user database, not `$HOME`
+    /// (which the caller's environment controls).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn account_home() -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        let mut buf = vec![0 as libc::c_char; 16 * 1024];
+        // SAFETY: zeroed POD out-structure.
+        let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: valid buffers and out-pointers; on success `pw_dir`
+        // points into `buf`, read before `buf` is dropped.
+        unsafe {
+            let rc = libc::getpwuid_r(
+                libc::getuid(),
+                &mut pw,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut found,
+            );
+            if rc != 0 || found.is_null() || pw.pw_dir.is_null() {
+                return None;
+            }
+            let dir = std::ffi::CStr::from_ptr(pw.pw_dir);
+            Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
+        }
     }
 
     #[cfg(target_os = "linux")]

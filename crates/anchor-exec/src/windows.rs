@@ -5,7 +5,7 @@
 //!   lowbox token with no capabilities when the network is denied, so no
 //!   internet, private network or loopback; `internetClient` only when it
 //!   is allowed. Files are reachable only where the container's SID holds
-//!   an ACE: read/write on [`FsConfinement::read_write`], read/execute on
+//!   an ACE: "Modify" (no ACL or owner changes) on [`FsConfinement::read_write`], read/execute on
 //!   [`FsConfinement::read_only`] (granted here, inheritable), plus what
 //!   Windows grants ALL APPLICATION PACKAGES (system directories). The
 //!   user's profile, credentials and other processes are out of reach.
@@ -16,7 +16,8 @@
 //!   with the job; accounting gives [`Rusage`].
 //! * `CreateProcessW` with an explicit `HANDLE_LIST`: only the stdio pipes
 //!   are inherited. The command line is quoted for `CommandLineToArgvW`;
-//!   batch files are refused (cmd.exe re-parses their arguments).
+//!   only `.exe`/`.com` programs run, judged on the real path (batch
+//!   files would let cmd.exe re-parse their arguments).
 
 use std::ffi::OsStr;
 use std::io::Error as IoError;
@@ -30,7 +31,7 @@ use windows_sys::Win32::Foundation::{
     INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+    ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GetNamedSecurityInfoW, SE_FILE_OBJECT, SET_ACCESS,
     SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_WELL_KNOWN_GROUP,
     TRUSTEE_W,
 };
@@ -44,8 +45,8 @@ use windows_sys::Win32::Security::{
     SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
@@ -72,6 +73,12 @@ use super::*;
 
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 const INHERITED_ACE: u8 = 0x10;
+const OBJECT_INHERIT_ACE: u8 = 0x1;
+const CONTAINER_INHERIT_ACE: u8 = 0x2;
+const INHERIT_ONLY_ACE: u8 = 0x8;
+/// The "Modify" right set: read, write, execute and delete, without
+/// WRITE_DAC, WRITE_OWNER or ACCESS_SYSTEM_SECURITY.
+const MODIFY: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
 const SE_GROUP_ENABLED: u32 = 4;
 /// The `internetClient` capability: outbound internet, no loopback or
 /// private networks.
@@ -190,7 +197,7 @@ fn string_sid(s: &str) -> Result<Sid, ExecError> {
 ///
 /// # Safety
 /// `dacl` must be null or a valid ACL, `sid` a valid SID.
-unsafe fn has_ace(dacl: *const ACL, sid: PSID, access: u32) -> bool {
+unsafe fn has_ace(dacl: *const ACL, sid: PSID, access: u32, dir: bool) -> bool {
     if dacl.is_null() {
         return true; // a null DACL grants everyone everything
     }
@@ -221,7 +228,13 @@ unsafe fn has_ace(dacl: *const ACL, sid: PSID, access: u32) -> bool {
             }
             let a = &*(ace as *const ACCESS_ALLOWED_ACE);
             let ace_sid = (&a.SidStart as *const u32) as PSID;
-            if EqualSid(ace_sid, sid) != 0 && a.Mask & access == access {
+            // Exactly the mask, inherited by everything below a directory
+            // and effective here (round 2 W-10): a broader ACE (from an
+            // earlier version, or edited) is replaced, not kept.
+            let inherit = u8::from(dir) * (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
+            let flags =
+                hdr.AceFlags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE);
+            if EqualSid(ace_sid, sid) != 0 && a.Mask == access && flags == inherit {
                 return true;
             }
         }
@@ -254,12 +267,13 @@ fn grant(path: &Path, sid: PSID, access: u32) -> Result<(), String> {
     }
     let result = (|| {
         // SAFETY: `dacl` came from GetNamedSecurityInfoW; `sid` is valid.
-        if unsafe { has_ace(dacl, sid, access) } {
+        if unsafe { has_ace(dacl, sid, access, path.is_dir()) } {
             return Ok(());
         }
         let ea = EXPLICIT_ACCESS_W {
             grfAccessPermissions: access,
-            grfAccessMode: GRANT_ACCESS,
+            // Replaces any other explicit ACE for the container's SID.
+            grfAccessMode: SET_ACCESS,
             grfInheritance: if path.is_dir() {
                 SUB_CONTAINERS_AND_OBJECTS_INHERIT
             } else {
@@ -498,21 +512,36 @@ pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
             "on Windows, network denial requires filesystem confinement (AppContainer)".into(),
         ));
     };
-    let ext = spec
-        .program
+    // The extension of the file that will actually run: Windows drops
+    // trailing dots and spaces, so `x.bat.` is a batch file (round 2 W-3).
+    // Only executables run confined.
+    let real = std::fs::canonicalize(&spec.program).map_err(|e| ExecError::Io(e.to_string()))?;
+    let ext = real
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
-    if matches!(ext.as_deref(), Some("bat" | "cmd")) {
-        return Err(ExecError::SandboxUnavailable(
-            "batch files are not run confined: cmd.exe re-parses their arguments".into(),
-        ));
+    if !matches!(ext.as_deref(), Some("exe" | "com")) {
+        return Err(ExecError::SandboxUnavailable(format!(
+            "only .exe and .com programs run confined, not {}",
+            real.display()
+        )));
     }
 
     let sid = container_sid(&profile_name(fs, &spec.cwd))?;
+    let home = std::env::home_dir();
+    let too_broad = |p: &Path| p.parent().is_none() || home.as_deref() == Some(p);
     for p in &fs.read_write {
-        grant(p, sid.ptr, FILE_ALL_ACCESS).map_err(ExecError::SandboxUnavailable)?;
+        if too_broad(p) {
+            return Err(ExecError::SandboxUnavailable(format!(
+                "refusing to grant a drive root or the user profile: {}",
+                p.display()
+            )));
+        }
+        // "Modify": no WRITE_DAC, WRITE_OWNER or ACCESS_SYSTEM_SECURITY,
+        // so a command cannot rewrite the workspace's ACLs, lock the user
+        // out or remove its own grant (round 2 W-1).
+        grant(p, sid.ptr, MODIFY).map_err(ExecError::SandboxUnavailable)?;
     }
-    for p in fs.read_only.iter().filter(|p| p.exists()) {
+    for p in fs.read_only.iter().filter(|p| p.exists() && !too_broad(p)) {
         // Best effort: system directories are readable by every
         // AppContainer already, and their ACLs belong to the system.
         let _ = grant(p, sid.ptr, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE);
@@ -596,7 +625,7 @@ pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
     si.StartupInfo.hStdError = inherit[2];
     si.lpAttributeList = attrs.list();
 
-    let program = plain(&spec.program);
+    let program = plain(&real);
     let app = wide(program.as_os_str());
     let mut cmdline = wide(OsStr::new(&command_line(&program, &spec.args)));
     let env = env_block(&spec.env);
@@ -652,7 +681,11 @@ pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
             WAIT_OBJECT_0 => {
                 let mut code = 0u32;
                 // SAFETY: as above.
-                unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) };
+                if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
+                    let err = IoError::last_os_error();
+                    kill();
+                    return Err(ExecError::Io(format!("exit code: {err}")));
+                }
                 break ExitKind::Exited(code as i32);
             }
             WAIT_TIMEOUT if start.elapsed() >= spec.limits.wall_timeout => {
@@ -663,8 +696,10 @@ pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
             }
             WAIT_TIMEOUT => {}
             _ => {
+                // Read before TerminateJobObject overwrites it (W-12).
+                let err = IoError::last_os_error();
                 kill();
-                return Err(ExecError::Io(IoError::last_os_error().to_string()));
+                return Err(ExecError::Io(err.to_string()));
             }
         }
     };
@@ -704,7 +739,9 @@ pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
     let limit = spec.limits.address_space_bytes;
     let exit = match exit {
         ExitKind::Exited(c)
-            if c != 0 && (ext.PeakJobMemoryUsed as u64).saturating_mul(100) >= limit * 95 =>
+            if c != 0
+                && (ext.PeakJobMemoryUsed as u64).saturating_mul(100)
+                    >= limit.saturating_mul(95) =>
         {
             ExitKind::MemoryExceeded
         }

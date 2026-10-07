@@ -36,8 +36,9 @@ backend to run.
     keyrings, `open_by_handle_at`, swap, reboot, `setns`, namespace
     flags on `unshare`/`clone`/`clone3`, `setsid`/`setpgid`,
     `socket(AF_UNIX)`, `io_uring`, and signals to the backend, its
-    process group, session leader and parent (plus `kill(-1)`) all fail
-    with `EPERM`. No filter, no run;
+    process group, session leader, parent and every thread of those
+    taken at spawn (plus `kill(-1)` and `F_SETOWN`) all fail with
+    `EPERM`. No filter, no run;
   - Landlock ABI v6 scopes (abstract unix sockets, signals) where the
     kernel supports them, best effort;
   - network denial in two tiers, chosen by a one-time probe:
@@ -73,8 +74,10 @@ with the namespace approach.
   preference reads, a short list of Mach services (libinfo, notification
   center, logging, cfprefsd), the standard `/dev` nodes, exec and reads
   only under the granted roots, writes only under the workspace. With
-  the network denied, `(deny network*)`; allowed, network plus the
-  resolver services (AR-3).
+  the network denied, `(deny network*)`; allowed, IP connections and
+  the resolver only, never other unix sockets (round 2 finding M-2). The
+  data volume's second path to home directories (`/System/Volumes/Data`)
+  and keychains are denied last, overriding every grant (M-1, M-5).
 - **Memory**: macOS rejects `RLIMIT_AS`, so `run()` polls the process
   group's resident size every 5 ms and kills it over the limit, reporting
   `ExitKind::MemoryExceeded` (AR-2 for the overshoot window).
@@ -112,7 +115,8 @@ The residual risks are recorded, with what still holds, in
 - AR-2: limits are per process or per file (disk fill; no per-file cap
   on Windows). A cgroup `pids.max`/`memory.max` is preferable where
   delegation is available.
-- AR-3: macOS unix sockets when the network is allowed.
+- AR-14..AR-16: Windows `anchor-fs` and runner hygiene; macOS
+  preference reads.
 - AR-7: Windows runtime unconfined. AR-8: Linux `/proc` command lines.
   AR-13: Windows ACE persistence.
 - Measured performance cost: not yet measured under realistic load (§17 Q3
