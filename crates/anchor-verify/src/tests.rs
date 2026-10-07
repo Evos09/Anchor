@@ -377,3 +377,77 @@ fn startup_hooks_and_unreviewable_code_are_found() {
         ["calc.cpython-312-x86_64-linux-gnu.so", "big.py"]
     );
 }
+
+/// Gives a fixed verdict to every claim, or leaves claims out.
+struct Fixed(&'static str, Option<Verdict>);
+impl Reviewer for Fixed {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn review(&mut self, i: &ReviewInput) -> Result<Vec<ClaimVerdict>, String> {
+        Ok(match self.1 {
+            None => vec![],
+            Some(v) => i
+                .claims
+                .iter()
+                .map(|c| ClaimVerdict {
+                    claim_id: c.id.clone(),
+                    verdict: v,
+                    reason_code: format!("{}_says", self.0),
+                    evidence_refs: vec![],
+                    note: "why".into(),
+                })
+                .collect(),
+        })
+    }
+}
+
+/// Phase 8: a plugin is an extra gate. The worst verdict per claim
+/// stands, so a plugin can block a merge but never approve one.
+#[test]
+fn combined_reviewers_take_the_worst_verdict() {
+    use Verdict::*;
+    let i = input();
+    let mut all = Combined::new(vec![
+        Box::new(Fixed("rule", Some(Supported))),
+        Box::new(Fixed("plugin", Some(Supported))),
+    ]);
+    assert_eq!(all.name(), "rule+plugin");
+    assert!(decide(&i, vec![], vec![], &mut all).approved);
+
+    // The plugin refutes what the rule reviewer supports: rejected.
+    let mut block = Combined::new(vec![
+        Box::new(Fixed("rule", Some(Supported))),
+        Box::new(Fixed("plugin", Some(Refuted))),
+    ]);
+    let d = decide(&i, vec![], vec![], &mut block);
+    assert!(!d.approved);
+    assert_eq!(d.verdicts[0].reason_code, "plugin_says");
+    assert!(d.verdicts[0].note.starts_with("[plugin] "));
+
+    // The plugin supports what the rule reviewer refutes: still rejected.
+    let mut no_override = Combined::new(vec![
+        Box::new(Fixed("rule", Some(Refuted))),
+        Box::new(Fixed("plugin", Some(Supported))),
+    ]);
+    let d = decide(&i, vec![], vec![], &mut no_override);
+    assert!(!d.approved);
+    assert_eq!(d.verdicts[0].reason_code, "rule_says");
+
+    // Refuted outranks unverifiable, whichever comes first.
+    let mut r = Combined::new(vec![
+        Box::new(Fixed("a", Some(Unverifiable))),
+        Box::new(Fixed("b", Some(Refuted))),
+    ]);
+    assert_eq!(r.review(&i).unwrap()[0].verdict, Refuted);
+
+    // A reviewer that leaves the claim out makes it unverifiable.
+    let mut silent = Combined::new(vec![
+        Box::new(Fixed("rule", Some(Supported))),
+        Box::new(Fixed("quiet", None)),
+    ]);
+    let vs = silent.review(&i).unwrap();
+    assert_eq!(vs[0].verdict, Unverifiable);
+    assert_eq!(vs[0].reason_code, "missing_verdict");
+    assert!(!decide(&i, vec![], vec![], &mut silent).approved);
+}

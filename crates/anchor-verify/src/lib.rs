@@ -12,8 +12,8 @@ pub mod review;
 pub mod rules;
 
 pub use review::{
-    Decision, Finding, Reviewer, RuleReviewer, Stage, decide, is_test_path, render_feedback,
-    resolve,
+    Combined, Decision, Finding, Reviewer, RuleReviewer, Stage, decide, is_test_path,
+    render_feedback, resolve,
 };
 
 #[cfg(test)]

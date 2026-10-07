@@ -82,6 +82,92 @@ pub trait Reviewer {
     fn review(&mut self, input: &ReviewInput) -> Result<Vec<ClaimVerdict>, String>;
 }
 
+/// A reviewer made of several: the built-in reviewer and any verifier
+/// plugins (Phase 8, ADR-0009). Each claim gets the worst verdict any of
+/// them gave (`refuted` over `unverifiable` over `supported`), so a plugin
+/// can block a merge but never approve what another reviewer rejects. A
+/// reviewer that leaves a claim out counts as `unverifiable` for it. The
+/// note says which reviewer gave the verdict that stands.
+pub struct Combined {
+    name: String,
+    reviewers: Vec<Box<dyn Reviewer + Send>>,
+}
+
+impl Combined {
+    pub fn new(reviewers: Vec<Box<dyn Reviewer + Send>>) -> Combined {
+        let name = reviewers
+            .iter()
+            .map(|r| r.name())
+            .collect::<Vec<_>>()
+            .join("+");
+        Combined { name, reviewers }
+    }
+}
+
+impl std::fmt::Debug for Combined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Combined")
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
+fn severity(v: Verdict) -> u8 {
+    match v {
+        Verdict::Supported => 0,
+        Verdict::Unverifiable => 1,
+        Verdict::Refuted => 2,
+    }
+}
+
+impl Reviewer for Combined {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn review(&mut self, input: &ReviewInput) -> Result<Vec<ClaimVerdict>, String> {
+        let mut worst: BTreeMap<String, ClaimVerdict> = BTreeMap::new();
+        for r in &mut self.reviewers {
+            let who = r.name().to_string();
+            let mut given: BTreeMap<String, ClaimVerdict> = r
+                .review(input)
+                .map_err(|e| format!("{who}: {e}"))?
+                .into_iter()
+                .map(|v| (v.claim_id.clone(), v))
+                .collect();
+            for c in &input.claims {
+                let mut v = given.remove(&c.id).unwrap_or_else(|| ClaimVerdict {
+                    claim_id: c.id.clone(),
+                    verdict: Verdict::Unverifiable,
+                    reason_code: "missing_verdict".into(),
+                    evidence_refs: Vec::new(),
+                    note: String::new(),
+                });
+                let mut note = format!("[{who}] {}", v.note);
+                if note.len() > anchor_protocol::verify::MAX_CLAIM_TEXT {
+                    let mut i = anchor_protocol::verify::MAX_CLAIM_TEXT;
+                    while !note.is_char_boundary(i) {
+                        i -= 1;
+                    }
+                    note.truncate(i);
+                }
+                v.note = note;
+                match worst.get(&c.id) {
+                    Some(w) if severity(w.verdict) >= severity(v.verdict) => {}
+                    _ => {
+                        worst.insert(c.id.clone(), v);
+                    }
+                }
+            }
+        }
+        Ok(input
+            .claims
+            .iter()
+            .filter_map(|c| worst.remove(&c.id))
+            .collect())
+    }
+}
+
 /// Constructs in non-test code that can fake or interfere with test
 /// evidence: early process exit, tracer tampering, builtin patching,
 /// dynamic imports, test-framework imports.

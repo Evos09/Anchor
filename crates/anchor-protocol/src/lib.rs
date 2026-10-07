@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 mod messages;
 pub use messages::*;
 pub mod roles;
+pub mod verifier;
 pub mod verify;
 
 /// Wire protocol version. Bump on any incompatible change.
