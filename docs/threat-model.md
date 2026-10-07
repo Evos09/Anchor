@@ -175,6 +175,21 @@ Each CI job appends its platform's table to the job summary.
 | Round 2: M-2 unix sockets with network; M-5 keychains; M-1 `/System/Volumes/Data` (not reproduced: Seatbelt resolves firmlinks) | `seatbelt_closes_unix_sockets_data_volume_and_keychains_macos` | ✅ macOS (CI 37616036608) |
 | Round 2: K-1 backend threads signalled | `protected_processes_cannot_be_signalled` (tkill to a thread) | ✅ Linux (CI 37616036608) |
 
+## Phase 8: verifier plugins (ADR-0009)
+
+Plugins are third-party programs that judge each claim at the merge gate.
+A plugin is untrusted the way a command is: it runs in the command sandbox,
+and its answer can only add rejections.
+
+| Property | Tests | Status |
+|---|---|---|
+| A plugin cannot approve what the built-in reviewer rejects; it can block what it approves | `combined_reviewers_take_the_worst_verdict`, `a_refuting_plugin_blocks_the_merge` | 🟡 CI pending (Linux local) |
+| A plugin that crashes, hangs or answers badly fails closed | `a_crashing_plugin_fails_closed`, `a_hanging_plugin_times_out_and_fails_closed`, `verifier::tests` (protocol rules) | 🟡 CI pending (Linux local) |
+| A plugin can read neither the workspace nor the network | `plugins_are_sandboxed_and_support_merges` (a loopback listener and a workspace file, with a positive read control) | 🟡 CI pending (Linux local) |
+| The published contract matches the code | `anchor-protocol/tests/verifier_schema.rs`, `fixtures_are_valid_review_inputs`, `the_example_plugin_conforms` | 🟡 CI pending (Linux local) |
+
+Residual: a plugin sees the change it reviews (AR-17).
+
 ## Phase 2 "verified by instrumentation"
 
 - *No filesystem mutation bypasses the permission engine*: mutations

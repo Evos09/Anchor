@@ -3,9 +3,11 @@
 A trust-first desktop coding agent: one developers can trust not to lose
 their work, leak their credentials, or ship unverified changes.
 
-> **Status: Phases 1–7 are implemented, with these limits:**
+> **Status: Phases 1–7 are implemented, and Phase 8 (open-source
+> release) is under way, with these limits:**
 >
-> - **External audit:** pending; it needs a third party.
+> - **External audit:** pending; it needs a third party. No release is
+>   cut before it (ADR-0021).
 > - **Interface:** a loopback web dashboard, with no desktop shell yet. Read
 > [What is and isn't done](#what-is-and-isnt-done) before relying on
 > anything here.
@@ -130,6 +132,23 @@ executor ships a bug:
 The harness checks every seeded bug (48, in 12 tasks) with the same gate
 and reports how many would merge, overall and per bug category
 ([results](docs/benchmarks/reviewer.md)).
+
+### Verifier plugins (Phase 8)
+
+Anyone can add a review check without changing Anchor. A verifier plugin is
+a separate program, in any language, that the merge gate runs in the
+command sandbox. It answers per claim, and it can only add rejections. The
+contract is [`docs/verifier/`](docs/verifier/README.md), and
+[`examples/verifier-python`](examples/verifier-python/README.md) is a
+complete plugin in one stdlib-only Python file:
+
+```sh
+./target/debug/anchor verifier check examples/verifier-python/verifier.toml
+./target/debug/anchor eval run --corpus examples/eval/corpus \
+    --verifier examples/verifier-python/verifier.toml
+```
+
+To contribute, start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### The collaboration dashboard (Phase 6)
 
@@ -289,6 +308,19 @@ every §11 threat to its test and its per-platform status.
     all-green run 37675535141).
   - **External audit: pending (third party).** The package for the
     auditor is [`docs/audit/README.md`](docs/audit/README.md).
+
+- Phase 8, open-source release (ADR-0009, ADR-0021).
+  - **Verifier plugin interface:** protocol version 1, frozen, with a
+    stability policy. It is documented in
+    [`docs/verifier/`](docs/verifier/README.md), with JSON Schemas and
+    fixtures, and a test keeps the schemas in step with the code.
+  - **Third-party plugins:** `anchor verifier check` and
+    `anchor eval run --verifier`. The example plugin was written from the
+    docs alone and passes every conformance check.
+  - **Contributing:** the guide is [CONTRIBUTING.md](CONTRIBUTING.md). CI
+    runs `scripts/quickstart.sh` on a fresh clone.
+  - **Release:** the repository is Apache-2.0. Making it public is the
+    owner's call, and releases wait for the external audit.
 
 **Known platform gaps:**
 

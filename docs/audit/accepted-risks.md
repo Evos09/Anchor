@@ -28,6 +28,7 @@ snapshots undo. An accepted risk weakens one layer, never all of them.
 | AR-14 | Medium | F-2..F-13 | Windows | `anchor-fs` hardening beyond the pinned chain |
 | AR-15 | Medium | W-4, W-6, W-7, W-11, W-13, W-14 (W-5 fixed) | Windows | Command-runner hygiene |
 | AR-16 | Medium | M-4, M-7..M-9, K-4 | macOS, Linux | Preference reads, executable data roots, rule order |
+| AR-17 | Low | Phase 8 | all | Verifier plugins see the change's diff and evidence |
 
 ---
 
@@ -273,3 +274,27 @@ validation suite check it.
   - Preference files themselves are not readable.
 - **Would close it.** Narrow `user-preference-read` to the domains
   toolchains need, once measured on CI.
+
+### AR-17: verifier plugins see the change's diff and evidence (Phase 8)
+
+- **Exposure.**
+  - A verifier plugin (ADR-0009) receives the review input: the diff, the
+    added lines, the test output tails and the coverage of the candidate
+    change.
+  - A plugin the user installs is therefore trusted with the content of
+    the changes it reviews.
+  - Within its sandbox, a plugin can also spend its time and memory
+    limits, which delays each merge by at most its `timeout_secs`.
+- **Why it is accepted.** Seeing the change is the plugin's purpose. It
+  sees exactly what the built-in reviewer sees, never the workspace.
+- **Still holds.**
+  - **No network.** The plugin cannot send the content anywhere: there is
+    no network and no writable directory (tested:
+    `plugins_are_sandboxed_and_support_merges` on all three platforms).
+  - **Fails closed.** A plugin can only add rejections, and it fails
+    closed, so a malicious plugin can block merges but never approve one.
+  - **No state carries over.** Each request is a fresh run, so nothing
+    passes from one candidate to the next.
+- **Would close it.** Nothing short of not running third-party code. Only
+  install plugins whose source you have read.
+

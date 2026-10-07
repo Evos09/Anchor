@@ -22,15 +22,19 @@ in the workspace, or a crafted checkpoint or manifest) do any of these:
 - overwrite a file it has not read without the user's confirmation;
 - reach the network from a command without approval;
 - corrupt or escape the durability stores or the audit log without
-  detection.
+  detection;
+- run a verifier plugin outside its sandbox, or have a plugin's answer
+  approve a change the built-in reviewer rejects (`docs/verifier/`).
 
 The current per-platform status of each mitigation is in
-[`docs/threat-model.md`](docs/threat-model.md). Known gaps (no seccomp
-filter; Windows commands fail closed; macOS and Windows back ends not yet
-validated; audit-log tail truncation is not detectable) are documented
-there and in the ADRs. Reports that demonstrate them in new ways are still
-welcome.
+[`docs/threat-model.md`](docs/threat-model.md). The risks we accept, with
+their reasons, are listed in
+[`docs/audit/accepted-risks.md`](docs/audit/accepted-risks.md). Reports that
+demonstrate them in new ways are still welcome.
 
 ## External audit
 
-An external audit (§11.2) is required before v1.0 and has not happened yet.
+An external audit (§11.2) is required before v1.0 and has not happened
+yet. The package prepared for the auditor is
+[`docs/audit/README.md`](docs/audit/README.md). No release is cut before the
+audit is done and its Critical and High findings are fixed.
