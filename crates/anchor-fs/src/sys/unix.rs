@@ -448,7 +448,9 @@ pub(crate) fn write_atomic(
             if crate::sha256(&read_fd_bounded(f)?) != *sha256 {
                 return Err(FsError::ContentMismatch);
             }
-            meta.mode
+            // Never carry setuid/setgid/sticky over to agent-written
+            // content (as restore never recreates them; finding P-8).
+            meta.mode & 0o777
         }
     };
 
@@ -549,7 +551,9 @@ pub(crate) fn remove_strict(
     )?;
     let st = rfs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW).map_err(strict_err)?;
     let meta = meta_of(&st);
-    if !matches!(meta.kind, Kind::File | Kind::Symlink) {
+    // Unlinking a name never opens what it names, so special files
+    // (FIFOs, sockets, devices) are removed as safely as files.
+    if !matches!(meta.kind, Kind::File | Kind::Symlink | Kind::Other) {
         return Err(FsError::NotAFile);
     }
     if meta.kind != expected.kind || !meta.same_version(expected) {

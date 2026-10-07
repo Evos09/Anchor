@@ -900,3 +900,40 @@ mod snapshot_unix {
         assert_outside_untouched(&f);
     }
 }
+
+/// Review finding P-6: an approval authorizes exactly its operation. An
+/// append or delete approval cannot drive an overwrite, and a create
+/// approval cannot replace an existing file.
+#[test]
+fn write_requires_the_matching_operation() {
+    let f = fixture();
+    let w = Workspace::open(&f.ws).unwrap();
+    write_new(&f, &w, "CHANGELOG.md", b"history\n").unwrap();
+    let r = w.resolve("CHANGELOG.md").unwrap();
+    let existing = Expect::Existing {
+        id: r.meta.unwrap().id,
+        sha256: sha256(b"history\n"),
+    };
+    for op in [Operation::Append, Operation::Delete, Operation::Create] {
+        let a = approve(&f, &w, &r, op);
+        assert_eq!(
+            w.write(&r, b"rewritten\n", existing, a),
+            Err(FsError::ApprovalMismatch),
+            "{op:?}"
+        );
+    }
+    let n = w.resolve("new.txt").unwrap();
+    let a = approve(&f, &w, &n, Operation::Write);
+    assert_eq!(
+        w.write(&n, b"x", Expect::Absent, a),
+        Err(FsError::ApprovalMismatch)
+    );
+    // The append path still works with an append approval.
+    let a = approve(&f, &w, &r, Operation::Append);
+    w.append_verified(&r, b"more\n", sha256(b"history\n"), a)
+        .unwrap();
+    assert_eq!(
+        std::fs::read(f.ws.join("CHANGELOG.md")).unwrap(),
+        b"history\nmore\n"
+    );
+}

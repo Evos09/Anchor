@@ -95,6 +95,14 @@ pub struct WorkspaceConfig {
     /// overrode.
     #[serde(default)]
     pub not_append_only: Vec<String>,
+    /// Workspace-relative paths a heuristic has flagged at some point.
+    /// They stay append-only even if the content no longer matches (an
+    /// agent could otherwise append headings until the heuristic stops
+    /// matching, then rewrite the file; review finding P-1). Kept in the
+    /// state directory, out of agents' reach; only `not_append_only`
+    /// clears it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detected_append_only: Vec<String>,
     /// Snapshot settings, interpreted by the backend (ADR-0006). Kept
     /// opaque here so the guard round-trips it unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,6 +126,8 @@ pub struct Guard {
     /// canonical path -> sha256 of the full content the agent last read
     /// (or wrote) in this session.
     ledger: HashMap<PathBuf, [u8; 32]>,
+    /// [`WorkspaceConfig::detected_append_only`], updated on detection.
+    detected: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
 fn rel_key(rel: &Path) -> String {
@@ -147,6 +157,7 @@ impl Guard {
         Ok(Guard {
             config_path: config_path.to_path_buf(),
             explicit: b.build().map_err(|e| GuardError::Config(e.to_string()))?,
+            detected: std::sync::Mutex::new(config.detected_append_only.iter().cloned().collect()),
             config,
             ledger: HashMap::new(),
         })
@@ -206,7 +217,22 @@ impl Guard {
                 return AppendOnlyStatus::Marker;
             }
         }
-        match Self::heuristic(rel, content) {
+        let found = Self::heuristic(rel, content);
+        let mut detected = self.detected.lock().unwrap_or_else(|p| p.into_inner());
+        let reason = match found {
+            Some(r) => {
+                if detected.insert(key.clone()) {
+                    // Best effort: a failed save keeps it for this session.
+                    let mut cfg = self.config.clone();
+                    cfg.detected_append_only = detected.iter().cloned().collect();
+                    let _ = write_config(&self.config_path, &cfg);
+                }
+                Some(r)
+            }
+            None if detected.contains(&key) => Some(HeuristicReason::DatedEntries),
+            None => None,
+        };
+        match reason {
             Some(r) if self.config.not_append_only.contains(&key) => {
                 AppendOnlyStatus::Overridden(r)
             }
@@ -289,26 +315,37 @@ impl Guard {
     }
 
     fn save(&self) -> Result<(), GuardError> {
-        let text =
-            toml::to_string_pretty(&self.config).map_err(|e| GuardError::Config(e.to_string()))?;
-        let dir = self
-            .config_path
-            .parent()
-            .ok_or_else(|| GuardError::Config("config path has no parent".into()))?;
-        std::fs::create_dir_all(dir).map_err(|e| GuardError::Config(e.to_string()))?;
-        let tmp = dir.join(format!(".workspace.toml.tmp-{}", std::process::id()));
-        let write = || -> std::io::Result<()> {
-            use std::io::Write;
-            let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(text.as_bytes())?;
-            f.sync_all()?;
-            std::fs::rename(&tmp, &self.config_path)
-        };
-        write().map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            GuardError::Config(e.to_string())
-        })
+        let mut cfg = self.config.clone();
+        cfg.detected_append_only = self
+            .detected
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        write_config(&self.config_path, &cfg)
     }
+}
+
+/// Write the workspace config atomically.
+fn write_config(config_path: &Path, config: &WorkspaceConfig) -> Result<(), GuardError> {
+    let text = toml::to_string_pretty(config).map_err(|e| GuardError::Config(e.to_string()))?;
+    let dir = config_path
+        .parent()
+        .ok_or_else(|| GuardError::Config("config path has no parent".into()))?;
+    std::fs::create_dir_all(dir).map_err(|e| GuardError::Config(e.to_string()))?;
+    let tmp = dir.join(format!(".workspace.toml.tmp-{}", std::process::id()));
+    let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, config_path)
+    };
+    write().map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        GuardError::Config(e.to_string())
+    })
 }
 
 /// True iff `new` starts with exactly `original`, checked both by hash and

@@ -69,6 +69,7 @@ fn marker_and_explicit_config() {
     let cfg = WorkspaceConfig {
         append_only: vec!["logs/*.md".into()],
         not_append_only: vec![],
+        detected_append_only: vec![],
         snapshot: None,
     };
     let g = Guard::with_config(&d.path().join("w.toml"), cfg).unwrap();
@@ -242,4 +243,32 @@ fn rejects_unknown_config_keys() {
     let p = d.path().join("w.toml");
     std::fs::write(&p, "append_only = []\nallow_everything = true\n").unwrap();
     assert!(Guard::load(&p).is_err());
+}
+
+/// Review finding P-1: appending headings until the dated-entries heuristic
+/// no longer matches does not make a file writable; the detection is
+/// sticky, survives a reload, and only the user's override clears it.
+#[test]
+fn heuristic_detection_is_sticky() {
+    let (mut g, d) = guard();
+    let rel = Path::new("notes/log.md");
+    let original = b"2026-01-01 started\n2026-01-02 more\n2026-01-03 again\n".to_vec();
+    assert_eq!(
+        g.classify(rel, Some(&original)),
+        AppendOnlyStatus::Heuristic(HeuristicReason::DatedEntries)
+    );
+    let mut padded = original.clone();
+    for _ in 0..10 {
+        padded.extend_from_slice(b"# x\n");
+    }
+    assert_eq!(Guard::heuristic(rel, Some(&padded)), None);
+    assert!(g.classify(rel, Some(&padded)).is_append_only());
+    // A new session (fresh guard over the same config).
+    let g2 = Guard::load(&d.path().join(".anchor/workspace.toml")).unwrap();
+    assert!(g2.classify(rel, Some(&padded)).is_append_only());
+    g.mark_not_append_only(rel).unwrap();
+    assert!(matches!(
+        g.classify(rel, Some(&padded)),
+        AppendOnlyStatus::Overridden(_)
+    ));
 }

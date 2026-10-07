@@ -406,6 +406,29 @@ impl Workspace {
         mode: Option<u32>,
         approval: Approved,
     ) -> Result<WriteReceipt, FsError> {
+        // One approval, one operation: creating needs `Create`, replacing
+        // needs `Write` or `Edit` (an append approval, which policy may
+        // grant without a prompt, cannot drive an overwrite; review
+        // finding P-6).
+        let op = approval.operation();
+        let fits = match expect {
+            Expect::Absent => op == Operation::Create,
+            Expect::Existing { .. } => matches!(op, Operation::Write | Operation::Edit),
+        };
+        if !fits {
+            return Err(FsError::ApprovalMismatch);
+        }
+        self.write_checked(r, content, expect, mode, approval)
+    }
+
+    fn write_checked(
+        &self,
+        r: &Resolved,
+        content: &[u8],
+        expect: Expect,
+        mode: Option<u32>,
+        approval: Approved,
+    ) -> Result<WriteReceipt, FsError> {
         check_approval(&approval, r)?;
         match (&expect, &r.meta) {
             (Expect::Absent, None) => {}
@@ -448,16 +471,18 @@ impl Workspace {
         })
     }
 
-    /// Remove a resolved regular file (or a symlink resolved with
-    /// [`Workspace::resolve_exact`]), verifying it is still the approved
-    /// file (same identity) before unlinking it.
+    /// Remove a resolved regular file (or a symlink or special file
+    /// resolved with [`Workspace::resolve_exact`]), verifying it is still
+    /// the approved entry (same identity) before unlinking the name.
     pub fn remove(&self, r: &Resolved, approval: Approved) -> Result<(), FsError> {
         check_approval(&approval, r)?;
         if approval.operation() != Operation::Delete {
             return Err(FsError::ApprovalMismatch);
         }
         let meta = r.meta.ok_or(FsError::NotFound)?;
-        if !matches!(meta.kind, Kind::File | Kind::Symlink) {
+        if !matches!(meta.kind, Kind::File | Kind::Symlink)
+            && !(cfg!(unix) && meta.kind == Kind::Other)
+        {
             return Err(FsError::NotAFile);
         }
         let (parent_rel, name) = split_parent(&r.rel)?;
@@ -576,13 +601,14 @@ impl Workspace {
         if !is_pure_append(&current.bytes, &new) {
             return Err(FsError::AppendVerificationFailed);
         }
-        let receipt = self.write(
+        let receipt = self.write_checked(
             r,
             &new,
             Expect::Existing {
                 id: current.meta.id,
                 sha256: original_sha256,
             },
+            None,
             approval,
         )?;
         // Re-read what is now on disk and verify the prefix again.

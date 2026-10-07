@@ -96,6 +96,16 @@ impl Ctx<'_, '_, '_> {
             let os = name_os(name).ok_or_else(|| Error::Corrupt("unrepresentable name".into()))?;
             let path = rel.join(&os);
             let (c, t) = (cur.get(name), tgt.get(name));
+            // A tracked node in the target replaces whatever untracked entry
+            // (hardlink, FIFO, oversized file) an agent left at its name:
+            // skipping it would leave the data unrecoverable while the
+            // restore reported success (review finding P-2).
+            if let (Some(Node::Untracked(_)), Some(tn)) = (c, t)
+                && !untouchable(tn)
+            {
+                self.replace_untracked(&path, tn)?;
+                continue;
+            }
             if c.is_some_and(untouchable) || t.is_some_and(untouchable) {
                 if c != t {
                     self.report.skipped.push(path.display().to_string());
@@ -210,6 +220,24 @@ impl Ctx<'_, '_, '_> {
         }
         self.tick(format!("restored {}", r.canonical.display()));
         Ok(())
+    }
+
+    /// Unlink the untracked entry at `rel` (never following or opening it;
+    /// identity-checked) and create `node` in its place. An untracked
+    /// directory is left alone and reported.
+    fn replace_untracked(&mut self, rel: &Path, node: &Node) -> Result<()> {
+        let r = self.resolve(rel)?;
+        let Some(m) = r.meta else {
+            return self.create_node(rel, node);
+        };
+        if m.kind == Kind::Dir {
+            self.report.skipped.push(rel.display().to_string());
+            return Ok(());
+        }
+        let a = self.approve(&r, Operation::Delete)?;
+        self.ws.remove(&r, a)?;
+        self.tick(format!("removed untracked {}", r.canonical.display()));
+        self.create_node(rel, node)
     }
 
     fn remove_node(&mut self, rel: &Path, node: &Node) -> Result<()> {

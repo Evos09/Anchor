@@ -490,6 +490,45 @@ fn hardlinks_and_specials_are_untracked_and_left_alone() {
     assert_eq!(fs::read_to_string(&outside).unwrap(), "outside content");
 }
 
+/// Review finding P-2: an agent that replaces a tracked file with a
+/// hardlink or a FIFO cannot make it unrecoverable; restore unlinks the
+/// untracked entry (never following it) and recreates the file.
+#[cfg(unix)]
+#[test]
+fn tracked_files_replaced_by_untracked_entries_are_restored() {
+    let e = env();
+    fs::write(e.ws.join("a.txt"), "original a").unwrap();
+    fs::write(e.ws.join("b.txt"), "original b").unwrap();
+    let outside = e.base.join("outside");
+    fs::write(&outside, "outside content").unwrap();
+    let store = Store::open(&e.store_dir).unwrap();
+    let ws = Workspace::open(&e.ws).unwrap();
+    let s = snap(&store, &ws, "turns/1");
+    tick();
+    fs::remove_file(e.ws.join("a.txt")).unwrap();
+    fs::hard_link(&outside, e.ws.join("a.txt")).unwrap();
+    fs::remove_file(e.ws.join("b.txt")).unwrap();
+    let st = std::process::Command::new("mkfifo")
+        .arg(e.ws.join("b.txt"))
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let mut auth = approver(&e.engine, ws.root());
+    let r = restore(&store, &ws, &opts(), &s.id(), &mut auth).unwrap();
+    assert!(r.skipped.is_empty(), "{:?}", r.skipped);
+    assert_eq!(
+        fs::read_to_string(e.ws.join("a.txt")).unwrap(),
+        "original a"
+    );
+    assert_eq!(
+        fs::read_to_string(e.ws.join("b.txt")).unwrap(),
+        "original b"
+    );
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "outside content");
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(fs::metadata(&outside).unwrap().nlink(), 1);
+}
+
 /// §5.5 "a symlink loop doesn't hang": snapshot and restore complete.
 #[cfg(unix)]
 #[test]
