@@ -778,3 +778,44 @@ fn command_cannot_touch_state_dir() {
     // (the engine's floor rule for the state dir is defence in depth).
     assert_eq!(report.stats.denied, 2, "both file-tool attempts refused");
 }
+
+/// Review finding T-4: rollback finds a turn by its number, so a runtime
+/// that reuses a turn number is a protocol error, not a renumbering.
+#[test]
+fn runtime_cannot_reuse_turn_numbers() {
+    use std::os::unix::fs::PermissionsExt;
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = open(&fx, true, ResumeChoice::FreshSession);
+    let mut frames = String::new();
+    for (id, turn) in [(1, 1), (2, 2), (3, 1)] {
+        let f = anchor_protocol::Frame::new(id, anchor_protocol::Message::TurnStarted { turn });
+        frames.push_str(&anchor_protocol::encode(&f).unwrap());
+        frames.push('\n');
+    }
+    let frames_path = fx.base.join("frames.jsonl");
+    std::fs::write(&frames_path, frames).unwrap();
+    let bin = fx.base.join("fake-runtime");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\ncat '{}'\nexec cat >/dev/null\n",
+            frames_path.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = SessionConfig {
+        agent_bin: bin,
+        session_id: session::new_session_id(),
+        instruction: "x".into(),
+        roles_toml: ROLES.into(),
+        checkpoint_threshold: 0.8,
+        resume_from: None,
+        mock_script: None,
+        hub: None,
+        review: None,
+    };
+    let e = session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap_err();
+    assert!(e.to_string().contains("turn numbers must increase"), "{e}");
+}

@@ -103,6 +103,70 @@ fn runtime_env(roles_toml: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Runtime stderr lines held for display at most, and the longest line
+/// shown; the rest is dropped, never buffered (review finding T-5).
+const STDERR_QUEUE: usize = 256;
+const STDERR_LINE: usize = 4096;
+
+/// Forward the runtime's stderr line by line, bounded in line length and
+/// in lines queued: a runtime that floods stderr loses lines, it cannot
+/// grow the backend's memory or stall on a full pipe.
+fn forward_stderr(stderr: impl std::io::Read, tx: &std::sync::mpsc::SyncSender<String>) {
+    use std::sync::mpsc::TrySendError;
+    let mut r = BufReader::new(stderr);
+    let mut line = Vec::new();
+    let mut dropped = 0u64;
+    loop {
+        line.clear();
+        let mut cut = false;
+        // Read one line, keeping at most STDERR_LINE bytes of it.
+        let eof = loop {
+            let buf = match r.fill_buf() {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break true,
+            };
+            if buf.is_empty() {
+                break true;
+            }
+            let (chunk, done) = match buf.iter().position(|&b| b == b'\n') {
+                Some(i) => (&buf[..i], Some(i + 1)),
+                None => (buf, None),
+            };
+            let room = STDERR_LINE.saturating_sub(line.len());
+            cut |= chunk.len() > room;
+            line.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            let n = done.unwrap_or(buf.len());
+            r.consume(n);
+            if done.is_some() {
+                break false;
+            }
+        };
+        if eof && line.is_empty() {
+            break;
+        }
+        let mut text = String::from_utf8_lossy(&line).into_owned();
+        if cut {
+            text.push_str(" [line truncated]");
+        }
+        if dropped > 0 {
+            match tx.try_send(format!("[{dropped} runtime stderr lines dropped]")) {
+                Ok(()) => dropped = 0,
+                Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Disconnected(_)) => break,
+            }
+        }
+        match tx.try_send(text) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => dropped += 1,
+            Err(TrySendError::Disconnected(_)) => break,
+        }
+        if eof {
+            break;
+        }
+    }
+}
+
 struct Wire {
     child: Child,
     stdin: ChildStdin,
@@ -137,12 +201,8 @@ pub fn run(
     let stdout = child.stdout.take().ok_or(SessionError::RuntimeExited)?;
     let stderr = child.stderr.take().ok_or(SessionError::RuntimeExited)?;
     let stdin = child.stdin.take().ok_or(SessionError::RuntimeExited)?;
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    let stderr_thread = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            let _ = tx.send(line);
-        }
-    });
+    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(STDERR_QUEUE);
+    let stderr_thread = std::thread::spawn(move || forward_stderr(stderr, &tx));
     let mut report = SessionReport {
         runtime_pid: child.id(),
         ..Default::default()
@@ -169,6 +229,7 @@ pub fn run(
         }),
     );
 
+    let mut last_turn = 0u64;
     let result = (|| -> Result<(), SessionError> {
         loop {
             while let Ok(line) = rx.try_recv() {
@@ -203,6 +264,14 @@ pub fn run(
                     })))?;
                 }
                 Message::TurnStarted { turn } => {
+                    // Rollback finds a turn by its number, so a runtime may
+                    // not reuse or reorder them (review finding T-4).
+                    if turn <= last_turn {
+                        return Err(SessionError::Protocol(format!(
+                            "turn {turn} started after turn {last_turn}: turn numbers must increase"
+                        )));
+                    }
+                    last_turn = turn;
                     mediator.set_turn(turn);
                     audit(
                         mediator,
@@ -419,4 +488,38 @@ pub fn default_agent_bin() -> PathBuf {
 /// Flush helper for CLI output.
 pub fn flush() {
     let _ = std::io::stdout().flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review finding T-5: a flood of runtime stderr is cut to bounded
+    /// lines and a bounded queue; nothing grows with the input.
+    #[test]
+    fn runtime_stderr_is_bounded() {
+        let mut input = vec![b'x'; 3 * STDERR_LINE];
+        input.extend_from_slice(b"\nshort\n");
+        for i in 0..(STDERR_QUEUE * 4) {
+            input.extend_from_slice(format!("line {i}\n").as_bytes());
+        }
+        input.extend_from_slice(b"no newline at end");
+        let (tx, rx) = std::sync::mpsc::sync_channel(STDERR_QUEUE);
+        forward_stderr(&input[..], &tx);
+        drop(tx);
+        let got: Vec<String> = rx.iter().collect();
+        assert_eq!(got.len(), STDERR_QUEUE);
+        assert!(got[0].ends_with(" [line truncated]"));
+        assert!(got[0].len() <= STDERR_LINE + 20);
+        assert_eq!(got[1], "short");
+
+        // Drained as it goes, nothing is lost and the final partial line
+        // arrives.
+        let (tx, rx) = std::sync::mpsc::sync_channel(STDERR_QUEUE);
+        let t = std::thread::spawn(move || rx.iter().collect::<Vec<String>>());
+        let small = b"a\nb\nc";
+        forward_stderr(&small[..], &tx);
+        drop(tx);
+        assert_eq!(t.join().unwrap(), ["a", "b", "c"]);
+    }
 }

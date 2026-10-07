@@ -632,6 +632,18 @@ impl<'m> MergeQueue<'m> {
                     );
                 }
             }
+            // Claims can be revoked and agents retired while the gate or
+            // the user deliberated: check them again, last thing before
+            // applying (review finding H-3).
+            let violations = self.claim_violations(agent, &changes)?;
+            if !violations.is_empty() {
+                return self.reject(
+                    &entry,
+                    RejectKind::Claims,
+                    json!({ "paths": violations }),
+                    Some((pre, cand)),
+                );
+            }
             // Only now is the merge in flight: a crash from here is settled
             // by `recover`.
             self.set_status(seq, MergeStatus::Applying, Some((&pre, &cand)), json!({}))?;

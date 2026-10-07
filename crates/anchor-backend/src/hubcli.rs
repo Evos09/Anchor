@@ -465,16 +465,41 @@ fn ui_port(a: &Args) -> Result<u16, String> {
 fn announce_ui(a: &Args, ui: &anchor_backend::ui::Ui) -> Result<(), String> {
     eprintln!("anchor: dashboard at {}", ui.url());
     if let Some(f) = a.get("--ui-url-file") {
-        let mut o = std::fs::OpenOptions::new();
-        o.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-        use std::io::Write as _;
-        o.open(f)
-            .and_then(|mut file| writeln!(file, "{}", ui.url()))
+        write_secret_file(Path::new(f), format!("{}\n", ui.url()).as_bytes())
             .map_err(|e| format!("{f}: {e}"))?;
     }
     Ok(())
+}
+
+/// Write `bytes` to `path` so that only the owner can ever read them: a
+/// fresh owner-only file (never an existing one, never through a symlink)
+/// renamed over `path`, which replaces whatever was there instead of
+/// writing through it (review finding U-1).
+fn write_secret_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("not a file name"))?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = path.with_file_name(tmp_name);
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let r = o.open(&tmp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    });
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
 }
 
 /// `anchor ui --workspace DIR`: the dashboard for a workspace, outside a
@@ -553,4 +578,36 @@ pub fn cmd_ui(a: &Args) -> Result<ExitCode, String> {
     eprintln!("anchor: press Ctrl-C to quit.");
     ui.wait();
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review finding U-1: the URL (it carries the token) never lands in
+    /// a file someone else made or can read, nor through a planted link.
+    #[cfg(unix)]
+    #[test]
+    fn secret_file_replaces_links_and_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("elsewhere");
+        std::fs::write(&target, "untouched").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let f = d.path().join("url");
+        std::os::unix::fs::symlink(&target, &f).unwrap();
+        write_secret_file(&f, b"http://x/?t=secret\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched");
+        let md = std::fs::symlink_metadata(&f).unwrap();
+        assert!(md.is_file());
+        assert_eq!(md.permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "http://x/?t=secret\n");
+        // An existing world-readable file is replaced, not reused.
+        std::fs::remove_file(&f).unwrap();
+        std::fs::write(&f, "old").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_secret_file(&f, b"new").unwrap();
+        let md = std::fs::symlink_metadata(&f).unwrap();
+        assert_eq!(md.permissions().mode() & 0o777, 0o600);
+    }
 }

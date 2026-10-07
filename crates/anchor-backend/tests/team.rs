@@ -913,3 +913,47 @@ fn kill_mid_merge_recovers() {
     assert!(hub.verify().unwrap().ok());
     AuditLog::verify(&opened.paths.audit).unwrap();
 }
+
+/// Retires the merging agent while its change is being checked.
+struct RetiringGate {
+    hub: Arc<anchor_hub::Hub>,
+}
+
+impl MergeGate for RetiringGate {
+    fn check(
+        &mut self,
+        ctx: &GateContext<'_>,
+        _: &anchor_backend::mediator::SharedStore,
+    ) -> Result<Value, Value> {
+        self.hub.retire_agent(Caller::User, ctx.agent).unwrap();
+        Ok(json!({ "approved": true }))
+    }
+}
+
+/// Review finding H-3: claims are checked again after the gate, right
+/// before applying, so a retirement (or revocation) during verification
+/// stops the merge.
+#[test]
+fn claims_are_rechecked_before_apply() {
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = fx.open();
+    let hub = hub_of(&opened);
+    let gate = RetiringGate { hub: hub.clone() };
+    let mut q = MergeQueue::new(hub.clone(), &mut opened.mediator, Box::new(gate), true);
+    let (a, ia) = iso_agent(&mut q, &fx, "alpha", &["src/"]);
+    hub.request_claim(Caller::Agent(a), "src/a.txt", ClaimType::Edit, false, None)
+        .unwrap();
+    std::fs::write(ia.ws.root().join("src/a.txt"), "alpha\n").unwrap();
+    let o = submit(&mut q, a, &ia);
+    let Outcome::Rejected { feedback, .. } = &o else {
+        panic!("{o:?}")
+    };
+    assert_eq!(
+        o.reject_kind(),
+        Some(anchor_backend::queue::RejectKind::Claims)
+    );
+    assert_eq!(feedback["paths"][0]["reason"], "the agent was retired");
+    drop(q);
+    assert_eq!(fx.read("src/a.txt"), "a1\n");
+}

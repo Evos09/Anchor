@@ -42,6 +42,11 @@ impl ClaimPath {
             match seg {
                 "" => return Err("claim path has an empty segment".into()),
                 "." | ".." => return Err("claim path must not contain . or ..".into()),
+                _ if windows_alias(seg) => {
+                    return Err(format!(
+                        "claim path segment {seg:?} can alias another name on Windows"
+                    ));
+                }
                 _ => segs.push(seg.to_string()),
             }
         }
@@ -61,22 +66,29 @@ impl ClaimPath {
         self.subtree
     }
 
-    /// `self` names `other` or a path inside it.
+    /// `self` names `other` or a path inside it. Where the file system
+    /// ignores case, so does this.
     pub fn covers(&self, other: &ClaimPath) -> bool {
         if self.segs.len() > other.segs.len() {
             return false;
         }
-        let prefix = self.segs[..] == other.segs[..self.segs.len()];
+        let prefix = same_segs(
+            &self.segs,
+            &other.segs[..self.segs.len()],
+            CASE_INSENSITIVE_FS,
+        );
         if !prefix {
             return false;
         }
         self.segs.len() == other.segs.len() && (self.subtree || !other.subtree) || self.subtree
     }
 
-    /// The two claims name at least one common path.
+    /// The two claims name at least one common path. Case is ignored on
+    /// every platform: a false conflict only serialises two agents, a
+    /// missed one lets them edit the same file (review finding H-4).
     pub fn overlaps(&self, other: &ClaimPath) -> bool {
         let n = self.segs.len().min(other.segs.len());
-        if self.segs[..n] != other.segs[..n] {
+        if !same_segs(&self.segs[..n], &other.segs[..n], true) {
             return false;
         }
         match self.segs.len().cmp(&other.segs.len()) {
@@ -85,6 +97,43 @@ impl ClaimPath {
             std::cmp::Ordering::Greater => other.subtree,
         }
     }
+}
+
+/// Whether the platform's usual file systems (APFS, NTFS) treat names
+/// that differ only in case as the same name.
+const CASE_INSENSITIVE_FS: bool = cfg!(any(windows, target_os = "macos"));
+
+fn same_segs(a: &[String], b: &[String], fold: bool) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x == y
+                || (fold
+                    && x.chars()
+                        .flat_map(char::to_lowercase)
+                        .eq(y.chars().flat_map(char::to_lowercase)))
+        })
+}
+
+/// A name Windows resolves to a different spelling: a trailing dot or
+/// space (stripped), an 8.3 short name (`PROGRA~1`), or a reserved device
+/// name. Refused on every platform, so a claim means the same everywhere.
+fn windows_alias(seg: &str) -> bool {
+    if seg.ends_with('.') || seg.ends_with(' ') {
+        return true;
+    }
+    let stem = seg.split('.').next().unwrap_or(seg);
+    if let Some((head, tail)) = stem.rsplit_once('~')
+        && !head.is_empty()
+        && !tail.is_empty()
+        && tail.bytes().all(|b| b.is_ascii_digit())
+    {
+        return true;
+    }
+    let upper = stem.trim_end().to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.as_bytes()[3].is_ascii_digit())
 }
 
 impl fmt::Display for ClaimPath {
@@ -138,6 +187,13 @@ mod tests {
             "a\u{0}b",
             "a\nb",
             "/",
+            "src.",
+            "src /a",
+            "PROGRA~1/x",
+            "docs/README~2.md",
+            "nul",
+            "a/con.txt",
+            "COM1",
         ] {
             assert!(ClaimPath::parse(bad).is_err(), "{bad:?}");
         }
@@ -176,5 +232,15 @@ mod tests {
         assert!(!p("src/a.rs").covers(&p("src/")));
         assert!(p("src/a.rs").covers(&p("src/a.rs")));
         assert!(!p("src/").covers(&p("lib/x")));
+        // Case never hides a conflict, and covers follows the platform.
+        assert!(p("SRC/").overlaps(&p("src/a.rs")));
+        assert!(p("Readme.md").overlaps(&p("README.MD")));
+        assert_eq!(
+            p("SRC/").covers(&p("src/a.rs")),
+            cfg!(any(windows, target_os = "macos"))
+        );
+        for ok in ["a~b", "~tmp", "x~", ".config", "console.log", "com10"] {
+            assert!(ClaimPath::parse(ok).is_ok(), "{ok}");
+        }
     }
 }
