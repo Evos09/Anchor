@@ -510,6 +510,7 @@ impl VerifyGate {
                 read_write: rw.to_vec(),
                 read_only,
             }),
+            stdin: Vec::new(),
         };
         let result = anchor_exec::run(&spec);
         // The read/write roots are throwaway: on Windows the command's

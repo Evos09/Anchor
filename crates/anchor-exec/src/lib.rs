@@ -113,6 +113,9 @@ pub struct CommandSpec {
     /// `None` leaves the filesystem unconfined (only for trusted callers;
     /// the backend always confines agent commands).
     pub fs: Option<FsConfinement>,
+    /// Bytes written to the command's stdin, which is then closed. Empty
+    /// means no stdin at all (the null device).
+    pub stdin: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,7 +313,11 @@ pub fn run(spec: &CommandSpec) -> Result<Output, ExecError> {
     cmd.current_dir(&spec.cwd)
         .env_clear()
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
-        .stdin(Stdio::null())
+        .stdin(if spec.stdin.is_empty() {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let start = Instant::now();
@@ -322,6 +329,7 @@ pub fn run(spec: &CommandSpec) -> Result<Output, ExecError> {
         }
     })?;
     drop(cmd);
+    spawn_writer(child.stdin.take(), spec.stdin.clone());
     let cap = spec.limits.max_output_bytes;
     let out_reader = spawn_reader(child.stdout.take(), cap);
     let err_reader = spawn_reader(child.stderr.take(), cap);
@@ -382,6 +390,17 @@ impl Reader {
         let mut g = self.buf.lock().unwrap_or_else(|p| p.into_inner());
         let (out, truncated) = std::mem::take(&mut *g);
         (out, truncated || !closed)
+    }
+}
+
+/// Feed `data` to a child's stdin from a thread of its own (a child that
+/// writes before it reads cannot deadlock against us), then close it. A
+/// child that exits without reading only costs a broken pipe.
+fn spawn_writer<W: std::io::Write + Send + 'static>(w: Option<W>, data: Vec<u8>) {
+    if let Some(mut w) = w {
+        std::thread::spawn(move || {
+            let _ = w.write_all(&data);
+        });
     }
 }
 
@@ -1398,6 +1417,7 @@ mod tests_windows {
                     .filter(|p| p.is_absolute() && p.exists())
                     .collect(),
             }),
+            stdin: Vec::new(),
         }
     }
 
@@ -1623,6 +1643,18 @@ mod tests_windows {
             t.join().unwrap().unwrap();
         }
         assert!(windows::delete_profile(&name).unwrap());
+    }
+
+    /// Bytes given as stdin reach a confined command.
+    #[test]
+    fn confined_commands_read_their_stdin() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(ws_dir.path()).unwrap();
+        let mut s = confined("sort", &[], &ws);
+        s.stdin = b"anchor-stdin-ok\r\n".to_vec();
+        let o = run(&s).unwrap();
+        assert_eq!(o.exit, ExitKind::Exited(0), "{}", text(&o));
+        assert!(text(&o).contains("anchor-stdin-ok"), "{}", text(&o));
     }
 
     /// Batch files would be re-parsed by cmd.exe; they are refused.

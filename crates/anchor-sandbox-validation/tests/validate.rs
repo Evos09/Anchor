@@ -67,6 +67,7 @@ fn spec(e: &Env, args: &[&str]) -> CommandSpec {
             read_write: vec![e.ws.clone()],
             read_only,
         }),
+        stdin: Vec::new(),
     }
 }
 

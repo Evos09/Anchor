@@ -903,6 +903,7 @@ impl Mediator {
                 read_write: vec![self.ws.root().to_path_buf()],
                 read_only: self.exec_read_only.clone(),
             }),
+            stdin: Vec::new(),
         };
         // Git executes its hooks and config; a command must not plant them
         // (review finding T-1).

@@ -901,9 +901,10 @@ pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
         cwd: &spec.cwd,
         sec: &sec,
         job: &job,
-        piped_stdin: false,
+        piped_stdin: !spec.stdin.is_empty(),
     })?;
     let (process, out_r, err_r) = (child.process, child.stdout, child.stderr);
+    spawn_writer(child.stdin.map(std::fs::File::from), spec.stdin.clone());
 
     let cap = spec.limits.max_output_bytes;
     let out_reader = spawn_reader(Some(std::fs::File::from(out_r)), cap);

@@ -23,6 +23,7 @@ fn spec(program: &str, args: &[&str], network: Network) -> CommandSpec {
         },
         network,
         fs: None,
+        stdin: Vec::new(),
     }
 }
 
@@ -63,6 +64,27 @@ fn program_must_be_bare_name() {
     }
     // Relative PATH entries are ignored (no resolution against the cwd).
     assert!(resolve_program("sh", ".:bin").is_err());
+}
+
+/// Bytes given as stdin reach the command, and a payload larger than a
+/// pipe buffer cannot deadlock against the output readers.
+#[test]
+fn stdin_bytes_reach_the_command() {
+    let mut s = spec("cat", &[], Network::Deny);
+    s.stdin = b"{\"v\":1}\n".to_vec();
+    let out = run(&s).unwrap();
+    assert_eq!(out.exit, ExitKind::Exited(0));
+    assert_eq!(out.stdout, b"{\"v\":1}\n");
+    let big: Vec<u8> = (0..256 * 1024).map(|i| b'a' + (i % 26) as u8).collect();
+    s.stdin = big.clone();
+    let out = run(&s).unwrap();
+    assert_eq!(out.exit, ExitKind::Exited(0));
+    assert_eq!(out.stdout, big);
+    // No stdin: the null device, read as immediate end of file.
+    s.stdin = Vec::new();
+    let out = run(&s).unwrap();
+    assert_eq!(out.exit, ExitKind::Exited(0));
+    assert!(out.stdout.is_empty());
 }
 
 /// Threat 4: model output containing shell metacharacters is passed as a

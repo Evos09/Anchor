@@ -26,6 +26,7 @@ fn spec(program: &str, args: &[&str], network: Network) -> CommandSpec {
         },
         network,
         fs: None,
+        stdin: Vec::new(),
     }
 }
 
