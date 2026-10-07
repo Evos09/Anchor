@@ -580,6 +580,51 @@ pub fn cmd_ui(a: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The models file the app starts with: two local Ollama models
+/// (`examples/local/roles.ollama.toml`; a test keeps the copy identical).
+const DEFAULT_APP_ROLES: &str = include_str!("../assets/roles.ollama.toml");
+
+/// `anchor app`: the desktop app's backend (ADR-0028). Serves the app on
+/// loopback; the user opens projects and runs tasks from the page.
+pub fn cmd_app(a: &Args) -> Result<ExitCode, String> {
+    let state_base = default_state_base();
+    let roles_path = match a.get("--roles") {
+        Some(r) => std::fs::canonicalize(r).map_err(|e| format!("--roles {r}: {e}"))?,
+        None => {
+            // First run: the default, where the user can find and edit it.
+            let dir = state_base.join("app");
+            let p = dir.join("roles.toml");
+            if !p.exists() {
+                std::fs::create_dir_all(&dir)
+                    .and_then(|_| std::fs::write(&p, DEFAULT_APP_ROLES))
+                    .map_err(|e| format!("{}: {e}", p.display()))?;
+            }
+            p
+        }
+    };
+    let mut ro = default_exec_read_only();
+    ro.extend(a.all("--exec-read-only").into_iter().map(PathBuf::from));
+    let app = anchor_backend::ui::app::App::new(anchor_backend::ui::app::AppConfig {
+        state_base,
+        roles_path,
+        mock_script: a
+            .get("--mock-script")
+            .map(|f| std::fs::read_to_string(f).map_err(|e| format!("--mock-script {f}: {e}")))
+            .transpose()?,
+        exec_read_only: ro,
+        agent_bin: a
+            .get("--agent")
+            .map(PathBuf::from)
+            .unwrap_or_else(session::default_agent_bin),
+        policy: a.get("--policy").map(PathBuf::from),
+    });
+    let ui = anchor_backend::ui::start_app(app, ui_port(a)?).map_err(|e| format!("app: {e}"))?;
+    announce_ui(a, &ui)?;
+    eprintln!("anchor: the app is running. Press Ctrl-C to quit.");
+    ui.wait();
+    Ok(ExitCode::SUCCESS)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

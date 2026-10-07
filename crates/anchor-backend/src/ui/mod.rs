@@ -1,6 +1,8 @@
 //! The collaboration dashboard (spec §12, ADR-0025): a loopback-only web
 //! UI served by the backend itself, either inside `anchor team run --ui`
-//! (live: approvals are answered here) or by `anchor ui` (after a run).
+//! (live: approvals are answered here), by `anchor ui` (after a run), or
+//! by `anchor app` (the desktop app, ADR-0028: the user opens projects and
+//! runs tasks from the page; see [`app`]).
 //!
 //! Security model (threat model, "Dashboard"):
 //! * bound to `127.0.0.1` only, through the Hub's hardened HTTP core
@@ -24,7 +26,7 @@ use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use anchor_hub::http::{Request, Response, ServerConfig, ServerHandle, Service};
@@ -35,6 +37,7 @@ use serde_json::{Value, json};
 
 use crate::mediator::{Mediator, SharedStore, lock_store};
 
+pub mod app;
 mod assets;
 pub mod broker;
 pub mod model;
@@ -54,7 +57,7 @@ pub struct Sources {
     pub store_note: Option<String>,
     /// Approvals answered from the dashboard (live runs).
     pub broker: Option<Arc<Broker>>,
-    /// `live` (inside a team run) or `inspect` (`anchor ui`).
+    /// `live` (inside a team run), `inspect` (`anchor ui`) or `app`.
     pub mode: &'static str,
 }
 
@@ -73,9 +76,18 @@ struct Feed {
     error: Option<String>,
 }
 
-struct State {
+/// The server: its credential, and the project it currently shows.
+struct Server {
     token: String,
     port: u16,
+    /// The dashboard's data; swapped when the app opens another project.
+    project: RwLock<Option<Arc<State>>>,
+    /// Set in app mode (`anchor app`).
+    app: Option<Arc<app::App>>,
+}
+
+/// One project's dashboard data.
+struct State {
     src: Sources,
     feed: Mutex<Feed>,
     /// The main workspace's mediator, when no run holds it: enables
@@ -90,7 +102,7 @@ struct State {
 /// A running dashboard; dropping it stops the server and refuses every
 /// approval still pending.
 pub struct Ui {
-    state: Arc<State>,
+    state: Arc<Server>,
     server: Option<ServerHandle>,
 }
 
@@ -109,24 +121,47 @@ fn random_hex(n: usize) -> std::io::Result<String> {
     Ok(anchor_policy::audit::hex(&raw))
 }
 
+impl State {
+    fn new(src: Sources) -> State {
+        let path = src.audit.path().to_path_buf();
+        State {
+            feed: Mutex::new(Feed {
+                tailer: Tailer::new(&path),
+                model: model::Model::default(),
+                error: None,
+            }),
+            src,
+            workspace: Mutex::new(None),
+            running: AtomicBool::new(false),
+            diffs: Mutex::new(BTreeMap::new()),
+            confirms: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
 /// Start the dashboard on `127.0.0.1:port` (0: any free port).
 pub fn start(src: Sources, port: u16) -> std::io::Result<Ui> {
+    serve(Some(Arc::new(State::new(src))), None, port)
+}
+
+/// Start the desktop app's server (`anchor app`): no project until the
+/// user opens one.
+pub fn start_app(app: Arc<app::App>, port: u16) -> std::io::Result<Ui> {
+    serve(None, Some(app), port)
+}
+
+fn serve(
+    project: Option<Arc<State>>,
+    app: Option<Arc<app::App>>,
+    port: u16,
+) -> std::io::Result<Ui> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let port = listener.local_addr()?.port();
-    let path = src.audit.path().to_path_buf();
-    let state = Arc::new(State {
+    let state = Arc::new(Server {
         token: random_hex(32)?,
         port,
-        feed: Mutex::new(Feed {
-            tailer: Tailer::new(&path),
-            model: model::Model::default(),
-            error: None,
-        }),
-        src,
-        workspace: Mutex::new(None),
-        running: AtomicBool::new(false),
-        diffs: Mutex::new(BTreeMap::new()),
-        confirms: Mutex::new(BTreeMap::new()),
+        project: RwLock::new(project),
+        app,
     });
     let cfg = ServerConfig {
         // Long polls hold a worker each.
@@ -160,20 +195,21 @@ impl Ui {
 
     /// Whether a team run is in progress (rollback is refused meanwhile).
     pub fn set_running(&self, running: bool) {
-        self.state.running.store(running, Ordering::SeqCst);
+        if let Some(p) = self.state.current() {
+            p.running.store(running, Ordering::SeqCst);
+        }
     }
 
     /// Hand the main workspace to the dashboard (enables rollback).
     pub fn attach_workspace(&self, m: Mediator) {
-        *self
-            .state
-            .workspace
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Some(m);
+        if let Some(p) = self.state.current() {
+            *p.workspace.lock().unwrap_or_else(|p| p.into_inner()) = Some(m);
+        }
     }
 
     pub fn detach_workspace(&self) -> Option<Mediator> {
         self.state
+            .current()?
             .workspace
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -190,7 +226,12 @@ impl Ui {
 
 impl Drop for Ui {
     fn drop(&mut self) {
-        if let Some(b) = &self.state.src.broker {
+        if let Some(app) = &self.state.app {
+            app.shutdown();
+        }
+        if let Some(p) = self.state.current()
+            && let Some(b) = &p.src.broker
+        {
             b.close();
         }
         if let Some(s) = self.server.take() {
@@ -280,13 +321,49 @@ fn ok(v: Value) -> Response {
     Response::json(200, &v)
 }
 
-impl Service for State {
+impl Service for Server {
     fn handle(&self, req: &Request) -> Response {
         harden(self.route(req))
     }
 }
 
-impl State {
+impl Server {
+    fn current(&self) -> Option<Arc<State>> {
+        self.project
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    fn set_current(&self, p: Option<Arc<State>>) -> Option<Arc<State>> {
+        std::mem::replace(
+            &mut *self.project.write().unwrap_or_else(|p| p.into_inner()),
+            p,
+        )
+    }
+
+    fn get(&self, api: &str, q: &BTreeMap<String, String>) -> Response {
+        if let (Some(app), Some(rest)) = (&self.app, api.strip_prefix("app/")) {
+            return app.get(rest, q);
+        }
+        match self.current() {
+            Some(p) => p.get(api, q),
+            // The app before a project is open.
+            None if api == "overview" => ok(json!({ "mode": "app", "project": false })),
+            None => Response::error(409, "open a project first"),
+        }
+    }
+
+    fn post(&self, api: &str, body: &Value) -> Response {
+        if let (Some(app), Some(rest)) = (&self.app, api.strip_prefix("app/")) {
+            return app.post(self, rest, body);
+        }
+        match self.current() {
+            Some(p) => p.post(api, body),
+            None => Response::error(409, "open a project first"),
+        }
+    }
+
     fn origin_ok(&self, req: &Request) -> bool {
         let ours = |v: &str, scheme: &str| {
             v == format!("{scheme}127.0.0.1:{}", self.port)
@@ -363,7 +440,9 @@ impl State {
             None => Response::error(404, "not found"),
         }
     }
+}
 
+impl State {
     // -- the model -------------------------------------------------------------
 
     /// Fold new audit entries in. Returns the number of events.
@@ -425,7 +504,7 @@ impl State {
 
     fn can_rollback(&self) -> Result<(), &'static str> {
         if self.running.load(Ordering::SeqCst) {
-            return Err("a team run is in progress; roll back after it finishes");
+            return Err("a run is in progress; roll back after it finishes");
         }
         if self
             .workspace

@@ -1,0 +1,45 @@
+# Two free local models through Ollama (https://ollama.com), no API key.
+# Two families, because the reviewer must never be the executor's family
+# (spec §9.1). Get them with:
+#   ollama pull qwen2.5-coder:7b
+#   ollama pull llama3.1:8b
+# Then: anchor run --workspace DIR --roles examples/local/roles.ollama.toml --task "..."
+# Or on Windows, all in one: powershell -ExecutionPolicy Bypass -File scripts\try-local.ps1
+
+[providers.qwen]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
+family = "qwen"
+
+[providers.llama]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
+family = "llama"
+
+[roles.planner]
+provider = "qwen"
+model_id = "qwen2.5-coder:7b"
+context_window = 32768
+
+[roles.executor]
+provider = "qwen"
+model_id = "qwen2.5-coder:7b"
+context_window = 32768
+price_in_per_mtok = 0.0
+price_out_per_mtok = 0.0
+
+[roles.tester]
+provider = "qwen"
+model_id = "qwen2.5-coder:7b"
+context_window = 32768
+
+[roles.reviewer]
+provider = "llama"
+model_id = "llama3.1:8b"
+context_window = 32768
+
+[routing]
+mechanical = "executor"
+architecture = "planner"
+agentic = "executor"
+review = "reviewer"

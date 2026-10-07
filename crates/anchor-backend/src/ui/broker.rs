@@ -44,6 +44,8 @@ struct Inner {
     pending: BTreeMap<u64, Pending>,
     answers: BTreeMap<u64, &'static str>,
     closed: bool,
+    /// A cancelled task: refuse until [`Broker::resume`].
+    refusing: bool,
 }
 
 #[derive(Debug)]
@@ -91,7 +93,7 @@ impl Broker {
         let refuse = p.choices.last().copied().unwrap_or("deny");
         let id = {
             let mut g = self.lock();
-            if g.closed {
+            if g.closed || g.refusing {
                 return refuse;
             }
             let id = g.next;
@@ -117,7 +119,7 @@ impl Broker {
             if let Some(a) = g.answers.remove(&id) {
                 break a;
             }
-            if g.closed {
+            if g.closed || g.refusing {
                 break refuse;
             }
             g = self.cv.wait(g).unwrap_or_else(|p| p.into_inner());
@@ -162,6 +164,18 @@ impl Broker {
             .filter(|p| !g.answers.contains_key(&p.id))
             .cloned()
             .collect()
+    }
+
+    /// Refuse everything pending, and everything asked until
+    /// [`Broker::resume`] (the user stopped the task).
+    pub fn cancel_pending(&self) {
+        self.lock().refusing = true;
+        self.cv.notify_all();
+    }
+
+    /// Ask the user again (a new task starts).
+    pub fn resume(&self) {
+        self.lock().refusing = false;
     }
 
     /// Refuse everything pending and everything asked from now on (the

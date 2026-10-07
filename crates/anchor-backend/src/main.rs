@@ -62,6 +62,10 @@ USAGE:
 
   anchor ui --workspace DIR [--port N] [--ui-url-file FILE]
                              the dashboard for a workspace, outside a run
+  anchor app [--roles FILE] [--ui-port N] [--ui-url-file FILE]
+                             the desktop app in a browser: open a project,
+                             run tasks, approve, undo (ADR-0028)
+      --mock-script FILE     scripted responses for mock providers (demos)
 
   anchor eval run --corpus DIR [options]   seeded-bug harness (spec §8.5)
       --reviewer R           rule (default), model, accept-all or oracle
@@ -518,6 +522,7 @@ fn main() -> ExitCode {
         Some("eval") => evalcli::cmd_eval(&a),
         Some("verifier") => evalcli::cmd_verifier(&a),
         Some("ui") => hubcli::cmd_ui(&a),
+        Some("app") => hubcli::cmd_app(&a),
         _ => {
             print!("{USAGE}");
             return ExitCode::from(2);

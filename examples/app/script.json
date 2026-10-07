@@ -1,0 +1,15 @@
+{"steps": [
+  {"content": "Let me look at the project first.",
+   "tool_calls": [
+     {"tool": "list_dir", "args": {"path": "."}},
+     {"tool": "read_file", "args": {"path": "hello.py"}}
+   ],
+   "prompt_tokens": 900, "completion_tokens": 60},
+  {"content": "Updating the greeting and adding a README.",
+   "tool_calls": [
+     {"tool": "edit_file", "args": {"path": "hello.py", "edit": {"op": "replace", "old": "print('hello')", "new": "print('hello, anchor')"}}},
+     {"tool": "write_file", "args": {"path": "README.md", "content": "# hello\n\nPrints a greeting: `python hello.py`.\n"}}
+   ],
+   "prompt_tokens": 1800, "completion_tokens": 140},
+  {"content": "Added a README and made the greeting mention anchor.", "prompt_tokens": 2100, "completion_tokens": 30}
+]}

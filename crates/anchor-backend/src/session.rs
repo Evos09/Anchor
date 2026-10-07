@@ -5,6 +5,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 
 use anchor_checkpoint::CheckpointStore;
 use anchor_protocol::{
@@ -60,6 +61,15 @@ pub enum SessionError {
     RuntimeExited,
     #[error("checkpoint store: {0}")]
     Checkpoint(String),
+}
+
+/// `s` cut to at most `max` bytes, on a character boundary.
+fn cap(s: &str, max: usize) -> String {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
 pub fn new_session_id() -> String {
@@ -328,8 +338,70 @@ fn forward_stderr(stderr: impl std::io::Read, tx: &std::sync::mpsc::SyncSender<S
     }
 }
 
+/// Stops a running session from another thread (the desktop app's Stop
+/// button): kills the runtime, and the session ends as failed with
+/// [`CANCELLED`]. Pending approvals are the caller's to refuse (the
+/// broker's `cancel_pending`).
+#[derive(Debug, Default)]
+pub struct Cancel {
+    state: std::sync::Mutex<CancelState>,
+}
+
+#[derive(Debug, Default)]
+struct CancelState {
+    cancelled: bool,
+    child: Option<Arc<std::sync::Mutex<RuntimeProcess>>>,
+}
+
+/// How a cancelled session's failure reads.
+pub const CANCELLED: &str = "cancelled by the user";
+
+impl Cancel {
+    pub fn new() -> Arc<Cancel> {
+        Arc::new(Cancel::default())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CancelState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Stop the session: kill its runtime now, or as soon as it starts.
+    pub fn cancel(&self) {
+        let child = {
+            let mut st = self.lock();
+            st.cancelled = true;
+            st.child.clone()
+        };
+        if let Some(c) = child {
+            c.lock().unwrap_or_else(|p| p.into_inner()).kill();
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.lock().cancelled
+    }
+
+    /// Ready for the next session.
+    pub fn reset(&self) {
+        let mut st = self.lock();
+        st.cancelled = false;
+        st.child = None;
+    }
+
+    fn register(&self, c: &Arc<std::sync::Mutex<RuntimeProcess>>) {
+        let cancelled = {
+            let mut st = self.lock();
+            st.child = Some(c.clone());
+            st.cancelled
+        };
+        if cancelled {
+            c.lock().unwrap_or_else(|p| p.into_inner()).kill();
+        }
+    }
+}
+
 struct Wire {
-    child: RuntimeProcess,
+    child: Arc<std::sync::Mutex<RuntimeProcess>>,
     stdin: Box<dyn Write + Send>,
     next_id: u64,
 }
@@ -347,6 +419,16 @@ pub fn run(
     cfg: &SessionConfig,
     mediator: &mut Mediator,
     checkpoints: &CheckpointStore,
+) -> Result<SessionReport, SessionError> {
+    run_cancellable(cfg, mediator, checkpoints, None)
+}
+
+/// [`run`], stoppable from another thread through `cancel`.
+pub fn run_cancellable(
+    cfg: &SessionConfig,
+    mediator: &mut Mediator,
+    checkpoints: &CheckpointStore,
+    cancel: Option<&Cancel>,
 ) -> Result<SessionReport, SessionError> {
     mediator.set_session(&cfg.session_id);
     let env = runtime_env(&cfg.roles_toml);
@@ -383,6 +465,11 @@ pub fn run(
         runtime_pid: child.id(),
         ..Default::default()
     };
+    let isolated = child.isolated;
+    let child = Arc::new(std::sync::Mutex::new(child));
+    if let Some(c) = cancel {
+        c.register(&child);
+    }
     let mut wire = Wire {
         child,
         stdin,
@@ -401,7 +488,7 @@ pub fn run(
         serde_json::json!({
             "session_id": cfg.session_id,
             "runtime_pid": report.runtime_pid,
-            "runtime_isolated": wire.child.isolated,
+            "runtime_isolated": isolated,
             "review": cfg.review.is_some(),
         }),
     );
@@ -601,14 +688,25 @@ pub fn run(
         }
     })();
 
+    let child = |w: &Wire| w.child.lock().unwrap_or_else(|p| p.into_inner()).kill();
     if result.is_err() {
-        wire.child.kill();
+        child(&wire);
     }
+    // A cancelled session ends as failed, whatever the dying runtime's
+    // pipe made of the turn in flight.
+    let result = match cancel {
+        Some(c) if c.is_cancelled() => {
+            child(&wire);
+            report.failed = Some(CANCELLED.into());
+            Ok(())
+        }
+        _ => result,
+    };
     if let Some((stop, t)) = ticker {
         drop(stop);
         let _ = t.join();
     }
-    wire.child.wait();
+    wire.child.lock().unwrap_or_else(|p| p.into_inner()).wait();
     let _ = stderr_thread.join();
     while let Ok(line) = rx.try_recv() {
         mediator.interact().notify(&format!("[runtime] {line}"));
@@ -620,6 +718,7 @@ pub fn run(
         serde_json::json!({
             "session_id": cfg.session_id,
             "done": report.done.is_some(),
+            "result": report.done.as_deref().map(|d| cap(d, 8000)),
             "failed": report.failed,
             "error": result.as_ref().err().map(|e| e.to_string()),
             "tokens_in": report.tokens_in,
