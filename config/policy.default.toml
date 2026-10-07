@@ -23,6 +23,10 @@ action = "deny"
 match = { target_matches = [
   "~/.ssh/**", "~/.aws/**", "~/.config/gh/**", "~/.gnupg/**",
   "~/.docker/config.json", "~/.kube/**", "~/.netrc", "~/.npmrc", "~/.pypirc",
+  "~/.git-credentials", "~/.config/git/credentials", "~/.config/gcloud/**",
+  "~/.azure/**", "~/.cargo/credentials", "~/.cargo/credentials.toml",
+  "~/.terraform.d/**", "~/.vault-token", "~/.local/share/keyrings/**",
+  "~/.password-store/**", "**/.env",
   "**/keychain*", "**/Library/Keychains/**",
   "~/.mozilla/**", "~/.config/google-chrome/**", "~/.config/chromium/**",
   "~/Library/Application Support/Google/Chrome/**",

@@ -449,7 +449,7 @@ fn collect(
                     });
                 }
             }
-            ScanNode::Symlink(_) | ScanNode::Other(_) => {}
+            ScanNode::Symlink(_) | ScanNode::Other(_) | ScanNode::Unscanned(_) => {}
         }
     }
 }
@@ -507,6 +507,7 @@ fn build_tree(
                 Err(e) => return Err(e.into()),
             },
             ScanNode::Other(_) => Node::Untracked(Untracked::Special),
+            ScanNode::Unscanned(_) => Node::Untracked(Untracked::Unscanned),
         };
         if let Node::Untracked(u) = node {
             report

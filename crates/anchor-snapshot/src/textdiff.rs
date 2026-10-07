@@ -16,6 +16,10 @@ use crate::{Error, Id, Result, Store};
 pub const MAX_DIFF_BYTES: usize = 4 << 20;
 /// Edit distances beyond this are reported as a whole-file replacement.
 const MAX_EDIT_DISTANCE: usize = 20_000;
+/// Frontier cells kept for backtracking (8 bytes each) before the diff
+/// falls back to a whole-file replacement: bounds memory at 64 MiB
+/// whatever the file sizes (review finding P-4).
+const MAX_TRACE_CELLS: usize = 8 << 20;
 /// Context lines around each change.
 pub const CONTEXT: usize = 3;
 
@@ -105,13 +109,17 @@ fn edit_script(a: &[(&[u8], bool)], b: &[(&[u8], bool)]) -> Vec<Op> {
     let max = (n + m) as usize;
     let off = max as isize + 1;
     let mut v = vec![0isize; 2 * max + 3];
+    // trace[d] holds the frontier before round d, diagonals -d..=d only
+    // (the rest is never read), so memory grows with D², not D·(N+M).
     let mut trace: Vec<Vec<isize>> = Vec::new();
+    let mut cells = 0usize;
     let mut found = None;
     'outer: for d in 0..=(max as isize) {
-        if d as usize > MAX_EDIT_DISTANCE {
+        cells += 2 * d as usize + 1;
+        if d as usize > MAX_EDIT_DISTANCE || cells > MAX_TRACE_CELLS {
             break;
         }
-        trace.push(v.clone());
+        trace.push(v[(off - d) as usize..=(off + d) as usize].to_vec());
         let mut k = -d;
         while k <= d {
             let i = (k + off) as usize;
@@ -143,15 +151,15 @@ fn edit_script(a: &[(&[u8], bool)], b: &[(&[u8], bool)]) -> Vec<Op> {
     let mut ops = Vec::new();
     let (mut x, mut y) = (n, m);
     for d in (1..=dmax).rev() {
-        let v = &trace[d as usize];
+        let t = &trace[d as usize];
+        let v = |k: isize| t[(k + d) as usize];
         let k = x - y;
-        let i = (k + off) as usize;
-        let prev_k = if k == -d || (k != d && v[i - 1] < v[i + 1]) {
+        let prev_k = if k == -d || (k != d && v(k - 1) < v(k + 1)) {
             k + 1
         } else {
             k - 1
         };
-        let prev_x = v[(prev_k + off) as usize];
+        let prev_x = v(prev_k);
         let prev_y = prev_x - prev_k;
         while x > prev_x && y > prev_y {
             ops.push(Op::Equal);

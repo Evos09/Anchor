@@ -579,6 +579,14 @@ fn scan_dir(
             continue;
         }
         let node = match m.kind {
+            Kind::Dir if depth + 1 >= MAX_SCAN_DEPTH => ScanNode::Unscanned(m),
+            // Unreadable: recorded as is (review finding P-5).
+            Kind::Dir
+                if std::fs::read_dir(root_path.join(&child_rel))
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied) =>
+            {
+                ScanNode::Unscanned(m)
+            }
             Kind::Dir => ScanNode::Dir(scan_dir(root_path, &child_rel, m, depth + 1, opts, count)?),
             Kind::File => ScanNode::File(m),
             Kind::Symlink => ScanNode::Symlink(m),

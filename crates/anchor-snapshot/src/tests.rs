@@ -529,6 +529,65 @@ fn tracked_files_replaced_by_untracked_entries_are_restored() {
     assert_eq!(fs::metadata(&outside).unwrap().nlink(), 1);
 }
 
+/// Review finding P-5: a directory nested past the scan depth (or, for a
+/// non-root user, an unreadable one) is recorded as untracked instead of
+/// failing every snapshot, so rollback keeps working.
+// Unix only: the nested path exceeds Windows' default path length limit.
+#[cfg(unix)]
+#[test]
+fn unscannable_directories_do_not_block_snapshots() {
+    let e = env();
+    fs::write(e.ws.join("a.txt"), "original").unwrap();
+    let mut deep = e.ws.join("deep");
+    for _ in 0..anchor_fs::MAX_SCAN_DEPTH + 4 {
+        deep.push("d");
+    }
+    fs::create_dir_all(&deep).unwrap();
+    fs::write(deep.join("bottom.txt"), "x").unwrap();
+    let unreadable = !running_as_root() && {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir(e.ws.join("locked")).unwrap();
+        fs::set_permissions(e.ws.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+        true
+    };
+    let store = Store::open(&e.store_dir).unwrap();
+    let ws = Workspace::open(&e.ws).unwrap();
+    let s = snap(&store, &ws, "turns/1");
+    let untracked: Vec<(String, Untracked)> = s
+        .untracked
+        .iter()
+        .map(|(p, u)| (p.replace('\\', "/"), *u))
+        .collect();
+    assert!(
+        untracked.contains(&(
+            format!("deep{}", "/d".repeat(anchor_fs::MAX_SCAN_DEPTH - 1)),
+            Untracked::Unscanned
+        )),
+        "{untracked:?}"
+    );
+    if unreadable {
+        assert!(untracked.contains(&("locked".to_string(), Untracked::Unscanned)));
+    }
+    tick();
+    fs::write(e.ws.join("a.txt"), "changed").unwrap();
+    let mut auth = approver(&e.engine, ws.root());
+    restore(&store, &ws, &opts(), &s.id(), &mut auth).unwrap();
+    assert_eq!(fs::read_to_string(e.ws.join("a.txt")).unwrap(), "original");
+    assert!(deep.join("bottom.txt").exists());
+    if unreadable {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(e.ws.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .is_ok_and(|o| o.stdout.starts_with(b"0\n"))
+}
+
 /// §5.5 "a symlink loop doesn't hang": snapshot and restore complete.
 #[cfg(unix)]
 #[test]
@@ -1237,6 +1296,27 @@ fn text_diff_round_trips() {
             "{o:?} -> {n:?}"
         );
     }
+}
+
+/// Review finding P-4: two large, entirely different files diff in
+/// bounded memory (whole-file replacement past the budget) and still
+/// round-trip.
+#[test]
+fn text_diff_of_large_rewrites_is_bounded() {
+    let old: String = (0..30_000).map(|i| format!("old line {i}\n")).collect();
+    let new: String = (0..30_000).map(|i| format!("new line {i}\n")).collect();
+    let t = std::time::Instant::now();
+    let h = hunks_of(&old, &new);
+    assert!(t.elapsed() < std::time::Duration::from_secs(30));
+    assert_eq!(
+        String::from_utf8(apply_hunks(old.as_bytes(), &h)).unwrap(),
+        new
+    );
+    // A large file with a moderate edit still gets a minimal diff.
+    let edited = old.replacen("old line 15000\n", "changed\n", 1);
+    let h = hunks_of(&old, &edited);
+    assert_eq!(h.len(), 1);
+    assert_eq!(h[0].added_lines(), [15001]);
 }
 
 #[test]

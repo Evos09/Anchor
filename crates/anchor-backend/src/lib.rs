@@ -221,7 +221,11 @@ pub fn open_workspace_in(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| paths.policy.clone());
     let audit = AuditLog::open(&paths.audit)?;
-    let mut engine = Engine::from_file(&policy_path, &home_dir(), audit)?;
+    // Rules match canonical targets, so `~` must expand to the canonical
+    // home (a symlinked /home, /var/home) or no `~/` rule would ever match
+    // (review finding P-7).
+    let home = std::fs::canonicalize(home_dir()).unwrap_or_else(|_| home_dir());
+    let mut engine = Engine::from_file(&policy_path, &home, audit)?;
     engine.protect(paths.dir.clone());
     let guard = Guard::load(&paths.workspace_config)?;
     let snap = SnapshotConfig::load(&paths.workspace_config, &ws)?;

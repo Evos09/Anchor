@@ -189,6 +189,9 @@ pub enum Untracked {
     Special = 3,
     /// Symlink target too long or otherwise unrecordable.
     Unrecordable = 4,
+    /// A directory that could not be scanned (unreadable, or nested past
+    /// the depth limit).
+    Unscanned = 5,
 }
 
 impl Untracked {
@@ -198,6 +201,7 @@ impl Untracked {
             2 => Untracked::TooLarge,
             3 => Untracked::Special,
             4 => Untracked::Unrecordable,
+            5 => Untracked::Unscanned,
             _ => return None,
         })
     }

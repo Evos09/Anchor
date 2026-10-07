@@ -34,12 +34,19 @@ pub enum ScanNode {
     Symlink(Meta),
     /// Sockets, fifos, devices: recorded, never read.
     Other(Meta),
+    /// A directory left unscanned: unreadable, or past the depth limit.
+    /// Recorded so a snapshot still succeeds, never descended into (review
+    /// finding P-5).
+    Unscanned(Meta),
 }
 
 impl ScanNode {
     pub fn meta(&self) -> &Meta {
         match self {
-            ScanNode::File(m) | ScanNode::Symlink(m) | ScanNode::Other(m) => m,
+            ScanNode::File(m)
+            | ScanNode::Symlink(m)
+            | ScanNode::Other(m)
+            | ScanNode::Unscanned(m) => m,
             ScanNode::Dir(d) => &d.meta,
         }
     }

@@ -625,18 +625,29 @@ fn scan_dir(
             continue;
         }
         let node = match m.kind {
+            Kind::Dir if depth + 1 >= MAX_SCAN_DEPTH => ScanNode::Unscanned(m),
             Kind::Dir => {
-                let cfd = rfs::openat(
+                let cfd = match rfs::openat(
                     fd,
                     name.as_os_str(),
                     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                     Mode::empty(),
-                )
-                .map_err(|e| match e {
+                ) {
+                    Ok(cfd) => cfd,
+                    // Unreadable (mode 000, or no read bit): recorded as is.
+                    Err(Errno::ACCESS) => {
+                        entries.push(ScanEntry {
+                            name,
+                            node: ScanNode::Unscanned(m),
+                        });
+                        continue;
+                    }
                     // Replaced by a symlink or a file after the stat.
-                    Errno::LOOP | Errno::NOTDIR | Errno::NOENT => FsError::Changed,
-                    e => io(e),
-                })?;
+                    Err(Errno::LOOP | Errno::NOTDIR | Errno::NOENT) => {
+                        return Err(FsError::Changed);
+                    }
+                    Err(e) => return Err(io(e)),
+                };
                 let now = meta_of(&rfs::fstat(&cfd).map_err(io)?);
                 if now.id != m.id {
                     return Err(FsError::Changed);

@@ -121,6 +121,14 @@ fn credentials_denied_everywhere() {
         "/home/dev/Library/Keychains/login.keychain-db",
         "/home/dev/.mozilla/firefox/abc.default/logins.json",
         "/home/dev/.config/google-chrome/Default/Login Data",
+        "/home/dev/.git-credentials",
+        "/home/dev/.config/gcloud/application_default_credentials.json",
+        "/home/dev/.azure/msal_token_cache.json",
+        "/home/dev/.cargo/credentials.toml",
+        "/home/dev/.terraform.d/credentials.tfrc.json",
+        "/home/dev/.vault-token",
+        "/home/dev/.local/share/keyrings/login.keyring",
+        "/home/dev/project/.env",
     ];
     for t in targets {
         for (tool, op) in [
@@ -137,6 +145,25 @@ fn credentials_denied_everywhere() {
             );
         }
     }
+}
+
+/// Review finding P-7: glob syntax in the home directory's name matches
+/// only itself.
+#[cfg(unix)]
+#[test]
+fn home_with_glob_syntax_is_escaped() {
+    let home = PathBuf::from("/home/d[e]v");
+    let dir = tempfile::tempdir().unwrap();
+    let audit = AuditLog::open(&dir.path().join("audit.jsonl")).unwrap();
+    let e = Engine::from_policy(Policy::parse(DEFAULT_POLICY, &home).unwrap(), &home, audit);
+    let mut r = req(Tool::ReadFile, Operation::Read, "/x");
+    r.workspace_root = PathBuf::from("/home/d[e]v/project");
+    r.canonical_target = Some(PathBuf::from("/home/d[e]v/.ssh/id_rsa"));
+    assert_eq!(action_of(&e, &r), ("deny", "deny_credentials".into()));
+    // `[e]` would otherwise match `/home/dev`, a different user's home.
+    r.workspace_root = PathBuf::from("/home/dev/project");
+    r.canonical_target = Some(PathBuf::from("/home/dev/.ssh/id_rsa"));
+    assert_ne!(action_of(&e, &r).1, "deny_credentials");
 }
 
 /// Deny overrides: a credential file *inside* the workspace is still denied,

@@ -258,7 +258,9 @@ fn expand_home(pattern: &str, home: &Path) -> String {
         // platform, so a Windows home (`C:\\Users\\x`) must use `/` too, or
         // `~/.ssh/**` would never match there.
         let h = home.to_string_lossy().replace('\\', "/");
-        let h = h.trim_end_matches('/');
+        // A home containing glob syntax (`[`, `*`, `{`) matches itself
+        // only (review finding P-7).
+        let h = globset::escape(h.trim_end_matches('/'));
         format!("{h}/{rest}")
     } else {
         pattern.to_string()
