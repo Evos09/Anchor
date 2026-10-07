@@ -124,7 +124,12 @@ Scope: the sandbox code written during Phase 7. Three independent reviews:
 
 The macOS and Windows findings come from reading the code against the
 platform's documented behaviour. Only CI runs that code. Each fix below
-has a test that runs on that platform's CI job.
+has a test that runs on that platform's CI job. Every one of those tests,
+and the validation suite, passed on Linux, macOS and Windows in CI run
+37616036608 (commit 0f9c0c7). Getting there took fixes found only on CI:
+the AppContainer environment (error 203), workspace teardown order on
+Windows, `RLIMIT_NPROC` headroom on macOS, and read-only grants moved to
+a shared capability (which also removed W-5's read-only churn; see AR-15).
 
 | ID | Sev. | Finding | Status | Fix / test |
 |---|---|---|---|---|

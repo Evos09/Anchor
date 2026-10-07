@@ -56,6 +56,8 @@ internal adversarial review plus a package prepared for the auditor
 ## Status
 
 - **Internal review.** Done. No Critical or High finding is open.
+- **Cross-platform validation.** Passes on Linux, macOS and Windows
+  (CI run 37616036608).
 - **External audit.** Pending. When it happens, its findings get IDs
   `E-n`. They are triaged with the same rubric and enter the same two
   documents. Phase 7 is fully closed only after that.
@@ -64,7 +66,9 @@ internal adversarial review plus a package prepared for the auditor
 
 - **What an internal review shows.** It is not independent, so it is
   evidence of diligence, not a substitute for the external audit.
-- **What remains unverified.** Some code can only be exercised on CI:
-  macOS and Windows.
-  - Until a green CI run, the threat model marks those rows 🟡, not ✅.
-  - The verify gate keeps failing closed on Windows until then.
+- **What CI verifies.** Some code can only be exercised on CI: macOS and
+  Windows. The threat model marks a row ✅ only once a CI run has passed
+  its test on that platform. The first run green on all three, validation
+  suite included, is 37616036608.
+- **Windows verify gate.** It keeps failing closed until the rest of W-5
+  is fixed (AR-15).

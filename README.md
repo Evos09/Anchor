@@ -282,16 +282,16 @@ every §11 threat to its test and its per-platform status.
     Object (ADR-0026). `anchor-fs` pins directory chains against
     junction swaps.
   - **Validation:** `crates/anchor-sandbox-validation` runs the same
-    attacks on every platform. Every one is stopped on Linux, in both
-    tiers.
+    attacks on every platform. Every one is stopped on Linux (both
+    tiers), macOS and Windows (CI run 37616036608).
   - **External audit: pending (third party).** The package for the
     auditor is [`docs/audit/README.md`](docs/audit/README.md).
 
 **Known platform gaps:**
 
-- **macOS and Windows sandboxes:** both were written in Phase 7, and only
-  a CI run can exercise them. Until that run is green, the verify gate
-  keeps failing closed on Windows.
+- **Windows verify gate:** it still fails closed. Each verify run would
+  create a new AppContainer profile (the rest of W-5, AR-15); that is
+  fixed first.
 - **Windows runtime:** the agent runtime is not yet confined (AR-7).
 - The OpenAI-compatible adapter has not been run against a live endpoint:
   there was no local server or API key in the build environment.

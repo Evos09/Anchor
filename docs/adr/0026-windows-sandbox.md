@@ -1,6 +1,6 @@
 # ADR-0026: The Windows command sandbox (AppContainer + Job Object)
 
-- Status: Accepted, pending its first green Windows CI run
+- Status: Accepted. First green Windows CI run: 37616036608
 - Date: 2026-10-07
 
 ## Context
@@ -94,8 +94,9 @@ through `crates/anchor-exec/src/windows.rs`.
 
 - **Threats 4–7.** They get a Windows mechanism. The validation suite
   (`crates/anchor-sandbox-validation`) and `anchor-exec`'s `tests_windows`
-  exercise it on CI. Until that run is green, the verify gate keeps
-  failing closed on Windows.
+  exercise it on CI, green since run 37616036608. The verify gate still
+  fails closed on Windows until each verify run stops creating its own
+  profile (the rest of W-5, AR-15).
 - **File size.** There is no per-file size limit on Windows (AR-2).
 - **ACE persistence.** The ACEs persist after the run (AR-13). Cleanup
   belongs to a future `anchor workspace forget`: remove the ACEs, then
