@@ -25,11 +25,32 @@ Check date: **2026-10-06**. Sources and how each step was performed:
 | landlock | 0.4.7 | 2 | MIT OR Apache-2.0 (standard) | runtime self-sandbox, command confinement | `filesystem_confinement_enforced`, `runtime_process_cannot_touch_the_filesystem` |
 | ureq | 3.4.2 | 3 | MIT OR Apache-2.0 (standard) | OpenAI-compatible HTTP client | parsing tests only (no live endpoint reachable) |
 | unicode-normalization | 0.1.25 | 0 (last 2025-10-30) | MIT OR Apache-2.0 (standard) | macOS name equivalence | macOS-only test (CI) |
-| windows-sys | 0.61.2 | 0 (last 2025-10-06) | MIT OR Apache-2.0 | Windows file APIs | type-checked only |
+| windows-sys | 0.61.2 | 0 (last 2025-10-06) | MIT OR Apache-2.0 | Windows file APIs (`anchor-fs`: handle-based resolution, pinned chains, `FileIdBothDirectoryInfo`); Windows command sandbox (`anchor-exec`, Phase 7, ADR-0026). No new crate: only features of the vetted version (see below) | `anchor-fs` and `anchor-exec` Windows tests, the validation suite (Windows CI) |
 | tempfile (dev) | 3.27.0 | 0 (last 2026-03-11) | MIT OR Apache-2.0 (standard) | tests | — |
 | rusqlite (`bundled`) | 0.40.2 | 3 (0.40.0 2026-05-26, 0.40.1 2026-06-06, 0.40.2 2026-08-08) | MIT (standard; read) | Hub database (spec §6.3, ADR-0023) | 13 `anchor-hub` tests (claims race, tamper detection, persistence) |
 | libsqlite3-sys | 0.38.2 | 3 (same cadence as rusqlite) | MIT (standard; same text as rusqlite) | compiles the bundled SQLite **3.53.2** amalgamation (`sqlite3/sqlite3.c`; SQLite itself is public domain, per its header) | as above |
 | getrandom | 0.4.3 | 1 (2026-06-17) | MIT OR Apache-2.0 (standard) | Hub bearer tokens (32 bytes from the OS) | `only_the_user_registers_agents_and_tokens_authenticate` |
+
+### Phase 7: `windows-sys` features (2026-10-07)
+
+No new crate was added in Phase 7. `anchor-exec` now enables these
+features of the already-vetted `windows-sys` 0.61.2:
+
+- `Win32_Foundation`
+- `Win32_Security`
+- `Win32_Security_Authorization`: ACL grants
+- `Win32_Security_Isolation`: AppContainer profiles
+- `Win32_Storage_FileSystem`
+- `Win32_System_JobObjects`
+- `Win32_System_Pipes`
+- `Win32_System_Threading`: `CreateProcessW` and process attributes
+
+Features select bindings from the same crate, which has the same license
+and source. `cargo deny check` covers the tree unchanged.
+
+The new workspace crate `anchor-sandbox-validation` (`publish = false`)
+uses only `libc`, plus `anchor-exec` and `tempfile` for tests, all
+already vetted.
 
 ### Maintenance flags
 

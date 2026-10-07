@@ -3,9 +3,10 @@
 A trust-first desktop coding agent: one developers can trust not to lose
 their work, leak their credentials, or ship unverified changes.
 
-> **Status: Phases 1–4: the safety core, durability (snapshot engine,
-> atomic rollback) and the Coordination Hub for multi-agent teams,
-> backend-only.** No desktop UI yet. Read
+> **Status: Phases 1–7 are implemented, with these limits:**
+>
+> - **External audit:** pending; it needs a third party.
+> - **Interface:** a loopback web dashboard, with no desktop shell yet. Read
 > [What is and isn't done](#what-is-and-isnt-done) before relying on
 > anything here.
 
@@ -265,12 +266,33 @@ every §11 threat to its test and its per-platform status.
     understands it" criterion also needs your sign-off in
     [`docs/ui-walkthrough.md`](docs/ui-walkthrough.md).
 
+- Phase 7, security review and sandbox validation (ADR-0027,
+  [`docs/audit/`](docs/audit/README.md)).
+  - **Internal review:** five area reviews, then a second round on the
+    new sandbox code. Every Critical and High finding is fixed, each with
+    a regression test. The remaining Medium and Low findings are in
+    [accepted-risks.md](docs/audit/accepted-risks.md).
+  - **Linux:** a general seccomp filter in both tiers covers `ptrace`,
+    mounts, `bpf`, keyrings, namespaces, `setsid`, unix sockets and
+    signals to Anchor's own processes. Landlock scopes apply on 6.12+.
+    Commands get their own session and no terminal.
+  - **macOS:** Seatbelt is now `(deny default)`, and a memory supervisor
+    is added. The runtime confines itself with `sandbox_init`.
+  - **Windows:** agent commands run in an AppContainer inside a Job
+    Object (ADR-0026). `anchor-fs` pins directory chains against
+    junction swaps.
+  - **Validation:** `crates/anchor-sandbox-validation` runs the same
+    attacks on every platform. Every one is stopped on Linux, in both
+    tiers.
+  - **External audit: pending (third party).** The package for the
+    auditor is [`docs/audit/README.md`](docs/audit/README.md).
+
 **Known platform gaps:**
 
-- Windows: agent commands refuse to run (no AppContainer sandbox yet), and
-  there are no junction/reparse-point attack tests yet.
-- macOS: memory is not limited (`RLIMIT_AS` is unsupported), and Seatbelt
-  network/read confinement has no direct test yet.
+- **macOS and Windows sandboxes:** both were written in Phase 7, and only
+  a CI run can exercise them. Until that run is green, the verify gate
+  keeps failing closed on Windows.
+- **Windows runtime:** the agent runtime is not yet confined (AR-7).
 - The OpenAI-compatible adapter has not been run against a live endpoint:
   there was no local server or API key in the build environment.
 
@@ -313,9 +335,10 @@ every §11 threat to its test and its per-platform status.
   macOS and Windows build without the bundle (a notice page) and run the
   API tests.
 
-**Not started (later phases):**
+**Not started:**
 
-- General seccomp syscall filter, Windows sandbox, external audit (Phase 7).
+- The external audit (needs a third party), and runtime confinement on
+  Windows.
 
 The architecture decisions, including those still pending evaluation, are
 in [`docs/adr/`](docs/adr/0000-adr-process.md). Dependency vetting is in

@@ -13,15 +13,15 @@ legend:
 
 | # | Threat | Mitigation | Tests | Status |
 |---|---|---|---|---|
-| 1 | Symlink escape | Kernel-confined resolution; canonical path from the handle (ADR-0013) | `anchor-fs`: `symlink_escape_refused`, `relative_symlink_escape_refused`, `magic_link_refused` (Linux); e2e attack script | ✅ Linux, macOS · 🟡 Windows (no junction/symlink attack tests yet) |
-| 2 | TOCTOU race | Descriptor-based strict reopen, identity check, exchange-and-verify | `symlink_swap_race_never_escapes` (2,000 iterations against a flipping symlink), `parent_swapped_after_resolution_is_refused`, `target_swapped_for_symlink_after_resolution_is_refused`, `compare_and_swap_preconditions`, `remove_requires_delete_approval_and_same_file` | ✅ Linux, macOS · 🟡 Windows (CAS/identity tests pass; no reparse-swap test yet) |
+| 1 | Symlink escape | Kernel-confined resolution; canonical path from the handle (ADR-0013) | `anchor-fs`: `symlink_escape_refused`, `relative_symlink_escape_refused`, `magic_link_refused` (Linux); e2e attack script | ✅ Linux, macOS · 🟡 Windows (pinned chains and junction tests `junction_escapes_are_refused`, `junction_swapped_after_resolution_is_caught`, `open_workspace_root_cannot_be_renamed` written in Phase 7; first CI run pending) |
+| 2 | TOCTOU race | Descriptor-based strict reopen, identity check, exchange-and-verify | `symlink_swap_race_never_escapes` (2,000 iterations against a flipping symlink), `parent_swapped_after_resolution_is_refused`, `target_swapped_for_symlink_after_resolution_is_refused`, `compare_and_swap_preconditions`, `remove_requires_delete_approval_and_same_file` | ✅ Linux, macOS · 🟡 Windows (CAS/identity tests pass; reparse-swap test pending its first CI run) |
 | 3 | Injection via tool parameters | Lexical confinement; glob/regex validation; closed protocol enum; validated model tool calls; Windows verbatim paths normalised | `dotdot_traversal_is_normalised_and_confined`, `absolute_path_injection_is_confined_or_refused`, `verbatim_absolute_params_are_accepted`, `glob_traversal_and_absolute_refused`, `regex_redos_patterns_are_linear`, `openai_response_parsing_rejects_hostile_tool_calls`, protocol `rejects_*` | ✅ Linux, macOS, Windows |
-| 4 | Shell injection | argv only, no shell; bare program names resolved against absolute PATH entries; shells require a prompt | `shell_metacharacters_are_inert`, `program_must_be_bare_name`, e2e `echo "; rm -rf / #"` | ✅ Linux, macOS · ⛔ Windows (commands refuse to run) |
-| 5 | Credential exfiltration | Policy deny list (ssh, aws, gh, gnupg, keychains, browser profiles, …), including Windows homes; commands confined (Landlock / Seatbelt); runtime cannot read files | `credentials_denied_everywhere`, `credentials_denied_with_backslash_home` (Windows), `filesystem_confinement_enforced` (Linux), `runtime_process_cannot_touch_the_filesystem` (Linux), e2e symlink-to-`.ssh` attack | ✅ Linux · ✅ macOS policy + e2e, 🟡 Seatbelt read-confinement not directly tested · ✅ Windows policy, ⛔ commands refuse |
-| 6 | Network egress | Commands default to network-denied: user+net namespace, or a seccomp socket filter where user namespaces are restricted (Ubuntu ≥ 23.10, GitHub runners); macOS Seatbelt; `network = true` requires a prompt | `network_denied_process_has_no_network` (both Linux methods, asserting the mechanism's errno), `network_allowed_process_can_open_inet_sockets` | ✅ Linux · 🟡 macOS (Seatbelt rule applied, no egress test yet) · ⛔ Windows |
-| 7 | Resource exhaustion | rlimits (NPROC, AS, CPU, FSIZE, CORE), wall timeout, process-group kill, root drop | `fork_bomb_is_contained`, `process_limit_refuses_excess_forks`, `memory_limit_enforced` (Linux), `wall_timeout_kills`, `output_is_capped` | ✅ Linux · ✅ macOS except memory (RLIMIT_AS unsupported, ADR-0003) · ⛔ Windows |
+| 4 | Shell injection | argv only, no shell; bare program names resolved against absolute PATH entries; shells require a prompt | `shell_metacharacters_are_inert`, `program_must_be_bare_name`, e2e `echo "; rm -rf / #"` | ✅ Linux, macOS · 🟡 Windows (AppContainer; `CommandLineToArgvW`-exact quoting, batch files refused; ADR-0026, CI pending) |
+| 5 | Credential exfiltration | Policy deny list (ssh, aws, gh, gnupg, keychains, browser profiles, …), including Windows homes; commands confined (Landlock / Seatbelt); runtime cannot read files | `credentials_denied_everywhere`, `credentials_denied_with_backslash_home` (Windows), `filesystem_confinement_enforced` (Linux), `runtime_process_cannot_touch_the_filesystem` (Linux), e2e symlink-to-`.ssh` attack | ✅ Linux · ✅ macOS policy + e2e, 🟡 `(deny default)` Seatbelt and runtime `sandbox_init` (Phase 7, CI pending) · ✅ Windows policy, 🟡 AppContainer grants (CI pending) |
+| 6 | Network egress | Commands default to network-denied: user+net namespace, or a seccomp socket filter where user namespaces are restricted (Ubuntu ≥ 23.10, GitHub runners); macOS Seatbelt; `network = true` requires a prompt | `network_denied_process_has_no_network` (both Linux methods, asserting the mechanism's errno), `network_allowed_process_can_open_inet_sockets` | ✅ Linux · 🟡 macOS (egress test and validation suite written, CI pending) · 🟡 Windows (AppContainer without capabilities, CI pending) |
+| 7 | Resource exhaustion | rlimits (NPROC, AS, CPU, FSIZE, CORE), wall timeout, process-group kill, root drop | `fork_bomb_is_contained`, `process_limit_refuses_excess_forks`, `memory_limit_enforced` (Linux), `wall_timeout_kills`, `output_is_capped` | ✅ Linux · ✅ macOS, 🟡 memory supervisor (Phase 7, CI pending) · 🟡 Windows (Job Object, CI pending) · aggregate limits: AR-2 |
 | 8 | Malicious MCP/A2A peer | Identity from the transport only (pipe binding or per-agent bearer token); user-granted permissions; closed argument structs; loopback-only listener with Host/Origin checks and size/time limits; claims enforced at merge; every call audited, refusals included (ADR-0023, ADR-0004, ADR-0007) | `rogue_agent_cannot_bypass_the_hub` (missing, invalid and retired tokens; a bad Host or an Origin header; claims outside the grant or of an ungranted type; releasing another agent's claim; user-only operations (approve, accept, register), which are not exposed as tools; forged identity fields over MCP; reading others' messages; each refused, DB unchanged, audited; an A2A metadata sender is ignored: identity is the token), `hostile_http_is_refused`, `claims_outside_grants_are_refused_and_audited`, `only_the_user_registers_agents_and_tokens_authenticate`, `unclaimed_changes_are_rejected_at_merge` (a change made without the Hub never reaches main), `claims_prevent_conflicts` (an internal write to another agent's claim: `DeniedBy::Claim`), `verify_detects_database_tampering`, `verify_detects_audit_truncation` | ✅ Linux, macOS, Windows (run 37474281956) |
-| 9 | Snapshot poisoning | The store lives outside the workspace, beyond every command sandbox (ADR-0022). Type-tagged, hash-verified objects; strict canonical decoding refuses escaping names and setuid bits; restore is approval-gated, descriptor-based, never follows symlinks and runs a pre-flight. Dedup re-verifies existing objects and heals damaged ones (ADR-0006) | `command_cannot_touch_state_dir`, `crafted_snapshot_cannot_escape_on_restore`, `poisoned_store_is_refused`, `crafted_tree_names_are_refused`, `symlink_planted_in_store_is_refused` | ✅ Linux, macOS · 🟡 Windows (store tests pass; commands refuse anyway) |
+| 9 | Snapshot poisoning | The store lives outside the workspace, beyond every command sandbox (ADR-0022). Type-tagged, hash-verified objects; strict canonical decoding refuses escaping names and setuid bits; restore is approval-gated, descriptor-based, never follows symlinks and runs a pre-flight. Dedup re-verifies existing objects and heals damaged ones (ADR-0006) | `command_cannot_touch_state_dir`, `crafted_snapshot_cannot_escape_on_restore`, `poisoned_store_is_refused`, `crafted_tree_names_are_refused`, `symlink_planted_in_store_is_refused` | ✅ Linux, macOS · 🟡 Windows (store tests pass; command confinement CI pending) |
 
 ## §5 primitive test bullets
 
@@ -141,6 +141,36 @@ approvals (ADR-0025). Its tests are in
 | The cost meter is accurate | Each call is recomputed from the roles files' prices and compared with the runtime's report and the session's own totals; any mismatch is listed | `two_model_collaboration_through_the_dashboard` (per agent, session and total = tokens × prices exactly, review sessions included); `cost_is_recomputed_from_prices_and_mismatches_are_reported` (a lying runtime is flagged) | ✅ Linux, macOS (CI 37551637739; the test is unix-only) |
 | The user's polling floods the audit log | User views read through `Hub::view_*` and do no audit writes. An unauthenticated request is *not* audited (a web page could otherwise spam the log) | `user_views_see_everything_and_write_no_audit_entries`, the hardening test (`audit.head()` unchanged) | ✅ Linux, macOS, Windows (CI 37551637739) |
 
+## Phase 7: security review and sandbox validation
+
+The internal review, its fixes and the accepted risks are in
+[audit/](audit/README.md) (ADR-0027). The cross-platform validation suite
+(`crates/anchor-sandbox-validation`, `every_attack_is_stopped`) runs
+each attack through the backend's real command confinement:
+
+| Attack | Linux (both tiers, local) | macOS | Windows |
+|---|---|---|---|
+| TCP to an external address; to a loopback listener | stopped | CI pending | CI pending |
+| Read a file outside the workspace; a fake `~/.ssh` key; list outside | stopped | CI pending | CI pending |
+| Write outside the workspace | stopped | CI pending | CI pending |
+| Unbounded process creation | stopped | CI pending | CI pending |
+| Allocate past the memory limit; spin the CPU | stopped | CI pending | CI pending |
+| Write a file past the size limit | stopped | CI pending | not enforced (AR-2) |
+| Inherit the caller's environment | stopped | CI pending | CI pending |
+| Unix socket outside; signal the backend | stopped | CI pending | n/a |
+| `ptrace`, `bpf`, `keyctl`, `mount`, `unshare` | stopped | n/a | n/a |
+
+Each CI job appends its platform's table to the job summary.
+
+| Review finding (Critical/High) | Regression test | Status |
+|---|---|---|
+| S-1 unix sockets reachable | `unix_sockets_and_signals_outside_the_sandbox_are_unreachable` | ✅ Linux (local), macOS/Windows CI pending |
+| S-2 `setsid` escapes the kill; S-3 `TIOCSTI` | `commands_cannot_escape_the_kill_or_reach_the_terminal` | ✅ Linux (local) |
+| S-4 macOS `(allow default)` | `seatbelt_profile_denies_by_default`, `mach_services_are_unreachable_macos` | 🟡 macOS (CI pending) |
+| T-1 git hooks planted by commands | `commands_cannot_plant_git_hooks_or_config` | ✅ Linux (local) |
+| P-1 append-only reshaping; P-2 restore skipped | `heuristic_detection_is_sticky`, `tracked_files_replaced_by_untracked_entries_are_restored` | ✅ Linux (local) |
+| V-1 verdict forged by runner tampering; V-2 startup hooks | `runner_tampering_rejected`, `startup_hooks_rejected_and_home_is_empty` | ✅ Linux (local); residual AR-4 |
+
 ## Phase 2 "verified by instrumentation"
 
 - *No filesystem mutation bypasses the permission engine*: mutations
@@ -201,5 +231,7 @@ approvals (ADR-0025). Its tests are in
 
 ## Out of scope for this push
 
-External audit (§11.2), seccomp, the Windows sandbox, and the LLM
-reviewer's measured false-negative rate (pending a model key).
+The external audit (§11.2; pending a third party, see
+[audit/README.md](audit/README.md)), Windows runtime confinement (AR-7),
+and the LLM reviewer's measured false-negative rate (pending a model
+key).
