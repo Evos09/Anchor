@@ -5,9 +5,10 @@
 //! unittest and trace) in the sandbox.
 
 #![allow(clippy::unwrap_used)]
-// Most of these tests run commands, which only Unix sandboxes; on Windows
-// the gate fails closed and the helpers go unused.
-#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_macros))]
+// The gate tests run on every platform (Windows: AppContainer, ADR-0026).
+// The team tests drive the agent runtime, which is confined only on Unix
+// (AR-7), so on Windows their helpers go unused.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -25,6 +26,9 @@ use anchor_protocol::verify::Claim;
 use serde_json::{Value, json};
 
 static SERIAL: Mutex<()> = Mutex::new(());
+
+/// The interpreter: Windows installs name it `python`.
+const PY: &str = if cfg!(windows) { "python" } else { "python3" };
 
 const ROLES: &str = include_str!("../../../examples/demo/roles.mock.toml");
 
@@ -75,7 +79,7 @@ class C(unittest.TestCase):
 ";
 
 fn python() -> bool {
-    std::process::Command::new("python3")
+    std::process::Command::new(PY)
         .arg("--version")
         .output()
         .is_ok_and(|o| o.status.success())
@@ -124,16 +128,16 @@ impl Fx {
 fn spec() -> VerifySpec {
     VerifySpec {
         build: Some(
-            ["python3", "-I", "-m", "compileall", "-q", "."]
+            [PY, "-I", "-m", "compileall", "-q", "."]
                 .map(String::from)
                 .to_vec(),
         ),
-        test: ["python3", "-I", "-m", "unittest", "discover", "-v"]
+        test: [PY, "-I", "-m", "unittest", "discover", "-v"]
             .map(String::from)
             .to_vec(),
         coverage: Some(
             [
-                "python3",
+                PY,
                 "-I",
                 "-m",
                 "trace",
@@ -272,13 +276,12 @@ fn codes(o: &Outcome) -> Vec<String> {
 macro_rules! need_python {
     () => {
         if !python() {
-            eprintln!("python3 not found: skipped");
+            eprintln!("{PY} not found: skipped");
             return;
         }
     };
 }
 
-#[cfg(unix)]
 #[test]
 fn verified_change_merges_with_evidence() {
     need_python!();
@@ -334,7 +337,6 @@ fn verified_change_merges_with_evidence() {
     assert!(hub.verify().unwrap().ok());
 }
 
-#[cfg(unix)]
 #[test]
 fn failing_tests_do_not_merge() {
     need_python!();
@@ -376,7 +378,6 @@ fn failing_tests_do_not_merge() {
 /// A change of tests only, whose new test fails: the defect is in code
 /// the main workspace already has (a reviewer missed it; a test caught it
 /// later, spec §12.3). Rejected, with the blame placed.
-#[cfg(unix)]
 #[test]
 fn test_only_change_failing_is_flagged_as_caught_later() {
     need_python!();
@@ -404,7 +405,6 @@ fn test_only_change_failing_is_flagged_as_caught_later() {
     assert!(!o.is_merged());
 }
 
-#[cfg(unix)]
 #[test]
 fn failing_build_does_not_merge() {
     need_python!();
@@ -425,7 +425,6 @@ fn failing_build_does_not_merge() {
     assert_eq!(fx.read("calc.py"), CALC);
 }
 
-#[cfg(unix)]
 #[test]
 fn claim_without_evidence_rejected_automatically() {
     need_python!();
@@ -449,7 +448,6 @@ fn claim_without_evidence_rejected_automatically() {
     assert_eq!(codes(&o), ["no_test_for_claim"]);
 }
 
-#[cfg(unix)]
 #[test]
 fn uncovered_change_is_not_supported() {
     need_python!();
@@ -478,7 +476,6 @@ fn uncovered_change_is_not_supported() {
     assert_eq!(codes(&o), ["uncovered_change"]);
 }
 
-#[cfg(unix)]
 #[test]
 fn tampered_tests_rejected() {
     need_python!();
@@ -506,7 +503,6 @@ fn tampered_tests_rejected() {
     assert!(codes(&o).contains(&"tests_tampered".to_string()), "{o:?}");
 }
 
-#[cfg(unix)]
 #[test]
 fn regressed_test_rejected() {
     need_python!();
@@ -532,7 +528,6 @@ fn regressed_test_rejected() {
     assert_eq!(codes(&o), ["test_regressed"]);
 }
 
-#[cfg(unix)]
 #[test]
 fn spoofed_exit_rejected() {
     need_python!();
@@ -557,7 +552,6 @@ fn spoofed_exit_rejected() {
     assert!(c.contains(&"tests_inconclusive".to_string()), "{c:?}");
 }
 
-#[cfg(unix)]
 #[test]
 fn stdlib_shadowing_rejected() {
     need_python!();
@@ -582,7 +576,6 @@ fn stdlib_shadowing_rejected() {
 
 /// Review finding V-1: a test module that patches the runner so failures
 /// are not counted is rejected before its verdict is believed.
-#[cfg(unix)]
 #[test]
 fn runner_tampering_rejected() {
     need_python!();
@@ -608,7 +601,6 @@ fn runner_tampering_rejected() {
 /// Review finding V-2: files the interpreter or runner loads on its own
 /// are rejected, and commands never see the candidate as `HOME` or a
 /// user site directory.
-#[cfg(unix)]
 #[test]
 fn startup_hooks_rejected_and_home_is_empty() {
     need_python!();
@@ -639,7 +631,7 @@ fn startup_hooks_rejected_and_home_is_empty() {
 
     let mut s = spec();
     s.build = Some(vec![
-        "python3".into(),
+        PY.into(),
         "-c".into(),
         "import os, sys\n\
          h = os.environ['HOME']\n\
@@ -666,7 +658,6 @@ fn startup_hooks_rejected_and_home_is_empty() {
     assert!(o.is_merged(), "{o:?}");
 }
 
-#[cfg(unix)]
 #[test]
 fn verification_commands_cannot_write_outside_scratch() {
     need_python!();
@@ -678,7 +669,7 @@ fn verification_commands_cannot_write_outside_scratch() {
     let mut s = spec();
     // The build step tries to write into the main workspace.
     s.build = Some(vec![
-        "python3".into(),
+        PY.into(),
         "-I".into(),
         "-c".into(),
         format!("open({:?}, 'w').write('x')", target.display().to_string()),
@@ -733,26 +724,6 @@ fn pipeline_refuses_same_family() {
         .validate()
         .unwrap_err();
     assert!(e.contains("family"), "{e}");
-}
-
-#[cfg(windows)]
-#[test]
-fn verify_gate_fails_closed_on_windows() {
-    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
-    let fx = fixture();
-    let mut opened = fx.open();
-    let hub = hub_of(&opened);
-    let g = gate(&fx, &opened, spec());
-    let mut q = MergeQueue::new(hub, &mut opened.mediator, Box::new(g), true);
-    let o = submit_change(
-        &mut q,
-        &fx,
-        |r| write(r, "calc.py", GOOD_CALC),
-        &[clamp_claim()],
-    );
-    assert_eq!(codes(&o), ["unsupported_platform"]);
-    drop(q);
-    assert_eq!(fx.read("calc.py"), CALC);
 }
 
 // ---- Team runs: claims from real runtime sessions, self-repair, model
@@ -1120,7 +1091,7 @@ fn slow_gate_does_not_block_other_agents() {
     let mut s = spec();
     // A test command that takes ~1.5 s.
     s.build = Some(vec![
-        "python3".into(),
+        PY.into(),
         "-I".into(),
         "-c".into(),
         "import time; time.sleep(1.5)".into(),

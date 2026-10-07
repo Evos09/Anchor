@@ -103,7 +103,7 @@ They use real commands (Python unittest and trace) in the sandbox. As root
 | | `crash_after_gate_reverifies_on_recover`: a child `anchor team run` killed mid-apply; re-verified before applying | ✅ Linux, macOS (run 37496045693) |
 | Verification never stalls other agents | `slow_gate_does_not_block_other_agents`: the store stays available during a 1.5 s check | ✅ Linux, macOS (run 37496045693) |
 | Unverified merges are explicit | `unverified_team_needs_explicit_flag`; `merge_unverified` audited | ✅ Linux, macOS (run 37496045693) |
-| Windows fails closed | `verify_gate_fails_closed_on_windows` | ✅ Windows (run 37496045693) |
+| The gate on Windows (AppContainer; per-command profiles deleted, W-5) | the gate tests above, now run on Windows too (`verified_change_merges_with_evidence` … `verification_commands_cannot_write_outside_scratch`); `released_profiles_are_deleted` | 🟡 Windows (first CI run pending) |
 | §8.5 reviewer false-negative rate measured | `seeded_bug_harness_measures_reviewers`: accept-all lets through exactly what reaches review, oracle 0%, rule baseline matrix locked | ✅ Linux, macOS (run 37496045693) |
 | | `corpus_ground_truth_holds`, `eval_cli_with_mock_model_reviewer`; results in the [benchmark](benchmarks/reviewer.md) | ✅ Linux, macOS (run 37496045693) |
 

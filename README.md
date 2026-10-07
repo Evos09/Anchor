@@ -235,7 +235,7 @@ every §11 threat to its test and its per-platform status.
   - **Evidence:** Hub evidence for every check.
   - **Self-repair:** bounded, with structured feedback.
   - **Gate behaviour:** runs without the store lock, re-verifies when main
-    drifts, and fails closed on Windows.
+    drifts. On Windows it runs in AppContainers (ADR-0026).
   - **Seeded-bug harness:** the rule baseline lets 15 of 48 bugs through
     (FN 31.2%: every semantic and vacuous-test bug) and rejects no correct
     change ([benchmark](docs/benchmarks/reviewer.md)).
@@ -289,9 +289,6 @@ every §11 threat to its test and its per-platform status.
 
 **Known platform gaps:**
 
-- **Windows verify gate:** it still fails closed. Each verify run would
-  create a new AppContainer profile (the rest of W-5, AR-15); that is
-  fixed first.
 - **Windows runtime:** the agent runtime is not yet confined (AR-7).
 - The OpenAI-compatible adapter has not been run against a live endpoint:
   there was no local server or API key in the build environment.

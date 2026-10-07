@@ -136,10 +136,14 @@ the outcome is final.
 `--unverified`. Merges through a gate that verifies nothing are audited
 as `merge_unverified`.
 
-### Windows fails closed
+### Windows
 
-Agent commands have no sandbox on Windows (ADR-0003), so the gate rejects
-every merge there (`unsupported_platform`).
+Until Phase 7 agent commands had no sandbox on Windows, and the gate
+rejected every merge there (`unsupported_platform`). Since ADR-0026 they
+run in an AppContainer inside a Job Object, and the gate runs as on the
+other platforms. Each verify command's profile is deleted after it runs.
+A command that cannot be confined still does not run, so the check
+fails.
 
 ### The seeded-bug harness (§8.5, §16.3)
 

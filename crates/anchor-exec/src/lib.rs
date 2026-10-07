@@ -252,6 +252,24 @@ fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
+/// Forget the per-workspace sandbox state of a confinement whose
+/// read/write roots were throwaway (the verify gate's scratch runs): on
+/// Windows, delete its AppContainer profile (registry entry and its own
+/// writable `AC` folder), so nothing piles up and nothing a command left
+/// there reaches the next run. `Ok(true)` if something was deleted. No-op
+/// elsewhere. An ordinary workspace keeps its profile (AR-13).
+pub fn release(fs: &FsConfinement, cwd: &Path) -> Result<bool, ExecError> {
+    #[cfg(windows)]
+    {
+        windows::delete_profile(&windows::profile_name(fs, cwd))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (fs, cwd);
+        Ok(false)
+    }
+}
+
 /// Run a command to completion under the spec's limits.
 pub fn run(spec: &CommandSpec) -> Result<Output, ExecError> {
     if !spec.program.is_absolute() {
@@ -1553,6 +1571,24 @@ mod tests_windows {
             read.ptr,
             windows::READ_EXECUTE
         ));
+    }
+
+    /// A throwaway confinement's profile is deleted on release (round 2
+    /// W-5: the verify gate releases one per command).
+    #[test]
+    fn released_profiles_are_deleted() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(ws_dir.path()).unwrap();
+        let s = confined("cmd", &["/c", "rem"], &ws);
+        let o = run(&s).unwrap();
+        assert_eq!(o.exit, ExitKind::Exited(0), "{}", text(&o));
+        let fs = s.fs.as_ref().unwrap();
+        let name = windows::profile_name(fs, &ws);
+        assert!(windows::profile_exists(&name));
+        release(fs, &ws).unwrap();
+        assert!(!windows::profile_exists(&name));
+        // Releasing what is already gone is not an error.
+        release(fs, &ws).unwrap();
     }
 
     /// Batch files would be re-parsed by cmd.exe; they are refused.

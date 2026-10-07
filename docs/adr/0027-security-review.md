@@ -70,5 +70,5 @@ internal adversarial review plus a package prepared for the auditor
   Windows. The threat model marks a row ✅ only once a CI run has passed
   its test on that platform. The first run green on all three, validation
   suite included, is 37616036608.
-- **Windows verify gate.** It keeps failing closed until the rest of W-5
-  is fixed (AR-15).
+- **Windows verify gate.** Enabled once W-5 was fixed; it fails closed
+  only where a command cannot be confined.

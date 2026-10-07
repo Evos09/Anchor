@@ -40,7 +40,7 @@ use windows_sys::Win32::Security::Authorization::{
     TRUSTEE_W,
 };
 use windows_sys::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
+    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
@@ -192,6 +192,52 @@ pub(crate) fn container_sid(name: &str) -> Result<Sid, ExecError> {
         ptr: sid,
         local: false,
     })
+}
+
+/// Delete the AppContainer profile `name`: `Ok(false)` if there was none.
+pub(crate) fn delete_profile(name: &str) -> Result<bool, ExecError> {
+    let n = wide(OsStr::new(name));
+    // SAFETY: a valid wide string.
+    let hr = unsafe { DeleteAppContainerProfile(n.as_ptr()) };
+    if hr >= 0 {
+        // S_OK, or S_FALSE when nothing was there on some versions.
+        return Ok(hr == 0);
+    }
+    // HRESULT_FROM_WIN32 of ERROR_FILE_NOT_FOUND (2), ERROR_PATH_NOT_FOUND
+    // (3) and ERROR_NOT_FOUND (1168): nothing to delete.
+    let code = (hr as u32) & 0xffff;
+    if (hr as u32) >> 16 == 0x8007 && matches!(code, 2 | 3 | 1168) {
+        return Ok(false);
+    }
+    Err(ExecError::SandboxUnavailable(format!(
+        "deleting AppContainer profile {name}: HRESULT {hr:#x}"
+    )))
+}
+
+/// Whether the AppContainer profile `name` exists (tests). Probes by
+/// creating it, and deletes what the probe created.
+#[cfg(test)]
+pub(crate) fn profile_exists(name: &str) -> bool {
+    let n = wide(OsStr::new(name));
+    let mut sid: PSID = std::ptr::null_mut();
+    // SAFETY: valid wide strings and out-pointer.
+    let hr = unsafe {
+        CreateAppContainerProfile(
+            n.as_ptr(),
+            n.as_ptr(),
+            n.as_ptr(),
+            std::ptr::null(),
+            0,
+            &mut sid,
+        )
+    };
+    if hr >= 0 {
+        // SAFETY: allocated by CreateAppContainerProfile.
+        unsafe { FreeSid(sid) };
+        let _ = delete_profile(name);
+        return false;
+    }
+    hr == (0x8007_0000u32 | ERROR_ALREADY_EXISTS) as i32
 }
 
 fn string_sid(s: &str) -> Result<Sid, ExecError> {

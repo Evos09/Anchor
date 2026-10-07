@@ -26,7 +26,7 @@ snapshots undo. An accepted risk weakens one layer, never all of them.
 | AR-12 | Low | I-2 | all | One of the two §5.3(a) append-only heuristics is missing |
 | AR-13 | Low | round 2 | Windows | AppContainer ACEs persist on workspace and PATH directories |
 | AR-14 | Medium | F-2..F-13 | Windows | `anchor-fs` hardening beyond the pinned chain |
-| AR-15 | Medium | W-4..W-7, W-11, W-13, W-14 | Windows | Command-runner hygiene |
+| AR-15 | Medium | W-4, W-6, W-7, W-11, W-13, W-14 (W-5 fixed) | Windows | Command-runner hygiene |
 | AR-16 | Medium | M-4, M-7..M-9, K-4 | macOS, Linux | Preference reads, executable data roots, rule order |
 
 ---
@@ -224,28 +224,28 @@ validation suite check it.
   handle (`FileRenameInfo`, `NtCreateFile`), keeping every handle open
   to the end.
 
-### AR-15: Windows command-runner hygiene (W-4..W-7, W-11, W-13, W-14)
+### AR-15: Windows command-runner hygiene (W-4..W-7, W-11, W-13, W-14; W-5 fixed)
 
 - **Exposure.**
   - **W-4:** read and execute ACEs are added to PATH directories that may
     already be readable. Since CI run 37613963524 they go to one shared
     capability (`anchorReadExecute`), once per directory per machine.
-  - **W-5, partly fixed.** Read-only grants no longer churn per
-    workspace: they go to the shared capability, so a new workspace adds
-    nothing to a toolchain's ACL (regression test
-    `read_only_grants_use_the_shared_capability`). The verify gate's
-    scratch folders would still each create a profile and a "Modify" ACE
-    on their own fresh folder. This is not active, because Windows verify
-    still fails closed.
+  - **W-5, fixed.** Read-only grants no longer churn per workspace: they
+    go to the shared capability, so a new workspace adds nothing to a
+    toolchain's ACL (`read_only_grants_use_the_shared_capability`). The
+    verify gate deletes each command's profile after it runs
+    (`anchor_exec::release`, `released_profiles_are_deleted`); its
+    "Modify" ACEs sit on scratch folders that are removed with the run.
   - **W-6:** the stdio handles are inheritable for the instant of
     creation.
   - **W-7:** the job CPU limit counts user time and reports exit 1816.
   - **W-11:** stripping `\\?\` can re-normalise a path.
-  - **W-13:** the profile's own `AC` folder persists between runs.
+  - **W-13:** the profile's own `AC` folder persists between runs of an
+    ordinary workspace (same trust, same workspace). Verify runs delete
+    theirs, so a candidate leaves nothing there for the next check.
   - **W-14:** unconfined Windows commands get no job.
 - **Still holds.**
   - Commands are confined; none of these reaches outside the grants.
-  - W-5 must be fixed before the Windows verify gate is enabled.
 
 ### AR-16: macOS preference reads and executable roots, pid 1 (M-4, M-7..M-9, K-4)
 

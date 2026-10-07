@@ -130,6 +130,9 @@ and the validation suite, passed on Linux, macOS and Windows in CI run
 the AppContainer environment (error 203), workspace teardown order on
 Windows, `RLIMIT_NPROC` headroom on macOS, and read-only grants moved to
 a shared capability (which also removed W-5's read-only churn; see AR-15).
+W-5 is fixed: the verify gate deletes each command's AppContainer profile
+after it runs, and the Windows gate runs (`released_profiles_are_deleted`,
+the gate tests in `crates/anchor-backend/tests/verify.rs`).
 
 | ID | Sev. | Finding | Status | Fix / test |
 |---|---|---|---|---|
@@ -148,7 +151,7 @@ a shared capability (which also removed W-5's read-only churn; see AR-15).
 | W-8 | Low | `limit * 95` could overflow | Fixed | Saturating |
 | W-9 | Low | Environment names or values with `=`/NUL could smuggle in variables | Fixed | Refused on every platform. `malformed_environment_is_refused` |
 | W-12 | Low | The error code was read after `TerminateJobObject`, and a failed `GetExitCodeProcess` read as exit 0 | Fixed | |
-| F-2..F-13, W-4..W-7, W-11, W-13, W-14, M-4, M-7..M-9, K-4 | Medium–Info | Windows `anchor-fs` and runner hardening; macOS preference reads and executable roots | Accepted | AR-14, AR-15, AR-16 |
+| F-2..F-13, W-4, W-6, W-7, W-11, W-13, W-14, M-4, M-7..M-9, K-4 | Medium–Info | Windows `anchor-fs` and runner hardening; macOS preference reads and executable roots | Accepted | AR-14, AR-15, AR-16 |
 
 ## Result
 

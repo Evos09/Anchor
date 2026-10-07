@@ -94,11 +94,16 @@ through `crates/anchor-exec/src/windows.rs`.
 
 - **Threats 4–7.** They get a Windows mechanism. The validation suite
   (`crates/anchor-sandbox-validation`) and `anchor-exec`'s `tests_windows`
-  exercise it on CI, green since run 37616036608. The verify gate still
-  fails closed on Windows until each verify run stops creating its own
-  profile (the rest of W-5, AR-15).
+  exercise it on CI, green since run 37616036608.
+- **Verify gate.** It runs on Windows too. Its commands' read/write roots
+  are throwaway scratch folders, so after each command the gate deletes
+  that command's profile (`anchor_exec::release`,
+  `DeleteAppContainerProfile`). Profiles do not pile up, and nothing a
+  candidate writes to the profile's own folder reaches the next check
+  (round 2 W-5, W-13).
 - **File size.** There is no per-file size limit on Windows (AR-2).
-- **ACE persistence.** The ACEs persist after the run (AR-13). Cleanup
+- **ACE persistence.** A workspace's ACEs and profile persist after the
+  run (AR-13). Cleanup
   belongs to a future `anchor workspace forget`: remove the ACEs, then
   `DeleteAppContainerProfile`.
 - **Runtime.** The agent runtime (Layer 2) is not yet confined on Windows

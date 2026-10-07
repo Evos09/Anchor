@@ -24,10 +24,11 @@
 //! 5. every command output, the review input and the decision are stored
 //!    as Hub evidence.
 //!
-//! On Windows agent commands have no sandbox, so the gate rejects every
-//! merge (`unsupported_platform`): it fails closed.
+//! Commands run under `anchor-exec`'s confinement on every platform; on
+//! Windows each command's AppContainer profile is deleted after it runs
+//! (ADR-0026).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -507,7 +508,20 @@ impl VerifyGate {
                 read_only,
             }),
         };
-        match anchor_exec::run(&spec) {
+        let result = anchor_exec::run(&spec);
+        // The read/write roots are throwaway: on Windows the command's
+        // AppContainer profile (and the writable folder Windows gives it)
+        // goes with them, so nothing piles up and nothing a candidate left
+        // there reaches the next check (round 2 W-5, W-13).
+        let released = match spec
+            .fs
+            .as_ref()
+            .map(|fs| anchor_exec::release(fs, &spec.cwd))
+        {
+            Some(Err(e)) => format!("\n[sandbox profile not released: {e}]"),
+            _ => String::new(),
+        };
+        match result {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
                 let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
@@ -524,7 +538,7 @@ impl VerifyGate {
                 record.output_tail = tail(&both, OUTPUT_TAIL_BYTES);
                 let log = format!(
                     "$ {argv:?}\nexit: {:?}\nisolation: network {:?}, fs_confined {}, \
-                     dropped_root {}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}{}",
+                     dropped_root {}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}{}{released}",
                     o.exit,
                     o.isolation.network,
                     o.isolation.fs_confined,
@@ -745,33 +759,6 @@ impl VerifyGate {
             ctx.attempt,
             unique_suffix(self.runs)
         );
-        if cfg!(windows) {
-            // Agent commands have no sandbox on Windows: fail closed.
-            let input = ReviewInput {
-                claims: ctx.claims.to_vec(),
-                changes: Vec::new(),
-                commands: Vec::new(),
-                tests: Vec::new(),
-                coverage: None,
-                claim_refs: BTreeMap::new(),
-                truncated: false,
-            };
-            let decision = Decision {
-                approved: false,
-                reviewer: self.reviewer.name().to_string(),
-                findings: vec![Finding::new(
-                    Stage::Rules,
-                    "unsupported_platform",
-                    json!({"detail": "verification commands cannot be sandboxed on Windows"}),
-                )],
-                verdicts: Vec::new(),
-            };
-            return Ok(GateRun {
-                input,
-                decision,
-                group,
-            });
-        }
         let root = anchor_exec::running_as_root();
         create_scratch_dir(&self.scratch, root)?;
         let run_dir = self.scratch.join(&group);
