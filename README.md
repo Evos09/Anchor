@@ -89,6 +89,27 @@ Policy, audit log, checkpoints and snapshots live outside the workspace, so
 agent commands can't reach them (ADR-0022). `anchor state-dir --workspace
 DIR` prints the location; set `ANCHOR_STATE_DIR` to move it.
 
+### With real models, free and local
+
+[Ollama](https://ollama.com) serves two open models, and
+`examples/local/roles.ollama.toml` points Anchor at them: one model writes,
+a model from another family reviews.
+
+- **Windows:** one command builds Anchor, checks Ollama, downloads the
+  models, makes a test project and starts the agent:
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File scripts\try-local.ps1
+  powershell -ExecutionPolicy Bypass -File scripts\try-local.ps1 -Workspace C:\my\project -Task "Fix the failing test"
+  ```
+
+- **Linux and macOS:**
+
+  ```sh
+  ollama pull qwen2.5-coder:7b && ollama pull llama3.1:8b
+  ./target/debug/anchor run --workspace DIR --roles examples/local/roles.ollama.toml --task "..."
+  ```
+
 ### A team of agents (Phase 4)
 
 ```sh
