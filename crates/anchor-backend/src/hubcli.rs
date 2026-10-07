@@ -580,13 +580,12 @@ pub fn cmd_ui(a: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
     /// Review finding U-1: the URL (it carries the token) never lands in
     /// a file someone else made or can read, nor through a planted link.
-    #[cfg(unix)]
     #[test]
     fn secret_file_replaces_links_and_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
