@@ -26,7 +26,13 @@ fn main() -> ExitCode {
         None => {}
     }
     let status = restrict_self();
-    eprintln!("anchor-agent: filesystem sandbox: {status:?}");
+    eprintln!("anchor-agent: sandbox: {status:?}");
+    // Fail closed where a sandbox exists (Linux): an unconfined runtime
+    // would read the user's files and reach their terminal and sockets.
+    if cfg!(target_os = "linux") && matches!(status, SandboxStatus::NotEnforced(_)) {
+        eprintln!("anchor-agent: refusing to run without the sandbox");
+        return ExitCode::from(3);
+    }
     let mut t = StdioTransport::new(BufReader::new(stdin().lock()), stdout().lock());
     let factory = default_factory();
     match run_session(&mut t, &*factory) {
@@ -49,15 +55,19 @@ fn selftest() -> ExitCode {
     let status = restrict_self();
     println!(
         "sandbox {}",
-        if status == SandboxStatus::FullyEnforced {
-            "enforced"
-        } else {
-            "not-enforced"
+        match status {
+            SandboxStatus::NotEnforced(_) => "not-enforced",
+            _ => "enforced",
         }
     );
     let read = std::fs::read(&target).is_ok();
     let write = std::fs::write(format!("{target}.agent-write"), b"x").is_ok();
     println!("read {}", if read { "ALLOWED" } else { "DENIED" });
     println!("write {}", if write { "ALLOWED" } else { "DENIED" });
+    #[cfg(unix)]
+    {
+        let unix = std::os::unix::net::UnixDatagram::unbound().is_ok();
+        println!("unix_socket {}", if unix { "ALLOWED" } else { "DENIED" });
+    }
     ExitCode::SUCCESS
 }

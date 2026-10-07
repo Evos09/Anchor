@@ -227,6 +227,7 @@ pub fn open_workspace_in(
     let snapshots = anchor_snapshot::Store::open(&paths.snapshots)?;
     let checkpoints = CheckpointStore::open(&paths.checkpoints)?;
     let path_var = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
+    let exec_read_only = safe_read_grants(exec_read_only, &paths.dir);
     let mut mediator = Mediator::new(
         ws,
         engine,
@@ -304,8 +305,43 @@ impl SnapshotConfig {
     }
 }
 
+/// Filter read-only grants for agent commands. Each is canonicalized (so
+/// `~/bin/..`, a symlink to home or a parent such as `/home` is seen for
+/// what it is) and dropped, with a warning, if it is `/`, contains the
+/// home directory, or overlaps the state directory.
+pub fn safe_read_grants(grants: Vec<PathBuf>, state_dir: &Path) -> Vec<PathBuf> {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let home = canon(&home_dir());
+    let state = canon(state_dir);
+    let mut out: Vec<PathBuf> = Vec::new();
+    for g in grants {
+        let Ok(c) = std::fs::canonicalize(&g) else {
+            continue; // missing: nothing to grant
+        };
+        let why = if c.parent().is_none() {
+            Some("the filesystem root")
+        } else if home.starts_with(&c) {
+            Some("the home directory or one of its parents")
+        } else if state.starts_with(&c) || c.starts_with(&state) {
+            Some("Anchor's state directory")
+        } else {
+            None
+        };
+        match why {
+            Some(w) => eprintln!(
+                "anchor: not granting {} to agent commands: it would expose {w}",
+                g.display()
+            ),
+            None if !out.contains(&c) => out.push(c),
+            None => {}
+        }
+    }
+    out
+}
+
 /// Default read-only view for agent commands: system directories plus every
-/// absolute directory on PATH (so toolchains can execute).
+/// absolute directory on PATH (so toolchains can execute). Filtered again
+/// by [`safe_read_grants`] when a workspace opens.
 pub fn default_exec_read_only() -> Vec<PathBuf> {
     let mut v = anchor_exec::FsConfinement::system_read_only();
     if let Some(p) = std::env::var_os("PATH") {
@@ -323,4 +359,36 @@ pub fn default_exec_read_only() -> Vec<PathBuf> {
         }
     }
     v
+}
+
+#[cfg(all(test, unix))]
+mod grant_tests {
+    use super::*;
+
+    /// Review finding S-8: `~/bin/..`, a parent of home or a symlink to it
+    /// must not slip through as a read-only grant.
+    #[test]
+    fn grants_exposing_home_root_or_state_are_dropped() {
+        let home = std::fs::canonicalize(home_dir()).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(d.path()).unwrap();
+        let state = base.join("state");
+        let tool = base.join("toolchain");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&tool).unwrap();
+        let link = base.join("home-link");
+        std::os::unix::fs::symlink(&home, &link).unwrap();
+        let grants = vec![
+            PathBuf::from("/"),
+            home.join("bin/.."),
+            home.clone(),
+            link,
+            home.parent().unwrap().to_path_buf(),
+            state.clone(),
+            state.join("sub"),
+            tool.clone(),
+            tool.join("."),
+        ];
+        assert_eq!(safe_read_grants(grants, &state), vec![tool]);
+    }
 }

@@ -88,6 +88,28 @@ fn rejects_nul_in_path() {
     assert!(matches!(decode(&s), Err(ProtocolError::Invalid(_))));
 }
 
+/// Review finding T-3: escape sequences in a model-chosen name never reach
+/// a prompt.
+#[test]
+fn rejects_control_characters_in_names() {
+    for path in ["notes\u{1b}[8m.txt", "a\u{7}b", "line\nbreak", "x\u{9b}y"] {
+        let f = Frame::new(
+            1,
+            Message::ToolCall(ToolCall {
+                call_id: "a".into(),
+                request: ToolRequest::WriteFile {
+                    path: path.into(),
+                    content: "x".into(),
+                },
+            }),
+        );
+        assert!(
+            matches!(encode(&f), Err(ProtocolError::Invalid(_))),
+            "{path:?}"
+        );
+    }
+}
+
 #[test]
 fn rejects_oversize_frame_without_buffering_it_all() {
     let mut big = vec![b'a'; MAX_FRAME_BYTES + 10];

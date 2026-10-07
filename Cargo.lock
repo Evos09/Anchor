@@ -33,6 +33,7 @@ dependencies = [
  "getrandom 0.4.3",
  "globset",
  "ignore",
+ "libc",
  "regex",
  "serde",
  "serde_json",
@@ -56,6 +57,7 @@ dependencies = [
 name = "anchor-exec"
 version = "0.1.0"
 dependencies = [
+ "anchor-seccomp",
  "landlock",
  "libc",
  "tempfile",
@@ -132,6 +134,7 @@ version = "0.1.0"
 dependencies = [
  "anchor-checkpoint",
  "anchor-protocol",
+ "anchor-seccomp",
  "landlock",
  "serde",
  "serde_json",
@@ -139,6 +142,13 @@ dependencies = [
  "thiserror",
  "toml",
  "ureq",
+]
+
+[[package]]
+name = "anchor-seccomp"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

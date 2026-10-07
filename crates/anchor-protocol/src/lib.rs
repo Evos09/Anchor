@@ -165,5 +165,15 @@ pub(crate) fn check_param(name: &str, s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A parameter that names a file, glob or program: no control characters
+/// either (they have no place in a name the user must read in a prompt).
+pub(crate) fn check_name(name: &str, s: &str) -> Result<(), String> {
+    check_param(name, s)?;
+    if s.chars().any(char::is_control) {
+        return Err(format!("{name} contains a control character"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

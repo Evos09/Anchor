@@ -41,10 +41,38 @@ pub trait Interaction: Send {
 #[derive(Debug, Default)]
 pub struct Terminal;
 
+/// Text for the terminal with every control character made visible, so
+/// model-chosen names, runtime output or file contents cannot move the
+/// cursor, hide part of a prompt, retitle the window or write the clipboard
+/// (escape sequences). Newlines are kept where `keep_newlines` is set.
+pub fn terminal_safe(s: &str, keep_newlines: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' if keep_newlines => out.push('\n'),
+            '\t' => out.push('\t'),
+            c if c.is_control()
+                || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') =>
+            {
+                out.extend(c.escape_default())
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn read_answer() -> String {
     // Prefer the controlling terminal so piped stdin cannot answer prompts.
     #[cfg(unix)]
     if let Ok(tty) = std::fs::File::open("/dev/tty") {
+        // Discard anything typed (or injected) before the prompt appeared:
+        // only an answer given after it counts.
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: tcflush on a descriptor we own.
+            unsafe { libc::tcflush(tty.as_raw_fd(), libc::TCIFLUSH) };
+        }
         let mut s = String::new();
         let _ = std::io::BufReader::new(tty).read_line(&mut s);
         return s.trim().to_ascii_lowercase();
@@ -57,19 +85,27 @@ fn read_answer() -> String {
 impl Interaction for Terminal {
     fn confirm(&mut self, v: &PromptView) -> UserResponse {
         let mut e = std::io::stderr().lock();
-        let _ = writeln!(e, "\n── Permission required ({}) ──", v.rule);
+        let _ = writeln!(
+            e,
+            "\n── Permission required ({}) ──",
+            terminal_safe(&v.rule, false)
+        );
         let _ = writeln!(e, "  tool:      {:?}", v.tool);
         let _ = writeln!(e, "  operation: {:?}", v.operation);
         match &v.canonical_target {
             Some(t) => {
-                let _ = writeln!(e, "  target:    {}", t.display());
+                let _ = writeln!(
+                    e,
+                    "  target:    {}",
+                    terminal_safe(&t.display().to_string(), false)
+                );
             }
             None => {
                 let _ = writeln!(e, "  target:    (none)");
             }
         }
         if let Some(d) = &v.detail {
-            let _ = writeln!(e, "{d}");
+            let _ = writeln!(e, "{}", terminal_safe(d, true));
         }
         let _ = write!(e, "Allow? [y/N] ");
         let _ = e.flush();
@@ -97,7 +133,7 @@ impl Interaction for Terminal {
     }
 
     fn notify(&mut self, line: &str) {
-        eprintln!("{line}");
+        eprintln!("{}", terminal_safe(line, true));
     }
 
     fn responder(&self) -> Responder {
@@ -136,11 +172,14 @@ impl Interaction for Scripted {
                 if self.approve { "approve" } else { "deny" },
                 v.tool,
                 v.operation,
-                v.canonical_target
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default(),
-                v.rule
+                terminal_safe(
+                    &v.canonical_target
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                    false
+                ),
+                terminal_safe(&v.rule, false)
             );
         }
         self.prompts_seen.push(v.clone());
@@ -155,11 +194,29 @@ impl Interaction for Scripted {
     }
     fn notify(&mut self, line: &str) {
         if self.echo {
-            eprintln!("{line}");
+            eprintln!("{}", terminal_safe(line, true));
         }
         self.notices.push(line.to_string());
     }
     fn responder(&self) -> Responder {
         Responder::Automatic
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::terminal_safe;
+
+    /// Review finding T-3: escape sequences in a model-chosen name or in
+    /// runtime output are shown, never interpreted by the terminal.
+    #[test]
+    fn control_characters_are_made_visible() {
+        let hostile = "notes\u{1b}[8m\u{1b}]52;c;cHduZWQ=\u{7}.txt\r\u{202e}gpj.exe";
+        let shown = terminal_safe(hostile, false);
+        assert!(!shown.chars().any(|c| c.is_control()), "{shown}");
+        assert!(shown.contains("\\u{1b}[8m"), "{shown}");
+        assert!(shown.contains("\\u{202e}"), "{shown}");
+        assert_eq!(terminal_safe("a\nb", true), "a\nb");
+        assert_eq!(terminal_safe("a\nb", false), "a\\nb");
     }
 }

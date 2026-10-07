@@ -360,8 +360,8 @@ fn overwrite_of_unread_file_requires_diff_confirmation() {
     );
 }
 
-/// The runtime process has no filesystem authority (Landlock self-sandbox
-/// on Linux).
+/// The runtime process has no filesystem authority and no unix sockets
+/// (Landlock and seccomp self-sandbox on Linux).
 #[cfg(target_os = "linux")]
 #[test]
 fn runtime_process_cannot_touch_the_filesystem() {
@@ -383,6 +383,8 @@ fn runtime_process_cannot_touch_the_filesystem() {
     }
     assert!(text.contains("read DENIED"), "{text}");
     assert!(text.contains("write DENIED"), "{text}");
+    // Review finding S-1: no unix sockets (the user's D-Bus, ssh agent).
+    assert!(text.contains("unix_socket DENIED"), "{text}");
     assert!(!fx.ws.join("src/main.py.agent-write").exists());
 }
 

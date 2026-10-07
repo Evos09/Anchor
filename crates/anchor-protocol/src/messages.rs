@@ -232,29 +232,29 @@ impl Validate for ToolRequest {
     fn validate(&self) -> Result<(), String> {
         match self {
             ToolRequest::ReadFile { path } | ToolRequest::ListDir { path } => {
-                check_param("path", path)
+                crate::check_name("path", path)
             }
             ToolRequest::WriteFile { path, content } => {
-                check_param("path", path)?;
+                crate::check_name("path", path)?;
                 if content.len() > MAX_CONTENT_BYTES {
                     return Err("content too large".into());
                 }
                 Ok(())
             }
             ToolRequest::EditFile { path, edit } => {
-                check_param("path", path)?;
+                crate::check_name("path", path)?;
                 edit.validate()
             }
-            ToolRequest::Glob { pattern } => check_param("pattern", pattern),
+            ToolRequest::Glob { pattern } => crate::check_name("pattern", pattern),
             ToolRequest::Grep { pattern, path_glob } => {
-                check_param("pattern", pattern)?;
+                crate::check_name("pattern", pattern)?;
                 if let Some(g) = path_glob {
-                    check_param("path_glob", g)?;
+                    crate::check_name("path_glob", g)?;
                 }
                 Ok(())
             }
             ToolRequest::RunCommand { program, args, .. } => {
-                check_param("program", program)?;
+                crate::check_name("program", program)?;
                 if args.len() > 256 {
                     return Err("too many args".into());
                 }
