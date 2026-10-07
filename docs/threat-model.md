@@ -183,10 +183,10 @@ and its answer can only add rejections.
 
 | Property | Tests | Status |
 |---|---|---|
-| A plugin cannot approve what the built-in reviewer rejects; it can block what it approves | `combined_reviewers_take_the_worst_verdict`, `a_refuting_plugin_blocks_the_merge` | 🟡 CI pending (Linux local) |
-| A plugin that crashes, hangs or answers badly fails closed | `a_crashing_plugin_fails_closed`, `a_hanging_plugin_times_out_and_fails_closed`, `verifier::tests` (protocol rules) | 🟡 CI pending (Linux local) |
-| A plugin can read neither the workspace nor the network | `plugins_are_sandboxed_and_support_merges` (a loopback listener and a workspace file, with a positive read control) | 🟡 CI pending (Linux local) |
-| The published contract matches the code | `anchor-protocol/tests/verifier_schema.rs`, `fixtures_are_valid_review_inputs`, `the_example_plugin_conforms` | 🟡 CI pending (Linux local) |
+| A plugin cannot approve what the built-in reviewer rejects; it can block what it approves | `combined_reviewers_take_the_worst_verdict`, `a_refuting_plugin_blocks_the_merge` | ✅ Linux, macOS, Windows (CI 37696005806) |
+| A plugin that crashes, hangs or answers badly fails closed | `a_crashing_plugin_fails_closed`, `a_hanging_plugin_times_out_and_fails_closed`, `verifier::tests` (protocol rules) | ✅ Linux, macOS, Windows (CI 37696005806) |
+| A plugin can read neither the workspace nor the network | `plugins_are_sandboxed_and_support_merges` (a loopback listener and a workspace file, with a positive read control) | ✅ Linux, macOS, Windows (CI 37696005806) |
+| The published contract matches the code | `anchor-protocol/tests/verifier_schema.rs`, `fixtures_are_valid_review_inputs`, `the_example_plugin_conforms` | ✅ Linux, macOS, Windows (CI 37696005806) |
 
 Residual: a plugin sees the change it reviews (AR-17).
 
