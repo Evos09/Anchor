@@ -1,0 +1,20 @@
+[package]
+name = "anchor-sandbox-validation"
+description = "Cross-platform sandbox validation suite (spec §14 Phase 7): one probe binary performs each attack; the test runs it through anchor-exec with the backend's confinement and reports the outcome per platform."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+anchor-exec.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

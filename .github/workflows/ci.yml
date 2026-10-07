@@ -44,6 +44,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace --no-fail-fast
+      - name: Sandbox validation report (spec §14 Phase 7)
+        if: always()
+        run: cat target/sandbox-report.md >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Sandbox tests, seccomp-only tier (no user namespaces)
+        run: ANCHOR_EXEC_TEST_DISABLE_USERNS=1 cargo test -p anchor-exec -p anchor-sandbox-validation -p anchor-seccomp --no-fail-fast
       - name: Seeded-bug harness (spec §8.5)
         run: |
           # The rule baseline on the whole corpus, reported in the job
@@ -73,7 +78,7 @@ jobs:
           # anchor-hub / anchor-backend (bundled SQLite). Those are built and
           # tested natively on macOS and Windows by the jobs below.
           for t in x86_64-pc-windows-gnu aarch64-apple-darwin; do
-            cargo check --tests --target "$t" -p anchor-fs -p anchor-exec -p anchor-policy -p anchor-guard -p anchor-checkpoint -p anchor-protocol -p anchor-snapshot
+            cargo check --tests --target "$t" -p anchor-fs -p anchor-exec -p anchor-policy -p anchor-guard -p anchor-checkpoint -p anchor-protocol -p anchor-snapshot -p anchor-sandbox-validation
           done
 
   supply-chain:
@@ -103,6 +108,10 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace --no-fail-fast
+      - name: Sandbox validation report (spec §14 Phase 7)
+        if: always()
+        shell: bash
+        run: cat target/sandbox-report.md >> "$GITHUB_STEP_SUMMARY" || true
 
   snapshot-bench:
     # Spec §14 Phase 3: "a 100k-file monorepo snapshots incrementally in

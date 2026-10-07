@@ -146,6 +146,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "anchor-sandbox-validation"
+version = "0.1.0"
+dependencies = [
+ "anchor-exec",
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "anchor-seccomp"
 version = "0.1.0"
 dependencies = [
