@@ -15,12 +15,19 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anchor_backend::interact::Scripted;
+use anchor_backend::open_workspace_in;
+#[cfg(unix)]
+use anchor_backend::session;
+#[cfg(unix)]
 use anchor_backend::team::{self, Team, TeamOptions};
-use anchor_backend::ui::{self, Broker, Sources, UiInteraction};
-use anchor_backend::{open_workspace_in, session};
+use anchor_backend::ui::{self, Sources};
+#[cfg(unix)]
+use anchor_backend::ui::{Broker, UiInteraction};
+#[cfg(unix)]
 use anchor_policy::AuditLog;
 use anchor_protocol::ResumeChoice;
 use serde_json::{Value, json};
@@ -31,6 +38,7 @@ fn example() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/ui")
 }
 
+#[cfg(unix)]
 fn agent_bin() -> PathBuf {
     let p = session::default_agent_bin();
     if !p.exists() {
@@ -50,6 +58,7 @@ fn agent_bin() -> PathBuf {
     p
 }
 
+#[cfg(unix)]
 fn python() -> bool {
     std::process::Command::new("python3")
         .arg("--version")
@@ -263,6 +272,7 @@ fn dashboard_is_token_gated_same_origin_and_hardened() {
     assert_eq!(audit.head(), before);
 }
 
+#[cfg(unix)]
 fn script_tokens(path: &Path) -> (u64, u64) {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     v["steps"]
@@ -277,6 +287,7 @@ fn script_tokens(path: &Path) -> (u64, u64) {
         })
 }
 
+#[cfg(unix)]
 fn price(roles: &str, role: &str) -> (f64, f64) {
     let t: toml::Table = std::fs::read_to_string(example().join(roles))
         .unwrap()
@@ -289,10 +300,12 @@ fn price(roles: &str, role: &str) -> (f64, f64) {
     )
 }
 
+#[cfg(unix)]
 fn usd(tokens: (u64, u64), p: (f64, f64)) -> f64 {
     (tokens.0 as f64 * p.0 + tokens.1 as f64 * p.1) / 1_000_000.0
 }
 
+#[cfg(unix)]
 fn close(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-12
 }
