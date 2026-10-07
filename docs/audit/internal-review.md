@@ -132,7 +132,8 @@ Windows, `RLIMIT_NPROC` headroom on macOS, and read-only grants moved to
 a shared capability (which also removed W-5's read-only churn; see AR-15).
 W-5 is fixed: the verify gate deletes each command's AppContainer profile
 after it runs, and the Windows gate runs (`released_profiles_are_deleted`,
-the gate tests in `crates/anchor-backend/tests/verify.rs`).
+the gate tests in `crates/anchor-backend/tests/verify.rs`; green on all
+three platforms in CI run 37623168183).
 
 | ID | Sev. | Finding | Status | Fix / test |
 |---|---|---|---|---|

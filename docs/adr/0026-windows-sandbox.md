@@ -100,7 +100,7 @@ through `crates/anchor-exec/src/windows.rs`.
   that command's profile (`anchor_exec::release`,
   `DeleteAppContainerProfile`). Profiles do not pile up, and nothing a
   candidate writes to the profile's own folder reaches the next check
-  (round 2 W-5, W-13).
+  (round 2 W-5, W-13). Green in CI run 37623168183.
 - **File size.** There is no per-file size limit on Windows (AR-2).
 - **ACE persistence.** A workspace's ACEs and profile persist after the
   run (AR-13). Cleanup
