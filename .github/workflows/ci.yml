@@ -57,6 +57,17 @@ jobs:
             --corpus examples/eval/corpus --reviewer rule --md "$GITHUB_STEP_SUMMARY"
           cargo run -q -p anchor-backend --bin anchor -- eval run \
             --corpus examples/eval/corpus --reviewer oracle --max-fn-rate 0
+      - name: Verifier plugin conformance (spec §14 Phase 8)
+        # `shell: bash` runs with pipefail, so a failing check fails the step.
+        shell: bash
+        run: |
+          python3 -m unittest examples/verifier-python/test_verifier.py
+          {
+            echo '### Verifier plugin conformance'; echo '```'
+            cargo run -q -p anchor-backend --bin anchor -- \
+              verifier check examples/verifier-python/verifier.toml
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Dashboard end to end (spec §14 Phase 6, Chromium)
         working-directory: ui
         run: |
@@ -112,6 +123,35 @@ jobs:
         if: always()
         shell: bash
         run: cat target/sandbox-report.md >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Verifier plugin conformance (spec §14 Phase 8)
+        shell: bash
+        run: |
+          PY=$(command -v python3 >/dev/null && python3 --version >/dev/null 2>&1 && echo python3 || echo python)
+          "$PY" -m unittest examples/verifier-python/test_verifier.py
+          cargo run -q -p anchor-backend --bin anchor -- \
+            verifier check examples/verifier-python/verifier.toml
+
+  quickstart:
+    # Spec §14 Phase 8: "the CI is green on a fresh clone". Clones the
+    # checkout into a new directory (no build cache, no prior state) and
+    # runs the contributor quickstart exactly as CONTRIBUTING.md gives it.
+    name: Contributor quickstart (fresh clone)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: checkout
+      - name: Fresh clone
+        run: git clone --no-local checkout "$RUNNER_TEMP/anchor"
+      - name: Toolchain (as rust-toolchain.toml pins it)
+        working-directory: ${{ runner.temp }}/anchor
+        run: rustup toolchain install
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: scripts/quickstart.sh
+        working-directory: ${{ runner.temp }}/anchor
+        run: ./scripts/quickstart.sh
 
   snapshot-bench:
     # Spec §14 Phase 3: "a 100k-file monorepo snapshots incrementally in

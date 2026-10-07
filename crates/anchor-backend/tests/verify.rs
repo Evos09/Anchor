@@ -162,6 +162,7 @@ fn spec() -> VerifySpec {
         reviewer_roles: None,
         reviewer_mock_script: None,
         timeout: std::time::Duration::from_secs(120),
+        verifiers: Vec::new(),
     }
 }
 
@@ -1160,4 +1161,163 @@ fn unverified_team_needs_explicit_flag() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--unverified"), "{err}");
     assert_eq!(fx.read("calc.py"), CALC);
+}
+
+// ---- Verifier plugins (Phase 8, ADR-0009) ----
+
+/// A plugin directory under the target directory (readable by the user
+/// commands run as when the tests run as root), holding `verifier.py` and
+/// its manifest.
+fn plugin_dir(name: &str, body: &str, args: &[&str], timeout_secs: u64) -> tempfile::TempDir {
+    let d = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let program = format!(
+        "import json, sys\n\
+         req = json.loads(sys.stdin.readline())\n\
+         rid, msg = req['id'], req['msg']\n\
+         def reply(kind, payload):\n    \
+             sys.stdout.write(json.dumps({{'v': 1, 'id': rid, 'msg': {{'kind': kind, 'payload': payload}}}}) + '\\n')\n\
+         if msg['kind'] == 'describe':\n    \
+             reply('info', {{'name': '{name}', 'version': '1.0', 'protocol': [1]}})\n    \
+             sys.exit(0)\n\
+         claims = [c['id'] for c in msg['payload']['claims']]\n\
+         {body}\n"
+    );
+    std::fs::write(d.path().join("verifier.py"), program).unwrap();
+    let argv: Vec<String> = ["verifier.py"]
+        .iter()
+        .chain(args)
+        .map(|a| format!("{a:?}"))
+        .collect();
+    std::fs::write(
+        d.path().join("verifier.toml"),
+        format!(
+            "name = \"{name}\"\ncommand = [\"{PY}\", {}]\ntimeout_secs = {timeout_secs}\n",
+            argv.join(", ")
+        ),
+    )
+    .unwrap();
+    d
+}
+
+fn gate_with_plugins(fx: &Fx, opened: &Opened, plugins: &[&tempfile::TempDir]) -> VerifyGate {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let manifests: Vec<PathBuf> = plugins
+        .iter()
+        .map(|d| d.path().join("verifier.toml"))
+        .collect();
+    let reviewer = anchor_backend::verifier::with_plugins(
+        anchor_backend::verify::rule_reviewer(),
+        &manifests,
+        &fx.ws,
+        &path,
+        default_exec_read_only(),
+    )
+    .unwrap();
+    VerifyGate::new(
+        spec(),
+        anchor_backend::verify::scratch_base(&fx.state_base(), &fx.ws),
+        Some(hub_of(opened)),
+        reviewer,
+        path,
+        default_exec_read_only(),
+    )
+    .unwrap()
+}
+
+fn good_change(r: &std::path::Path) {
+    write(r, "calc.py", GOOD_CALC);
+    write(r, "tests/test_clamp.py", TEST_CLAMP);
+}
+
+/// A plugin that refutes a claim blocks a change the built-in reviewer
+/// approves, and the rejection names the plugin.
+#[test]
+fn a_refuting_plugin_blocks_the_merge() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let plugin = plugin_dir(
+        "no-way",
+        "reply('verdicts', {'verdicts': [{'claim_id': c, 'verdict': 'refuted', \
+         'reason_code': 'house_rule', 'note': 'not on a Friday'} for c in claims]})",
+        &[],
+        60,
+    );
+    let fx = fixture();
+    let mut opened = fx.open();
+    let g = gate_with_plugins(&fx, &opened, &[&plugin]);
+    let mut q = MergeQueue::new(hub_of(&opened), &mut opened.mediator, Box::new(g), true);
+    let o = submit_change(&mut q, &fx, good_change, &[clamp_claim()]);
+    assert!(!o.is_merged(), "{o:?}");
+    let text = format!("{o:?}");
+    assert!(text.contains("house_rule"), "{text}");
+    assert!(text.contains("plugin:no-way"), "{text}");
+}
+
+/// A plugin that crashes fails closed: nothing merges.
+#[test]
+fn a_crashing_plugin_fails_closed() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let plugin = plugin_dir("crashes", "raise SystemExit(3)", &[], 60);
+    let fx = fixture();
+    let mut opened = fx.open();
+    let g = gate_with_plugins(&fx, &opened, &[&plugin]);
+    let mut q = MergeQueue::new(hub_of(&opened), &mut opened.mediator, Box::new(g), true);
+    let o = submit_change(&mut q, &fx, good_change, &[clamp_claim()]);
+    assert!(!o.is_merged(), "{o:?}");
+    assert!(format!("{o:?}").contains("verifier_failed"), "{o:?}");
+}
+
+/// A plugin runs sandboxed: it cannot read the workspace or reach the
+/// network (here: a listener on loopback). This one supports every claim
+/// only if both attempts fail, so the change merges only if the sandbox
+/// held; the plugin's supported verdict also shows plugins do not block
+/// what they agree with.
+#[test]
+fn plugins_are_sandboxed_and_support_merges() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let secret = anchor_exec::native_path(&fx.ws.join("calc.py"))
+        .display()
+        .to_string();
+    let plugin = plugin_dir(
+        "probe",
+        "import socket\n\
+         open('verifier.py').read()  # control: its own directory is readable\n\
+         escaped = []\n\
+         try:\n    open(sys.argv[1]).read(); escaped.append('read')\n\
+         except OSError: pass\n\
+         try:\n    socket.create_connection(('127.0.0.1', int(sys.argv[2])), timeout=3); escaped.append('net')\n\
+         except OSError: pass\n\
+         v = 'refuted' if escaped else 'supported'\n\
+         reply('verdicts', {'verdicts': [{'claim_id': c, 'verdict': v, \
+         'reason_code': 'escaped_' + '_'.join(escaped) if escaped else 'sandboxed'} for c in claims]})",
+        &[&secret, &port],
+        60,
+    );
+    let mut opened = fx.open();
+    let hub = hub_of(&opened);
+    let g = gate_with_plugins(&fx, &opened, &[&plugin]);
+    let mut q = MergeQueue::new(hub.clone(), &mut opened.mediator, Box::new(g), true);
+    let o = submit_change(&mut q, &fx, good_change, &[clamp_claim()]);
+    assert!(o.is_merged(), "{o:?}");
+    drop(q);
+    let arts = hub
+        .list_artifacts(Caller::User, Some("evidence:verify-"))
+        .unwrap();
+    let decision = arts
+        .iter()
+        .find(|a| a.path.ends_with("decision.json"))
+        .unwrap();
+    let d: Value =
+        serde_json::from_slice(&hub.read_evidence(Caller::User, decision).unwrap()).unwrap();
+    assert_eq!(d["reviewer"], "rule+plugin:probe", "{d}");
 }

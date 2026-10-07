@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anchor.invalid/verifier/v1/response.schema.json",
+  "title": "Anchor verifier protocol v1: response",
+  "description": "The one line a verifier plugin writes to stdout. Anchor is strict: no field outside this schema is accepted, and anything that does not validate makes every claim unverifiable (verifier_failed).",
+  "type": "object",
+  "required": ["v", "id", "msg"],
+  "additionalProperties": false,
+  "properties": {
+    "v": { "const": 1 },
+    "id": { "type": "integer", "minimum": 0, "description": "The id of the request being answered." },
+    "msg": {
+      "oneOf": [
+        { "$ref": "#/$defs/info" },
+        { "$ref": "#/$defs/verdicts" },
+        { "$ref": "#/$defs/error" }
+      ]
+    }
+  },
+  "$defs": {
+    "info": {
+      "type": "object",
+      "description": "The answer to describe.",
+      "required": ["kind", "payload"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "info" },
+        "payload": {
+          "type": "object",
+          "required": ["name", "version", "protocol"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string", "pattern": "^[a-z0-9_.-]{1,64}$" },
+            "version": { "type": "string", "pattern": "^[!-~]{1,64}$", "description": "The plugin's own version." },
+            "protocol": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "integer", "minimum": 1 }, "description": "Protocol versions the plugin speaks; must include 1." }
+          }
+        }
+      }
+    },
+    "verdicts": {
+      "type": "object",
+      "description": "The answer to verify: one verdict per claim of the request.",
+      "required": ["kind", "payload"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "verdicts" },
+        "payload": {
+          "type": "object",
+          "required": ["verdicts"],
+          "additionalProperties": false,
+          "properties": {
+            "verdicts": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/claim_verdict" } }
+          }
+        }
+      }
+    },
+    "claim_verdict": {
+      "type": "object",
+      "required": ["claim_id", "verdict", "reason_code"],
+      "additionalProperties": false,
+      "properties": {
+        "claim_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$", "description": "A claim id of the request; each at most once." },
+        "verdict": { "enum": ["supported", "refuted", "unverifiable"] },
+        "reason_code": { "type": "string", "pattern": "^[a-z0-9_]{1,64}$", "description": "Machine-readable reason." },
+        "evidence_refs": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 4096 }, "description": "The evidence references the verdict rests on." },
+        "note": { "type": "string", "maxLength": 2048, "description": "Advisory explanation, shown to people and never parsed." }
+      }
+    },
+    "error": {
+      "type": "object",
+      "description": "The plugin cannot answer. Anchor treats every claim as unverifiable.",
+      "required": ["kind", "payload"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "error" },
+        "payload": {
+          "type": "object",
+          "required": ["code"],
+          "additionalProperties": false,
+          "properties": {
+            "code": { "type": "string", "pattern": "^[a-z0-9_]{1,64}$" },
+            "message": { "type": "string", "maxLength": 2048 }
+          }
+        }
+      }
+    }
+  }
+}

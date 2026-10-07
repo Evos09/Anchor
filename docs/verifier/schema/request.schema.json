@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anchor.invalid/verifier/v1/request.schema.json",
+  "title": "Anchor verifier protocol v1: request",
+  "description": "The one line Anchor writes to a verifier plugin's stdin. Within protocol version 1 Anchor may add optional fields anywhere in a request; a plugin must ignore fields it does not know. This schema lists every field Anchor sends today.",
+  "type": "object",
+  "required": ["v", "id", "msg"],
+  "properties": {
+    "v": { "const": 1, "description": "Protocol version." },
+    "id": { "type": "integer", "minimum": 0, "description": "Request id; the response must carry the same id." },
+    "msg": {
+      "oneOf": [
+        { "$ref": "#/$defs/describe" },
+        { "$ref": "#/$defs/verify" }
+      ]
+    }
+  },
+  "$defs": {
+    "describe": {
+      "type": "object",
+      "required": ["kind", "payload"],
+      "properties": {
+        "kind": { "const": "describe" },
+        "payload": { "type": "object", "properties": {} }
+      }
+    },
+    "verify": {
+      "type": "object",
+      "required": ["kind", "payload"],
+      "properties": {
+        "kind": { "const": "verify" },
+        "payload": { "$ref": "#/$defs/review_input" }
+      }
+    },
+    "review_input": {
+      "type": "object",
+      "description": "Everything a reviewer gets: the executor's claims, the diff and the tester's evidence. A verifier never sees the workspace itself.",
+      "required": ["claims", "changes", "commands", "tests", "coverage", "claim_refs", "truncated"],
+      "properties": {
+        "claims": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/claim" } },
+        "changes": { "type": "array", "items": { "$ref": "#/$defs/changed_file" } },
+        "commands": { "type": "array", "items": { "$ref": "#/$defs/command_record" } },
+        "tests": { "type": "array", "items": { "$ref": "#/$defs/test_record" } },
+        "coverage": {
+          "description": "Line coverage of changed source files; null when the project configures no coverage command.",
+          "oneOf": [
+            { "type": "null" },
+            { "type": "array", "items": { "$ref": "#/$defs/file_coverage" } }
+          ]
+        },
+        "claim_refs": {
+          "type": "object",
+          "description": "Evidence references resolved for each claim, by claim id: diff:<path>, coverage:<path>, test:<id>.",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } }
+        },
+        "truncated": { "type": "boolean", "description": "Some content was cut to fit. No claim may then be supported." }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "required": ["id", "text", "files", "tests"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$" },
+        "text": { "type": "string", "maxLength": 2048, "description": "What the executor says the change does. Untrusted model output." },
+        "files": { "type": "array", "maxItems": 64, "items": { "type": "string" }, "description": "Workspace-relative files whose changes implement the claim." },
+        "tests": { "type": "array", "maxItems": 64, "items": { "type": "string" }, "description": "Ids of tests that exercise the claim, as the test runner names them." }
+      }
+    },
+    "changed_file": {
+      "type": "object",
+      "required": ["path", "status", "is_test", "added_lines", "removed_lines", "added_text", "diff"],
+      "properties": {
+        "path": { "type": "string", "description": "Workspace-relative, '/'-separated." },
+        "status": { "enum": ["added", "modified", "removed", "opaque"], "description": "opaque: binary or oversized, not diffed line by line." },
+        "is_test": { "type": "boolean", "description": "Whether the path is a test file by the project's test patterns." },
+        "added_lines": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "description": "1-based new-side line numbers the change adds." },
+        "removed_lines": { "type": "integer", "minimum": 0 },
+        "added_text": { "type": "array", "items": { "type": "string" }, "description": "The text of each added line, aligned with added_lines." },
+        "diff": { "type": "string", "description": "Unified diff, possibly cut short (then truncated is set)." }
+      }
+    },
+    "command_record": {
+      "type": "object",
+      "required": ["name", "argv", "ok", "exit", "timed_out", "elapsed_ms", "user_cpu_ms", "max_rss_bytes", "output_tail", "artifact"],
+      "properties": {
+        "name": { "type": "string", "description": "build, test or coverage." },
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "ok": { "type": "boolean" },
+        "exit": { "oneOf": [{ "type": "null" }, { "type": "integer" }], "description": "null if the command was killed (signal or timeout)." },
+        "timed_out": { "type": "boolean" },
+        "elapsed_ms": { "type": "integer", "minimum": 0 },
+        "user_cpu_ms": { "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }] },
+        "max_rss_bytes": { "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }] },
+        "output_tail": { "type": "string", "description": "The end of stdout and stderr." },
+        "artifact": { "type": "string", "description": "Reference of the evidence artifact holding the full output." }
+      }
+    },
+    "test_record": {
+      "type": "object",
+      "required": ["id", "outcome"],
+      "properties": {
+        "id": { "type": "string" },
+        "outcome": { "enum": ["passed", "failed", "error", "skipped"] }
+      }
+    },
+    "file_coverage": {
+      "type": "object",
+      "required": ["path", "instrumented", "uncovered_lines"],
+      "properties": {
+        "path": { "type": "string" },
+        "instrumented": { "type": "boolean", "description": "False if the file never ran under the tests at all." },
+        "uncovered_lines": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "description": "Executable lines that never ran (1-based)." }
+      }
+    }
+  }
+}

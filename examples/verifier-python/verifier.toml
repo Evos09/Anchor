@@ -1,0 +1,6 @@
+# A verifier plugin for Anchor (docs/verifier/README.md).
+name = "py-hygiene"
+command = ["python3", "verifier.py"]
+windows_command = ["python", "verifier.py"]
+timeout_secs = 30
+memory_mb = 256

@@ -89,6 +89,17 @@ pub fn cmd_eval(a: &Args) -> Result<ExitCode, String> {
             ));
         }
     };
+    // `--verifier MANIFEST` (repeatable): measure a verifier plugin on the
+    // corpus, combined with the reviewer above (Phase 8).
+    let manifests: Vec<PathBuf> = a.all("--verifier").into_iter().map(PathBuf::from).collect();
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let reviewer = anchor_backend::verifier::with_plugins(
+        reviewer,
+        &manifests,
+        &corpus.dir,
+        &path_var,
+        default_exec_read_only(),
+    )?;
     let mut gate = VerifyGate::new(
         corpus.spec.clone(),
         anchor_backend::verify::scratch_base(&state, &corpus.dir),
@@ -123,4 +134,41 @@ pub fn cmd_eval(a: &Args) -> Result<ExitCode, String> {
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `anchor verifier check MANIFEST`: run the conformance checks against a
+/// verifier plugin, in the same sandbox the merge gate uses.
+pub fn cmd_verifier(a: &Args) -> Result<ExitCode, String> {
+    let (Some("check"), Some(manifest)) = (
+        a.pos.get(1).map(String::as_str),
+        a.pos.get(2).map(String::as_str),
+    ) else {
+        return Err("usage: anchor verifier check MANIFEST".into());
+    };
+    use anchor_backend::verifier::{Plugin, Runner, conformance};
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let plugin = Plugin::load(Path::new(manifest), &path_var)?;
+    let runner = Runner::new(path_var, default_exec_read_only());
+    println!(
+        "verifier {} ({})",
+        plugin.name,
+        anchor_exec::native_path(&plugin.program).display()
+    );
+    let checks = conformance(&plugin, &runner);
+    for c in &checks {
+        println!(
+            "  {} {:<36} {}",
+            if c.ok { "ok  " } else { "FAIL" },
+            c.name,
+            c.detail
+        );
+    }
+    let failed = checks.iter().filter(|c| !c.ok).count();
+    if failed == 0 {
+        println!("conforms to verifier protocol 1 ({} checks)", checks.len());
+        Ok(ExitCode::SUCCESS)
+    } else {
+        println!("{failed} of {} checks failed", checks.len());
+        Ok(ExitCode::FAILURE)
+    }
 }

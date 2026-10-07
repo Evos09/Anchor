@@ -441,6 +441,13 @@ fn verify_gate(
             read_only.push(d.clone());
         }
     }
+    let reviewer = crate::verifier::with_plugins(
+        reviewer,
+        &spec.verifiers,
+        &ws_root,
+        main.path_var(),
+        crate::default_exec_read_only(),
+    )?;
     VerifyGate::new(
         spec.clone(),
         scratch,

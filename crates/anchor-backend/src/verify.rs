@@ -80,6 +80,10 @@ pub struct VerifyFile {
     /// Wall-clock and CPU limit of each command, in seconds.
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+    /// Verifier plugin manifests (relative to `team.toml`): extra
+    /// reviewers that can only add rejections (Phase 8, ADR-0009).
+    #[serde(default)]
+    pub verifiers: Vec<PathBuf>,
 }
 
 fn default_protected() -> Vec<String> {
@@ -114,6 +118,8 @@ pub struct VerifySpec {
     pub reviewer_roles: Option<String>,
     pub reviewer_mock_script: Option<String>,
     pub timeout: Duration,
+    /// Verifier plugin manifests, as absolute paths.
+    pub verifiers: Vec<PathBuf>,
 }
 
 fn check_argv(name: &str, argv: &[String]) -> Result<(), String> {
@@ -143,6 +149,7 @@ impl VerifySpec {
             max_attempts: file.max_attempts,
             reviewer: file.reviewer,
             timeout: Duration::from_secs(file.timeout_secs),
+            verifiers: file.verifiers.iter().map(|p| dir.join(p)).collect(),
         };
         spec.validate()?;
         Ok(spec)
@@ -163,6 +170,12 @@ impl VerifySpec {
         }
         if !(1..=10).contains(&self.max_attempts) {
             return Err("[verify] max_attempts: 1 to 10".into());
+        }
+        if self.verifiers.len() > crate::verifier::MAX_VERIFIERS {
+            return Err(format!(
+                "[verify] verifiers: at most {}",
+                crate::verifier::MAX_VERIFIERS
+            ));
         }
         if !(1..=3600).contains(&self.timeout.as_secs()) {
             return Err("[verify] timeout_secs: 1 to 3600".into());

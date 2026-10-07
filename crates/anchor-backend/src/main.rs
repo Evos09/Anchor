@@ -71,6 +71,10 @@ USAGE:
       --only T1,T2           only these tasks
       --json FILE | --md FILE  write the report
       --max-fn-rate X        exit 1 if the false-negative rate exceeds X (0..1)
+      --verifier MANIFEST    also review with this verifier plugin (repeatable)
+
+  anchor verifier check MANIFEST   conformance check of a verifier plugin
+                             (docs/verifier/; MANIFEST is its verifier.toml)
 
 Per-workspace state (policy, audit log, checkpoints, snapshots) lives outside
 the workspace, under $ANCHOR_STATE_DIR or the per-user state directory.
@@ -512,6 +516,7 @@ fn main() -> ExitCode {
         Some("hub") => hubcli::cmd_hub(&a),
         Some("queue") => hubcli::cmd_queue(&a),
         Some("eval") => evalcli::cmd_eval(&a),
+        Some("verifier") => evalcli::cmd_verifier(&a),
         Some("ui") => hubcli::cmd_ui(&a),
         _ => {
             print!("{USAGE}");

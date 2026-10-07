@@ -19,6 +19,7 @@ pub mod queue;
 pub mod session;
 pub mod team;
 pub mod ui;
+pub mod verifier;
 pub mod verify;
 
 use interact::Interaction;
