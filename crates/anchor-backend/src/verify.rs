@@ -927,7 +927,13 @@ impl VerifyGate {
             commands.push(r.record);
 
             if let Some(c) = self.spec.coverage.clone() {
-                let dir = anchor_exec::native_path(&cover).display().to_string();
+                // Into a directory the command creates under `cover`, the
+                // root it was granted: `os.makedirs` (Python's trace) walks
+                // up while a parent seems missing, and from inside a
+                // Windows AppContainer every ungranted parent does, up to
+                // `C:\` (CI run 37622098014).
+                let out = cover.join("out");
+                let dir = anchor_exec::native_path(&out).display().to_string();
                 let argv: Vec<String> = c.iter().map(|a| a.replace(COVERDIR, &dir)).collect();
                 let mut r = self.run(
                     "coverage",
@@ -942,6 +948,9 @@ impl VerifyGate {
                     &r.log,
                     json!({"type": "coverage", "merge": ctx.seq}),
                 );
+                // The command made `out`: read through it only if it is a
+                // real directory, never a link or junction elsewhere.
+                let out_ok = std::fs::symlink_metadata(&out).is_ok_and(|m| m.is_dir());
                 let mut files = Vec::new();
                 for ch in changes.iter().filter(|c| {
                     !c.is_test && c.status != FileStatus::Removed && c.path.ends_with(".py")
@@ -949,7 +958,12 @@ impl VerifyGate {
                     let Some(name) = anchor_verify::parse::cover_name(&ch.path) else {
                         continue;
                     };
-                    let fc = match read_untrusted(&cover.join(&name), MAX_COVER_BYTES) {
+                    let read = if out_ok {
+                        read_untrusted(&out.join(&name), MAX_COVER_BYTES)
+                    } else {
+                        Err(std::io::Error::other("no coverage directory"))
+                    };
+                    let fc = match read {
                         Ok(text) => FileCoverage {
                             path: ch.path.clone(),
                             instrumented: true,
