@@ -80,7 +80,13 @@ impl FsConfinement {
             "/opt",
             "/nix/store",
             "/proc",
-            "/dev",
+            // Device nodes one by one: never `/dev` itself, which holds the
+            // user's terminals (`/dev/tty`, `/dev/pts/*`) and `/dev/shm`.
+            "/dev/null",
+            "/dev/zero",
+            "/dev/full",
+            "/dev/random",
+            "/dev/urandom",
             "/System",
             "/Library/Developer",
             "/private/etc",
@@ -112,6 +118,10 @@ pub enum ExitKind {
     Exited(i32),
     Signaled(i32),
     TimedOut,
+    /// Killed for exceeding `address_space_bytes` where the kernel cannot
+    /// enforce it directly (macOS: resident size of the process group,
+    /// polled; Windows: the job's memory limit).
+    MemoryExceeded,
 }
 
 /// How network access was denied to a child.
@@ -260,6 +270,7 @@ pub fn run(spec: &CommandSpec) -> Result<Output, ExecError> {
     let out_reader = spawn_reader(child.stdout.take(), cap);
     let err_reader = spawn_reader(child.stderr.take(), cap);
 
+    let mut polls = 0u32;
     let (exit, rusage) = loop {
         match sys::try_reap(&mut child).map_err(|e| ExecError::Io(e.to_string()))? {
             Some((status, usage)) => break (sys::exit_kind(status), usage),
@@ -267,13 +278,28 @@ pub fn run(spec: &CommandSpec) -> Result<Output, ExecError> {
                 let usage = sys::kill_and_reap(&mut child);
                 break (ExitKind::TimedOut, usage);
             }
-            None => std::thread::sleep(Duration::from_millis(5)),
+            // Every 20 ms where the memory limit is supervised, not set.
+            None if polls.is_multiple_of(4)
+                && sys::group_memory(&child)
+                    .is_some_and(|b| b > spec.limits.address_space_bytes) =>
+            {
+                let usage = sys::kill_and_reap(&mut child);
+                break (ExitKind::MemoryExceeded, usage);
+            }
+            None => {
+                polls = polls.wrapping_add(1);
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
     };
     // Background children may outlive the leader and hold the pipes open.
     sys::kill_tree(&mut child);
-    let (stdout, t1) = out_reader.join().unwrap_or_default();
-    let (stderr, t2) = err_reader.join().unwrap_or_default();
+    // Bounded: a process that escaped the kill (only possible where the
+    // platform cannot stop `setsid`, i.e. macOS) must not hang the caller
+    // by holding the pipes open.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let (stdout, t1) = out_reader.take(deadline);
+    let (stderr, t2) = err_reader.take(deadline);
     Ok(Output {
         exit,
         stdout,
@@ -285,31 +311,48 @@ pub fn run(spec: &CommandSpec) -> Result<Output, ExecError> {
     })
 }
 
-fn spawn_reader<R: Read + Send + 'static>(
-    r: Option<R>,
-    cap: usize,
-) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
+/// Output collected by a reader thread, readable before the thread ends.
+struct Reader {
+    buf: std::sync::Arc<std::sync::Mutex<(Vec<u8>, bool)>>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+impl Reader {
+    /// What was read, once the pipe closes or at `deadline`, whichever is
+    /// first (the thread is then left to finish on its own).
+    fn take(self, deadline: Instant) -> (Vec<u8>, bool) {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let closed = self.done.recv_timeout(wait).is_ok();
+        let mut g = self.buf.lock().unwrap_or_else(|p| p.into_inner());
+        let (out, truncated) = std::mem::take(&mut *g);
+        (out, truncated || !closed)
+    }
+}
+
+fn spawn_reader<R: Read + Send + 'static>(r: Option<R>, cap: usize) -> Reader {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), false)));
+    let (tx, done) = std::sync::mpsc::channel();
+    let b = buf.clone();
     std::thread::spawn(move || {
-        let Some(mut r) = r else {
-            return (Vec::new(), false);
-        };
-        let mut out = Vec::new();
-        let mut buf = [0u8; 8192];
-        let mut truncated = false;
-        loop {
-            match r.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let room = cap.saturating_sub(out.len());
-                    if n > room {
-                        truncated = true;
+        if let Some(mut r) = r {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match r.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut g = b.lock().unwrap_or_else(|p| p.into_inner());
+                        let room = cap.saturating_sub(g.0.len());
+                        if n > room {
+                            g.1 = true;
+                        }
+                        g.0.extend_from_slice(&chunk[..n.min(room)]);
                     }
-                    out.extend_from_slice(&buf[..n.min(room)]);
                 }
             }
         }
-        (out, truncated)
-    })
+        let _ = tx.send(());
+    });
+    Reader { buf, done }
 }
 
 #[cfg(unix)]
@@ -370,7 +413,7 @@ mod sys {
     /// fails so the error names exactly what could not be established.
     pub(super) const STEPS: &[&str] = &[
         "?",
-        "setpgid",
+        "setsid",
         "drop root to uid 65534",
         "restore dumpable flag",
         "set resource limits",
@@ -407,8 +450,15 @@ mod sys {
     fn pipe() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), ExecError> {
         use std::os::fd::FromRawFd;
         let mut fds = [0 as libc::c_int; 2];
+        // Atomically close-on-exec where available, so a concurrent spawn
+        // on another thread cannot inherit the status pipe.
+        #[cfg(target_os = "linux")]
         // SAFETY: `fds` is a valid out-array of two ints.
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        let r = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+        #[cfg(not(target_os = "linux"))]
+        // SAFETY: `fds` is a valid out-array of two ints.
+        let r = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        if r != 0 {
             return Err(ExecError::Io(std::io::Error::last_os_error().to_string()));
         }
         for (fd, extra) in [(fds[0], libc::O_NONBLOCK), (fds[1], 0)] {
@@ -570,7 +620,10 @@ mod sys {
                     libc::write(status_fd, [step].as_ptr().cast(), 1);
                     e
                 };
-                if libc::setpgid(0, 0) != 0 {
+                // A new session: the command leads its own process group
+                // (the kill handle) and has no controlling terminal, so it
+                // cannot inject keystrokes into the user's (TIOCSTI).
+                if libc::setsid() < 0 {
                     return Err(fail(1));
                 }
                 if is_root {
@@ -715,6 +768,20 @@ mod sys {
         v.max(0)
     }
 
+    /// What a process needs to start on macOS beyond the granted roots:
+    /// the dyld shared cache, cryptexes, timezone data and frameworks.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    const MACOS_READ: &[&str] = &[
+        "/Library/Frameworks",
+        "/Library/Apple",
+        "/Library/Preferences",
+        "/private/var/db/dyld",
+        "/private/var/db/timezone",
+        "/System/Volumes/Preboot/Cryptexes",
+        "/System/Cryptexes",
+        "/private/var/select",
+    ];
+
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn macos_profile(spec: &CommandSpec) -> String {
         // Seatbelt profile (ADR-0003). Paths are quoted with escaping.
@@ -740,16 +807,30 @@ mod sys {
                 prof.push_str(&format!(" (subpath {})", q(p)));
             }
             prof.push(')');
+            // Reads mirror Landlock: nothing but the granted roots and what
+            // macOS needs to start a process. Metadata stays readable, as
+            // path lookup needs it (Landlock likewise does not gate stat).
+            prof.push_str("(deny file-read*)(allow file-read-metadata)");
+            prof.push_str("(allow file-read* (literal \"/\")");
+            for p in fs
+                .read_write
+                .iter()
+                .chain(fs.read_only.iter())
+                .map(PathBuf::as_path)
+                .chain(MACOS_READ.iter().map(Path::new))
+            {
+                if p.exists() {
+                    prof.push_str(&format!(" (subpath {})", q(p)));
+                }
+            }
+            prof.push(')');
+            // Keychains stay unreadable even under a granted root.
+            prof.push_str("(deny file-read* (subpath \"/Library/Keychains\"))");
             if let Some(home) = std::env::var_os("HOME") {
                 prof.push_str(&format!(
                     "(deny file-read* (subpath {}))",
-                    q(Path::new(&home))
+                    q(&Path::new(&home).join("Library/Keychains"))
                 ));
-                prof.push_str("(allow file-read*");
-                for p in fs.read_write.iter().chain(fs.read_only.iter()) {
-                    prof.push_str(&format!(" (subpath {})", q(p)));
-                }
-                prof.push(')');
             }
         }
         prof
@@ -903,6 +984,10 @@ mod sys {
                 (libc::SYS_fanotify_init, "fanotify_init"),
                 (libc::SYS_kcmp, "kcmp"),
                 (libc::SYS_pidfd_getfd, "pidfd_getfd"),
+                // After the setup's own setsid: leaving the session or
+                // process group would escape the kill.
+                (libc::SYS_setsid, "setsid"),
+                (libc::SYS_setpgid, "setpgid"),
             ];
             #[cfg(target_arch = "x86_64")]
             v.extend([
@@ -995,8 +1080,9 @@ mod sys {
         /// * `clone` with a namespace flag fails with `EPERM`; `clone3`
         ///   (whose flags live in memory the filter cannot read) fails with
         ///   `ENOSYS`, so libc falls back to `clone`;
-        /// * with `network_deny`, `socket`/`socketpair` of any family other
-        ///   than `AF_UNIX` fail with `EACCES` (the fallback network method).
+        /// * `socket(AF_UNIX)` fails with `EACCES`; with `network_deny` (the
+        ///   fallback network method) `socket` fails for every family;
+        ///   `socketpair` is allowed.
         pub(crate) fn filter(network_deny: bool) -> Result<Vec<libc::sock_filter>, String> {
             let arch = if cfg!(target_arch = "x86_64") {
                 AUDIT_ARCH_X86_64
@@ -1018,23 +1104,22 @@ mod sys {
             a.op(BPF_JMP_JEQ_K, To::Next, To::Skip(2), libc::SYS_clone as u32);
             a.op(BPF_LD_W_ABS, To::Next, To::Next, OFF_ARG0);
             a.op(BPF_JMP_JSET_K, To::Eperm, To::Allow, CLONE_NS_FLAGS);
+            // socket(): never AF_UNIX: connecting to a pathname or abstract
+            // socket outside the sandbox (D-Bus, an ssh agent, a container
+            // engine, X11) would escape it, and Landlock does not gate
+            // connect. When seccomp is the network method, no family at
+            // all. socketpair() stays available for local IPC.
+            a.op(BPF_JMP_JEQ_K, To::Next, To::Allow, libc::SYS_socket as u32);
             if network_deny {
                 a.op(
-                    BPF_JMP_JEQ_K,
-                    To::Skip(1),
+                    BPF_RET_K,
                     To::Next,
-                    libc::SYS_socket as u32,
-                );
-                a.op(
-                    BPF_JMP_JEQ_K,
                     To::Next,
-                    To::Allow,
-                    libc::SYS_socketpair as u32,
+                    libc::SECCOMP_RET_ERRNO | libc::EACCES as u32,
                 );
-                a.op(BPF_LD_W_ABS, To::Next, To::Next, OFF_ARG0);
-                a.op(BPF_JMP_JEQ_K, To::Allow, To::Eacces, libc::AF_UNIX as u32);
             } else {
-                a.op(BPF_RET_K, To::Next, To::Next, libc::SECCOMP_RET_ALLOW);
+                a.op(BPF_LD_W_ABS, To::Next, To::Next, OFF_ARG0);
+                a.op(BPF_JMP_JEQ_K, To::Eacces, To::Allow, libc::AF_UNIX as u32);
             }
             a.finish()
         }
@@ -1121,6 +1206,51 @@ mod sys {
         }
     }
 
+    /// Resident memory of the child's process group, where the memory limit
+    /// is supervised rather than set (macOS rejects lowering `RLIMIT_AS`).
+    /// `None` where the kernel enforces the limit itself.
+    #[cfg(target_os = "macos")]
+    pub(super) fn group_memory(child: &Child) -> Option<u64> {
+        let pgid = child.id() as libc::pid_t;
+        let mut pids = [0 as libc::pid_t; 4096];
+        // SAFETY: the buffer is valid for its full size in bytes.
+        let n = unsafe {
+            libc::proc_listpgrppids(
+                pgid,
+                pids.as_mut_ptr().cast(),
+                std::mem::size_of_val(&pids) as libc::c_int,
+            )
+        };
+        if n <= 0 {
+            return None;
+        }
+        let mut total = 0u64;
+        for &pid in &pids[..(n as usize).min(pids.len())] {
+            // SAFETY: an all-zero proc_taskinfo is a valid value.
+            let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+            // SAFETY: `info` is a properly sized out-buffer.
+            let r = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTASKINFO,
+                    0,
+                    (&mut info as *mut libc::proc_taskinfo).cast(),
+                    size,
+                )
+            };
+            if r == size {
+                total = total.saturating_add(info.pti_resident_size);
+            }
+        }
+        Some(total)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn group_memory(_child: &Child) -> Option<u64> {
+        None
+    }
+
     /// Whether any process remains in the group (for tests).
     pub fn group_alive(pgid: u32) -> bool {
         // SAFETY: signal 0 only checks for existence.
@@ -1173,6 +1303,10 @@ mod sys {
 
     pub(super) fn kill_tree(child: &mut Child) {
         let _ = child.kill();
+    }
+
+    pub(super) fn group_memory(_child: &Child) -> Option<u64> {
+        None
     }
 
     pub fn group_alive(_pgid: u32) -> bool {

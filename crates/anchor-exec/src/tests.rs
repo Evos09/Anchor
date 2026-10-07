@@ -216,23 +216,33 @@ fn process_limit_refuses_excess_forks() {
     );
 }
 
-// macOS does not enforce RLIMIT_AS (ADR-0003); Linux only.
-#[cfg(target_os = "linux")]
+/// Linux enforces the limit with `RLIMIT_AS`; macOS rejects lowering that,
+/// so the process group's resident size is supervised and the group killed
+/// (ADR-0003).
 #[test]
 fn memory_limit_enforced() {
     if resolve_program("python3", &path_var()).is_err() {
         eprintln!("SKIPPED: python3 not available");
         return;
     }
+    // Written, not just reserved, so the pages are resident.
     let mut s = spec(
         "python3",
-        &["-c", "x = bytearray(1 << 30); print('allocated')"],
+        &[
+            "-c",
+            "import time\nx = b'\\x01' * (1 << 30)\nprint('allocated', flush=True)\ntime.sleep(5)\nprint('survived')",
+        ],
         Network::Deny,
     );
     s.limits.address_space_bytes = 256 << 20;
     let out = run(&s).unwrap();
     assert_ne!(out.exit, ExitKind::Exited(0));
-    assert!(!String::from_utf8_lossy(&out.stdout).contains("allocated"));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("survived"));
+    if cfg!(target_os = "macos") {
+        assert_eq!(out.exit, ExitKind::MemoryExceeded);
+    } else {
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("allocated"));
+    }
 }
 
 #[test]
@@ -290,8 +300,7 @@ fn nul_in_argument_refused() {
 
 /// Capability layer for Threat 5: a confined command can write only inside
 /// its read-write roots and cannot read outside its granted roots (e.g. a
-/// credential directory).
-#[cfg(target_os = "linux")]
+/// credential directory). Landlock on Linux, Seatbelt on macOS.
 #[test]
 fn filesystem_confinement_enforced() {
     use std::os::unix::fs::PermissionsExt;
@@ -434,7 +443,7 @@ fn seccomp_program_is_well_formed() {
 /// processes outside it. On older kernels the gap is recorded instead.
 #[cfg(target_os = "linux")]
 #[test]
-fn landlock_scopes_block_abstract_sockets_and_signals() {
+fn unix_sockets_and_signals_outside_the_sandbox_are_unreachable() {
     use std::os::linux::net::SocketAddrExt;
     if resolve_program("python3", &path_var()).is_err() {
         eprintln!("python3 not found: skipped");
@@ -445,6 +454,15 @@ fn landlock_scopes_block_abstract_sockets_and_signals() {
     let listener = std::os::unix::net::UnixListener::bind_addr(&addr).unwrap();
     let d = tempfile::tempdir().unwrap();
     let ws = std::fs::canonicalize(d.path()).unwrap();
+    // A pathname socket outside the grant (D-Bus, an ssh agent, docker).
+    let outside = tempfile::tempdir().unwrap();
+    let sock = outside.path().join("agent.sock");
+    let path_listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(outside.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&ws, std::fs::Permissions::from_mode(0o777)).unwrap();
@@ -452,17 +470,19 @@ fn landlock_scopes_block_abstract_sockets_and_signals() {
     let script = format!(
         r#"
 import os, socket, signal
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-try:
-    s.connect("\0{name}"); print("abstract connected")
-except OSError as e:
-    print("abstract refused", e.errno)
+for label, addr in (("abstract", "\0{name}"), ("pathname", "{sock}")):
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(addr); print(label, "connected")
+    except OSError as e:
+        print(label, "refused", e.errno)
 try:
     os.kill({parent}, 0); print("signal delivered")
 except OSError as e:
     print("signal refused", e.errno)
 "#,
         parent = std::process::id(),
+        sock = sock.display(),
     );
     let mut s = spec("python3", &["-c", &script], Network::Allow);
     s.cwd = ws.clone();
@@ -471,12 +491,115 @@ except OSError as e:
         read_only: FsConfinement::system_read_only(),
     });
     let out = run(&s).unwrap();
-    drop(listener);
+    drop((listener, path_listener));
     let text = String::from_utf8_lossy(&out.stdout);
+    // The seccomp filter refuses AF_UNIX sockets on every kernel.
+    assert!(text.contains("abstract refused"), "{text}");
+    assert!(text.contains("pathname refused"), "{text}");
     if out.isolation.landlock_scopes {
-        assert!(text.contains("abstract refused"), "{text}");
         assert!(text.contains("signal refused"), "{text}");
     } else {
         eprintln!("Landlock scopes unavailable on this kernel (ABI < 6): {text}");
     }
+}
+
+/// Threat 6 on macOS: Seatbelt `(deny network*)` blocks TCP and UDP egress
+/// while local `AF_UNIX` pairs keep working.
+#[cfg(target_os = "macos")]
+#[test]
+fn network_denied_process_has_no_network_macos() {
+    if resolve_program("python3", &path_var()).is_err() {
+        eprintln!("SKIPPED: python3 not available");
+        return;
+    }
+    let probe = r#"
+import socket
+def attempt(kind):
+    try:
+        s = socket.socket(socket.AF_INET, kind)
+        s.settimeout(3)
+        if kind == socket.SOCK_STREAM:
+            s.connect(("1.1.1.1", 80))
+        else:
+            s.sendto(b"x", ("1.1.1.1", 53))
+        print(kind, "EGRESS_OK")
+    except OSError as e:
+        print(kind, "blocked", e.errno)
+attempt(socket.SOCK_STREAM)
+attempt(socket.SOCK_DGRAM)
+a, b = socket.socketpair(socket.AF_UNIX)
+a.send(b"ok"); print("unix", b.recv(2).decode())
+"#;
+    let out = run(&spec("python3", &["-c", probe], Network::Deny)).unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.isolation.network, Some(NetworkMethod::Seatbelt));
+    assert!(!text.contains("EGRESS_OK"), "{text}");
+    assert_eq!(
+        text.matches("blocked").count(),
+        2,
+        "{text} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("unix ok"), "{text}");
+}
+
+/// A command cannot leave its session or process group (which would escape
+/// the kill and outlive the command, writing to the workspace afterwards),
+/// and it has no controlling terminal to inject keystrokes into (TIOCSTI).
+#[cfg(target_os = "linux")]
+#[test]
+fn commands_cannot_escape_the_kill_or_reach_the_terminal() {
+    if resolve_program("python3", &path_var()).is_err() {
+        eprintln!("python3 not found: skipped");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let ws = std::fs::canonicalize(d.path()).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ws, std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+    let script = r#"
+import os, subprocess, time
+for name, f in (("setsid", os.setsid), ("setpgid", lambda: os.setpgid(0, 0))):
+    try:
+        f(); print(name, "escaped")
+    except OSError as e:
+        print(name, "refused", e.errno)
+try:
+    os.open("/dev/tty", os.O_RDWR); print("tty opened")
+except OSError as e:
+    print("tty refused", e.errno)
+# A background child that tries to outlive the command.
+subprocess.Popen(["/bin/sh", "-c", "sleep 3; echo late > late.txt"],
+                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print("done", os.getpgrp() == os.getpid(), os.getsid(0) == os.getpid())
+"#;
+    for force_seccomp in [false, true] {
+        sys::linux_net::FORCE_SECCOMP.with(|f| f.set(force_seccomp));
+        let mut s = spec("python3", &["-c", script], Network::Deny);
+        s.cwd = ws.clone();
+        s.fs = Some(FsConfinement {
+            read_write: vec![ws.clone()],
+            read_only: FsConfinement::system_read_only(),
+        });
+        let out = run(&s).unwrap();
+        sys::linux_net::FORCE_SECCOMP.with(|f| f.set(false));
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains(&format!("setsid refused {}", libc::EPERM)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("setpgid refused {}", libc::EPERM)),
+            "{text}"
+        );
+        assert!(text.contains("tty refused"), "{text}");
+        assert!(text.contains("done True True"), "{text}");
+    }
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(
+        !ws.join("late.txt").exists(),
+        "a background process outlived the command"
+    );
 }
