@@ -133,7 +133,11 @@ a shared capability (which also removed W-5's read-only churn; see AR-15).
 W-5 is fixed: the verify gate deletes each command's AppContainer profile
 after it runs, and the Windows gate runs (`released_profiles_are_deleted`,
 the gate tests in `crates/anchor-backend/tests/verify.rs`; green on all
-three platforms in CI run 37623168183).
+three platforms in CI run 37623168183). The agent runtime on Windows
+now runs in its own AppContainer, which narrows AR-7 to loopback
+providers. Creating its shared profile is serialized and retried,
+because a team starts several runtimes at once. Everything is green on
+all three platforms in CI run 37675535141.
 
 | ID | Sev. | Finding | Status | Fix / test |
 |---|---|---|---|---|

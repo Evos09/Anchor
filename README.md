@@ -279,11 +279,14 @@ every §11 threat to its test and its per-platform status.
   - **macOS:** Seatbelt is now `(deny default)`, and a memory supervisor
     is added. The runtime confines itself with `sandbox_init`.
   - **Windows:** agent commands run in an AppContainer inside a Job
-    Object (ADR-0026). `anchor-fs` pins directory chains against
-    junction swaps.
+    Object (ADR-0026), and the verify gate runs there too. The agent
+    runtime runs in its own AppContainer with network access only
+    (unless a role uses a loopback provider, AR-7). `anchor-fs` pins
+    directory chains against junction swaps.
   - **Validation:** `crates/anchor-sandbox-validation` runs the same
     attacks on every platform. Every one is stopped on Linux (both
-    tiers), macOS and Windows (CI run 37616036608).
+    tiers), macOS and Windows (first in CI run 37616036608; latest
+    all-green run 37675535141).
   - **External audit: pending (third party).** The package for the
     auditor is [`docs/audit/README.md`](docs/audit/README.md).
 
@@ -336,8 +339,7 @@ every §11 threat to its test and its per-platform status.
 
 **Not started:**
 
-- The external audit (needs a third party), and runtime confinement on
-  Windows.
+- The external audit (needs a third party).
 
 The architecture decisions, including those still pending evaluation, are
 in [`docs/adr/`](docs/adr/0000-adr-process.md). Dependency vetting is in

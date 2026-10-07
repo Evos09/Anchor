@@ -57,7 +57,8 @@ internal adversarial review plus a package prepared for the auditor
 
 - **Internal review.** Done. No Critical or High finding is open.
 - **Cross-platform validation.** Passes on Linux, macOS and Windows
-  (CI run 37616036608).
+  (CI run 37616036608; latest all-green run 37675535141, with the
+  Windows runtime in an AppContainer).
 - **External audit.** Pending. When it happens, its findings get IDs
   `E-n`. They are triaged with the same rubric and enter the same two
   documents. Phase 7 is fully closed only after that.

@@ -17,7 +17,7 @@ the record of the internal review that preceded it.
 |---|---|
 | Internal review, round 1 (five areas) | Done. No Critical or High finding open |
 | Internal review, round 2 (Phase 7 sandbox code) | See [internal-review.md](internal-review.md#round-2) |
-| Cross-platform sandbox validation | Passes on Linux (both network tiers), macOS and Windows: CI run 37616036608. Each job's report is in its summary |
+| Cross-platform sandbox validation | Passes on Linux (both network tiers), macOS and Windows: CI run 37616036608; latest all-green run 37675535141, with the Windows runtime in an AppContainer. Each job's report is in its summary |
 | **External audit** | **Pending: needs a third party.** This package is prepared for them |
 
 ## Scope (§11.2)

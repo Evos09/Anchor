@@ -1,7 +1,7 @@
 # ADR-0003: Sandbox mechanism per platform (§17 Q3, §11.1)
 
-- Status: Accepted for Linux, macOS and Windows (Phase 7; macOS and
-  Windows pending their first green CI run with the validation suite)
+- Status: Accepted for Linux, macOS and Windows (Phase 7; validated on
+  all three in CI run 37616036608, latest all-green run 37675535141)
 - Date: 2026-10-06, revised 2026-10-07 (Phase 7)
 
 ## Context
