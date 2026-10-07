@@ -491,7 +491,10 @@ impl VerifyGate {
             // site directory is consulted.
             env: vec![
                 ("PATH".into(), self.path_var.clone()),
-                ("HOME".into(), home.display().to_string()),
+                (
+                    "HOME".into(),
+                    anchor_exec::native_path(&home).display().to_string(),
+                ),
                 ("LANG".into(), "C.UTF-8".into()),
                 ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
                 ("PYTHONHASHSEED".into(), "0".into()),
@@ -924,7 +927,7 @@ impl VerifyGate {
             commands.push(r.record);
 
             if let Some(c) = self.spec.coverage.clone() {
-                let dir = cover.display().to_string();
+                let dir = anchor_exec::native_path(&cover).display().to_string();
                 let argv: Vec<String> = c.iter().map(|a| a.replace(COVERDIR, &dir)).collect();
                 let mut r = self.run(
                     "coverage",

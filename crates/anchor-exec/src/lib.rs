@@ -252,6 +252,21 @@ fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
+/// `p` as commands expect to see it in an argument or variable: on
+/// Windows without the `\\?\` prefix `canonicalize` adds (Python's
+/// `os.makedirs`, for one, cannot walk a verbatim path's parents). The
+/// program and working directory get this treatment already.
+pub fn native_path(p: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        windows::plain(p)
+    }
+    #[cfg(not(windows))]
+    {
+        p.to_path_buf()
+    }
+}
+
 /// Forget the per-workspace sandbox state of a confinement whose
 /// read/write roots were throwaway (the verify gate's scratch runs): on
 /// Windows, delete its AppContainer profile (registry entry and its own

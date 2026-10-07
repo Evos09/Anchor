@@ -591,8 +591,11 @@ fn rogue_agent_cannot_bypass_the_hub() {
 
 #[test]
 fn hostile_http_is_refused() {
+    // Long enough that a loaded runner reads a request sent in one write
+    // in time (CI run 37620917349 got 408 at 500 ms); the slowloris case
+    // below still sees its 408 well within its 5 s.
     let f = fx_with(ServerConfig {
-        request_deadline: Duration::from_millis(500),
+        request_deadline: Duration::from_secs(2),
         ..Default::default()
     });
     let port = f.server.port();
