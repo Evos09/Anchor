@@ -937,3 +937,100 @@ fn write_requires_the_matching_operation() {
         b"history\nmore\n"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Windows: junctions, reparse points and pinned directories (P7.5, P-3)
+// ---------------------------------------------------------------------------
+
+/// Create a directory junction (no privilege needed, unlike symlinks).
+#[cfg(windows)]
+fn junction(link: &std::path::Path, target: &std::path::Path) {
+    let st = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(st.status.success(), "{st:?}");
+}
+
+/// A junction to a directory outside the workspace is never followed out:
+/// not to read, list or write.
+#[cfg(windows)]
+#[test]
+fn junction_escapes_are_refused() {
+    let f = fixture();
+    junction(&f.ws.join("j"), &f.outside);
+    let w = Workspace::open(&f.ws).unwrap();
+    match w.resolve("j/secret") {
+        Err(FsError::EscapesWorkspace) => {}
+        Ok(r) => panic!("resolved through a junction: {:?}", r.canonical),
+        Err(e) => panic!("unexpected error: {e:?}"),
+    }
+    assert!(matches!(
+        w.resolve("j/new.txt"),
+        Err(FsError::EscapesWorkspace)
+    ));
+    if let Ok(r) = w.resolve("j") {
+        assert!(w.list_dir(&r).is_err(), "listed through a junction");
+    }
+    assert!(write_new(&f, &w, "j/planted.txt", b"x").is_err());
+    assert!(!f.outside.join("planted.txt").exists());
+    assert_eq!(fs::read(f.outside.join("secret")).unwrap(), b"TOP SECRET");
+}
+
+/// A directory resolved inside the workspace, then swapped for a junction
+/// before the operation, is caught: the write lands nowhere outside.
+#[cfg(windows)]
+#[test]
+fn junction_swapped_after_resolution_is_caught() {
+    let f = fixture();
+    fs::create_dir(f.ws.join("d")).unwrap();
+    let w = Workspace::open(&f.ws).unwrap();
+    let r = w.resolve("d/new.txt").unwrap();
+    let a = approve(&f, &w, &r, Operation::Create);
+    fs::remove_dir(f.ws.join("d")).unwrap();
+    junction(&f.ws.join("d"), &f.outside);
+    assert!(w.write(&r, b"x", Expect::Absent, a).is_err());
+    assert!(!f.outside.join("new.txt").exists());
+}
+
+/// Listing goes through the directory handle and sees every entry.
+#[cfg(windows)]
+#[test]
+fn handle_based_listing_sees_entries() {
+    let f = fixture();
+    fs::create_dir(f.ws.join("sub")).unwrap();
+    fs::write(f.ws.join("a.txt"), b"a").unwrap();
+    junction(&f.ws.join("j"), &f.outside);
+    let w = Workspace::open(&f.ws).unwrap();
+    let r = w.resolve(".").unwrap();
+    let mut names: Vec<(String, Kind)> = w
+        .list_dir(&r)
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.name, e.kind))
+        .collect();
+    names.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        names,
+        [
+            ("a.txt".to_string(), Kind::File),
+            ("j".to_string(), Kind::Other),
+            ("sub".to_string(), Kind::Dir),
+        ]
+    );
+}
+
+/// The workspace root is pinned while open: it cannot be renamed away
+/// (and a junction put in its place) under the workspace.
+#[cfg(windows)]
+#[test]
+fn open_workspace_root_cannot_be_renamed() {
+    let f = fixture();
+    let w = Workspace::open(&f.ws).unwrap();
+    let moved = f.ws.with_file_name("ws-moved");
+    assert!(fs::rename(&f.ws, &moved).is_err());
+    drop(w);
+    fs::rename(&f.ws, &moved).unwrap();
+}

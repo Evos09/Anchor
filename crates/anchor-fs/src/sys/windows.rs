@@ -12,6 +12,15 @@
 //!   catches a junction swapped into an intermediate component).
 //! * Replacement uses `ReplaceFileW` with a backup name, then verifies the
 //!   displaced file is the approved one, reversing the replacement if not.
+//! * Every mutation first *pins* the directory chain from the root to the
+//!   parent: each directory is opened without `FILE_SHARE_DELETE`, so none
+//!   can be renamed, deleted or replaced by a junction until the operation
+//!   ends; the path-based calls below then resolve through exactly the
+//!   verified directories (review finding P-3). The root stays pinned for
+//!   the workspace's lifetime.
+//! * Removal goes through the verified handle (`FileDispositionInfo`), and
+//!   directories are enumerated through their verified handle
+//!   (`FileIdBothDirectoryInfo`), never by path.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
@@ -21,16 +30,19 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
-    GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES,
+    ERROR_PATH_NOT_FOUND, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DeleteFileW,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, GetFinalPathNameByHandleW,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, REPLACEFILE_WRITE_THROUGH,
-    RemoveDirectoryW, ReplaceFileW, VOLUME_NAME_DOS,
+    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE, DeleteFileW,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO,
+    FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, FileIdBothDirectoryInfo,
+    FileIdBothDirectoryRestartInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetFinalPathNameByHandleW, MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
+    REPLACEFILE_WRITE_THROUGH, ReplaceFileW, SYNCHRONIZE, SetFileInformationByHandle,
+    VOLUME_NAME_DOS,
 };
 
 use crate::scan::{ScanDir, ScanEntry, ScanNode, ScanOptions, child, same_scanned_version};
@@ -65,6 +77,22 @@ fn open_handle(
     extra_flags: u32,
     disposition: u32,
 ) -> Result<OwnedHandle, FsError> {
+    open_shared(
+        path,
+        access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        extra_flags,
+        disposition,
+    )
+}
+
+fn open_shared(
+    path: &Path,
+    access: u32,
+    share: u32,
+    extra_flags: u32,
+    disposition: u32,
+) -> Result<OwnedHandle, FsError> {
     let w = wide(path);
     // SAFETY: `w` is a NUL-terminated UTF-16 string that outlives the call;
     // all other arguments are plain values or null.
@@ -72,7 +100,7 @@ fn open_handle(
         CreateFileW(
             w.as_ptr(),
             access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            share,
             std::ptr::null(),
             disposition,
             FILE_FLAG_BACKUP_SEMANTICS | extra_flags,
@@ -191,7 +219,15 @@ fn paths_equivalent(a: &Path, b: &Path) -> bool {
 }
 
 pub(crate) fn open_root(path: &Path) -> Result<(Root, PathBuf), FsError> {
-    let h = open_handle(path, FILE_READ_ATTRIBUTES, 0, OPEN_EXISTING)?;
+    // Pinned for the workspace's lifetime: the root cannot be renamed or
+    // replaced by a junction while it is open.
+    let h = open_shared(
+        path,
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        0,
+        OPEN_EXISTING,
+    )?;
     let (meta, _) = info(&h)?;
     if meta.kind != Kind::Dir {
         return Err(FsError::NotADirectory);
@@ -228,6 +264,135 @@ fn open_strict(root_path: &Path, rel: &Path, access: u32) -> Result<(OwnedHandle
         return Err(FsError::Changed);
     }
     Ok((h, meta))
+}
+
+/// Open the directory at `full` without `FILE_SHARE_DELETE` (it cannot be
+/// renamed or removed while the handle lives), refusing a reparse point
+/// and verifying the handle is exactly `full`.
+fn pin_dir(full: &Path, access: u32) -> Result<(OwnedHandle, Meta), FsError> {
+    let h = open_shared(
+        full,
+        access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        OPEN_EXISTING,
+    )?;
+    let (meta, attrs) = info(&h)?;
+    if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(FsError::SymlinkInStrictPath);
+    }
+    if meta.kind != Kind::Dir {
+        return Err(FsError::NotADirectory);
+    }
+    if !paths_equivalent(&final_path(&h)?, full) {
+        return Err(FsError::Changed);
+    }
+    Ok((h, meta))
+}
+
+/// Pin every directory from the root to `rel` (inclusive). The returned
+/// handles keep the chain fixed until they are dropped.
+fn pin_chain(root_path: &Path, rel: &Path) -> Result<Vec<OwnedHandle>, FsError> {
+    let mut cur = root_path.to_path_buf();
+    let mut pins = vec![pin_dir(&cur, FILE_READ_ATTRIBUTES)?.0];
+    for c in rel.components() {
+        cur.push(c);
+        pins.push(pin_dir(&cur, FILE_READ_ATTRIBUTES)?.0);
+    }
+    Ok(pins)
+}
+
+/// One directory entry read through a directory handle.
+struct RawEntry {
+    name: OsString,
+    attrs: u32,
+    len: u64,
+    last_write: u64,
+}
+
+/// Enumerate the directory behind `h` (opened with `FILE_LIST_DIRECTORY`)
+/// by handle, never by path.
+fn enumerate(h: &OwnedHandle) -> Result<Vec<RawEntry>, FsError> {
+    let mut buf = vec![0u64; 8 * 1024];
+    let mut class = FileIdBothDirectoryRestartInfo;
+    let mut out = Vec::new();
+    loop {
+        // SAFETY: `buf` is a writable, 8-aligned buffer of the stated size.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                h.as_raw_handle() as _,
+                class,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 8) as u32,
+            )
+        };
+        class = FileIdBothDirectoryInfo;
+        if ok == 0 {
+            let e = last_err();
+            if e.raw_os_error().map(|c| c as u32) == Some(ERROR_NO_MORE_FILES) {
+                break;
+            }
+            return Err(FsError::Io(e.to_string()));
+        }
+        let base = buf.as_ptr().cast::<u8>();
+        let mut off = 0usize;
+        loop {
+            // SAFETY: the system filled the buffer with a chain of 8-aligned
+            // records; `off` follows `NextEntryOffset` within it.
+            let (next, entry) = unsafe {
+                let p = base.add(off).cast::<FILE_ID_BOTH_DIR_INFO>();
+                let n = (*p).FileNameLength as usize / 2;
+                let name_ptr = std::ptr::addr_of!((*p).FileName).cast::<u16>();
+                let name = OsString::from_wide(std::slice::from_raw_parts(name_ptr, n));
+                (
+                    (*p).NextEntryOffset as usize,
+                    RawEntry {
+                        name,
+                        attrs: (*p).FileAttributes,
+                        len: (*p).EndOfFile.max(0) as u64,
+                        last_write: (*p).LastWriteTime as u64,
+                    },
+                )
+            };
+            if entry.name != "." && entry.name != ".." {
+                out.push(entry);
+            }
+            if next == 0 {
+                break;
+            }
+            off += next;
+        }
+    }
+    Ok(out)
+}
+
+fn kind_of_attrs(attrs: u32) -> Kind {
+    if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        Kind::Symlink
+    } else if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        Kind::Dir
+    } else {
+        Kind::File
+    }
+}
+
+/// Delete the object behind `h` (opened with `DELETE`) on close.
+fn delete_by_handle(h: OwnedHandle) -> Result<(), FsError> {
+    let d = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: valid handle and a correctly sized struct.
+    if unsafe {
+        SetFileInformationByHandle(
+            h.as_raw_handle() as _,
+            FileDispositionInfo,
+            (&d as *const FILE_DISPOSITION_INFO).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(FsError::Io(last_err().to_string()));
+    }
+    drop(h);
+    Ok(())
 }
 
 pub(crate) fn is_symlink(
@@ -275,34 +440,22 @@ pub(crate) fn list_strict(
     root_path: &Path,
     rel: &Path,
 ) -> Result<(FileId, Vec<DirEntryInfo>), FsError> {
-    let (_h, meta) = open_strict(root_path, rel, FILE_READ_ATTRIBUTES)?;
-    if meta.kind != Kind::Dir {
-        return Err(FsError::NotADirectory);
-    }
-    // Holding `_h` open (without FILE_SHARE_DELETE semantics for renames of
-    // the directory itself being blocked is not guaranteed); re-verify after.
-    let mut out = Vec::new();
-    for ent in std::fs::read_dir(root_path.join(rel))? {
-        let ent = ent?;
-        let ft = ent.file_type()?;
-        let kind = if ft.is_symlink() {
-            Kind::Other
-        } else if ft.is_dir() {
-            Kind::Dir
-        } else if ft.is_file() {
-            Kind::File
-        } else {
-            Kind::Other
-        };
-        out.push(DirEntryInfo {
-            name: ent.file_name().to_string_lossy().into_owned(),
-            kind,
-        });
-    }
-    let (_h2, meta2) = open_strict(root_path, rel, FILE_READ_ATTRIBUTES)?;
-    if meta2.id != meta.id {
-        return Err(FsError::Changed);
-    }
+    // Enumerated through the verified, pinned handle (ADR-0013).
+    let _pins = pin_chain(root_path, rel.parent().unwrap_or(Path::new("")))?;
+    let (h, meta) = pin_dir(
+        &root_path.join(rel),
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+    )?;
+    let out = enumerate(&h)?
+        .into_iter()
+        .map(|e| DirEntryInfo {
+            name: e.name.to_string_lossy().into_owned(),
+            kind: match kind_of_attrs(e.attrs) {
+                Kind::Symlink => Kind::Other,
+                k => k,
+            },
+        })
+        .collect();
     Ok((meta.id, out))
 }
 
@@ -324,10 +477,7 @@ pub(crate) fn write_atomic(
     expect: &Expect,
     _mode: Option<u32>,
 ) -> Result<(), FsError> {
-    let (_dir, dmeta) = open_strict(root_path, base_rel, FILE_READ_ATTRIBUTES)?;
-    if dmeta.kind != Kind::Dir {
-        return Err(FsError::NotADirectory);
-    }
+    let mut pins = pin_chain(root_path, base_rel)?;
     let mut parent_rel = base_rel.to_path_buf();
     for m in missing_dirs {
         parent_rel.push(m);
@@ -340,7 +490,7 @@ pub(crate) fn write_atomic(
                 _ => FsError::Io(e.to_string()),
             });
         }
-        open_strict(root_path, &parent_rel, FILE_READ_ATTRIBUTES)?;
+        pins.push(pin_dir(&root_path.join(&parent_rel), FILE_READ_ATTRIBUTES)?.0);
     }
     let target_rel = parent_rel.join(name);
     let target = root_path.join(&target_rel);
@@ -395,8 +545,7 @@ pub(crate) fn write_atomic(
             return Err(e.into());
         }
     }
-    // Re-verify the parent directory has not been swapped for a junction.
-    open_strict(root_path, &parent_rel, FILE_READ_ATTRIBUTES)?;
+    // The parent chain is pinned: it cannot have been swapped.
 
     let wt = wide(&tmp);
     let wtarget = wide(&target);
@@ -462,6 +611,7 @@ pub(crate) fn write_atomic(
             unsafe { DeleteFileW(wb.as_ptr()) };
         }
     }
+    drop(pins);
     Ok(())
 }
 
@@ -472,32 +622,27 @@ pub(crate) fn remove_strict(
     name: &OsStr,
     expected: &Meta,
 ) -> Result<(), FsError> {
+    let _pins = pin_chain(root_path, parent_rel)?;
     let rel = parent_rel.join(name);
-    let (h, meta) = if expected.kind == Kind::Symlink {
-        let h = open_handle(
-            &root_path.join(&rel),
-            FILE_READ_ATTRIBUTES,
-            FILE_FLAG_OPEN_REPARSE_POINT,
-            OPEN_EXISTING,
-        )?;
-        let (m, _) = info(&h)?;
-        (h, m)
-    } else {
-        open_strict(root_path, &rel, FILE_READ_ATTRIBUTES)?
-    };
-    if !matches!(meta.kind, Kind::File | Kind::Symlink) {
+    // The object is verified and deleted through one handle.
+    let h = open_handle(
+        &root_path.join(&rel),
+        DELETE | FILE_READ_ATTRIBUTES,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        OPEN_EXISTING,
+    )?;
+    let (meta, _) = info(&h)?;
+    if !matches!(meta.kind, Kind::File | Kind::Symlink | Kind::Other) {
         return Err(FsError::NotAFile);
+    }
+    if meta.kind != Kind::Symlink && !paths_equivalent(&final_path(&h)?, &root_path.join(&rel))
+    {
+        return Err(FsError::Changed);
     }
     if meta.kind != expected.kind || !meta.same_version(expected) {
         return Err(FsError::Changed);
     }
-    drop(h);
-    let w = wide(&root_path.join(&rel));
-    // SAFETY: NUL-terminated wide string.
-    if unsafe { DeleteFileW(w.as_ptr()) } == 0 {
-        return Err(FsError::Io(last_err().to_string()));
-    }
-    Ok(())
+    delete_by_handle(h)
 }
 
 // ---------------------------------------------------------------------------
@@ -551,29 +696,33 @@ fn scan_dir(
     if depth >= MAX_SCAN_DEPTH {
         return Err(FsError::TooDeep);
     }
-    // Hold a strict handle on the directory and re-verify it afterwards, as
-    // `list_strict` does: a junction swapped in is detected, not followed.
-    let (_h, dmeta) = open_strict(root_path, rel, FILE_READ_ATTRIBUTES)?;
-    if dmeta.kind != Kind::Dir {
-        return Err(FsError::Changed);
-    }
-    let mut items: Vec<(OsString, std::fs::Metadata)> = Vec::new();
-    for ent in std::fs::read_dir(root_path.join(rel))? {
-        let ent = ent?;
-        match std::fs::symlink_metadata(ent.path()) {
-            Ok(m) => items.push((ent.file_name(), m)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    items.sort_by(|a, b| a.0.as_encoded_bytes().cmp(b.0.as_encoded_bytes()));
+    // Pinned while scanned, and enumerated through its verified handle: a
+    // junction swapped in is neither followed nor possible.
+    let (h, _) = pin_dir(
+        &root_path.join(rel),
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+    )?;
+    let mut items = enumerate(&h)?;
+    items.sort_by(|a, b| a.name.as_encoded_bytes().cmp(b.name.as_encoded_bytes()));
     let mut entries = Vec::with_capacity(items.len());
-    for (name, m) in items {
+    for e in items {
         *count += 1;
         if *count > opts.max_entries {
             return Err(FsError::TooManyEntries(opts.max_entries));
         }
-        let m = meta_of_std(&m);
+        let name = e.name;
+        let t = filetime_ns(e.last_write);
+        let m = Meta {
+            // As with the std scan before: the file index is read by
+            // `open_scanned`; the scan compares size and times.
+            id: FileId { dev: 0, ino: 0 },
+            kind: kind_of_attrs(e.attrs),
+            nlink: 1,
+            len: e.len,
+            ctime_ns: t,
+            mtime_ns: t,
+            mode: 0,
+        };
         let child_rel = child(rel, &name);
         if (opts.skip)(&child_rel, m.kind) {
             continue;
@@ -594,10 +743,7 @@ fn scan_dir(
         };
         entries.push(ScanEntry { name, node });
     }
-    let (_h2, after) = open_strict(root_path, rel, FILE_READ_ATTRIBUTES)?;
-    if after.id != dmeta.id {
-        return Err(FsError::Changed);
-    }
+    drop(h);
     Ok(ScanDir { meta, entries })
 }
 
@@ -621,10 +767,7 @@ pub(crate) fn read_link_strict(
     name: &OsStr,
     expected: &Meta,
 ) -> Result<OsString, FsError> {
-    let (_d, dmeta) = open_strict(root_path, parent_rel, FILE_READ_ATTRIBUTES)?;
-    if dmeta.kind != Kind::Dir {
-        return Err(FsError::NotADirectory);
-    }
+    let _pins = pin_chain(root_path, parent_rel)?;
     let full = root_path.join(parent_rel).join(name);
     let before = meta_of_std(&std::fs::symlink_metadata(&full)?);
     if before.kind != Kind::Symlink || !same_scanned_version(expected, &before) {
@@ -640,10 +783,7 @@ pub(crate) fn lstat_strict(
     parent_rel: &Path,
     name: &OsStr,
 ) -> Result<Option<Meta>, FsError> {
-    let (_d, dmeta) = open_strict(root_path, parent_rel, FILE_READ_ATTRIBUTES)?;
-    if dmeta.kind != Kind::Dir {
-        return Err(FsError::NotADirectory);
-    }
+    let _pins = pin_chain(root_path, parent_rel)?;
     match open_handle(
         &root_path.join(parent_rel).join(name),
         FILE_READ_ATTRIBUTES,
@@ -663,10 +803,7 @@ pub(crate) fn mkdir_strict(
     name: &OsStr,
     _mode: u32,
 ) -> Result<(), FsError> {
-    let (_d, dmeta) = open_strict(root_path, parent_rel, FILE_READ_ATTRIBUTES)?;
-    if dmeta.kind != Kind::Dir {
-        return Err(FsError::NotADirectory);
-    }
+    let _pins = pin_chain(root_path, parent_rel)?;
     let w = wide(&root_path.join(parent_rel).join(name));
     // SAFETY: NUL-terminated wide string; null security attributes.
     if unsafe { CreateDirectoryW(w.as_ptr(), std::ptr::null()) } == 0 {
@@ -686,21 +823,17 @@ pub(crate) fn rmdir_strict(
     name: &OsStr,
     expected: &Meta,
 ) -> Result<(), FsError> {
+    let _pins = pin_chain(root_path, parent_rel)?;
     let rel = parent_rel.join(name);
-    let (h, meta) = open_strict(root_path, &rel, FILE_READ_ATTRIBUTES)?;
+    let (h, meta) = open_strict(root_path, &rel, DELETE | FILE_READ_ATTRIBUTES)?;
     if meta.kind != Kind::Dir {
         return Err(FsError::NotADirectory);
     }
     if meta.id != expected.id {
         return Err(FsError::Changed);
     }
-    drop(h);
-    let w = wide(&root_path.join(&rel));
-    // SAFETY: NUL-terminated wide string.
-    if unsafe { RemoveDirectoryW(w.as_ptr()) } == 0 {
-        return Err(FsError::Io(last_err().to_string()));
-    }
-    Ok(())
+    // Deleted through the verified handle (fails if not empty).
+    delete_by_handle(h)
 }
 
 pub(crate) fn symlink_strict(
