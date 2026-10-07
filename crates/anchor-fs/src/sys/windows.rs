@@ -635,8 +635,7 @@ pub(crate) fn remove_strict(
     if !matches!(meta.kind, Kind::File | Kind::Symlink | Kind::Other) {
         return Err(FsError::NotAFile);
     }
-    if meta.kind != Kind::Symlink && !paths_equivalent(&final_path(&h)?, &root_path.join(&rel))
-    {
+    if meta.kind != Kind::Symlink && !paths_equivalent(&final_path(&h)?, &root_path.join(&rel)) {
         return Err(FsError::Changed);
     }
     if meta.kind != expected.kind || !meta.same_version(expected) {
