@@ -132,6 +132,12 @@ pub struct Isolation {
     pub network: Option<NetworkMethod>,
     pub fs_confined: bool,
     pub dropped_root: bool,
+    /// Linux: the general seccomp denylist (ptrace, mount, bpf, keyctl,
+    /// namespaces, io_uring, ...) was installed.
+    pub syscall_filter: bool,
+    /// Linux: Landlock ABI v6 scopes (abstract unix sockets, signals) were
+    /// applied; `false` on kernels before 6.12.
+    pub landlock_scopes: bool,
 }
 
 impl Isolation {
@@ -374,7 +380,7 @@ mod sys {
         "write /proc/self/gid_map",
         "set no_new_privs",
         "landlock_restrict_self",
-        "install seccomp network filter",
+        "install seccomp filter",
         "set RLIMIT_NPROC",
         "set RLIMIT_AS",
         "set RLIMIT_CPU",
@@ -482,12 +488,15 @@ mod sys {
         } else {
             (false, false)
         };
+        // Every Linux command gets the general syscall denylist; the
+        // socket-family rule is added when it is the network method.
         #[cfg(target_os = "linux")]
-        let seccomp_prog: Vec<libc::sock_filter> = if use_seccomp {
-            linux_net::socket_filter().map_err(ExecError::SandboxUnavailable)?
-        } else {
-            Vec::new()
-        };
+        let seccomp_prog: Vec<libc::sock_filter> =
+            linux_net::filter(use_seccomp).map_err(ExecError::SandboxUnavailable)?;
+        #[cfg(target_os = "linux")]
+        {
+            isolation.syscall_filter = true;
+        }
         #[cfg(not(target_os = "linux"))]
         let (use_netns, use_seccomp) = (false, false);
 
@@ -534,7 +543,9 @@ mod sys {
             None => None,
             Some(fs) => {
                 isolation.fs_confined = true;
-                Some(landlock_ruleset(fs)?)
+                let (fd, scoped) = landlock_ruleset(fs)?;
+                isolation.landlock_scopes = scoped;
+                Some(fd)
             }
         };
         #[cfg(target_os = "linux")]
@@ -598,9 +609,7 @@ mod sys {
                     }
                 }
                 #[cfg(target_os = "linux")]
-                if (landlock_raw >= 0 || use_seccomp)
-                    && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
-                {
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return Err(fail(9));
                 }
                 #[cfg(target_os = "linux")]
@@ -611,8 +620,10 @@ mod sys {
                         return Err(fail(10));
                     }
                 }
+                // Last: the filter also refuses the namespace syscalls used
+                // above.
                 #[cfg(target_os = "linux")]
-                if use_seccomp {
+                {
                     let prog = libc::sock_fprog {
                         len: seccomp_prog.len() as libc::c_ushort,
                         filter: seccomp_prog.as_ptr() as *mut libc::sock_filter,
@@ -638,11 +649,15 @@ mod sys {
     /// Build a Landlock ruleset in the parent (allocation is fine here); the
     /// child only applies it.
     #[cfg(target_os = "linux")]
-    fn landlock_ruleset(fs: &FsConfinement) -> Result<std::os::fd::OwnedFd, ExecError> {
+    fn landlock_ruleset(fs: &FsConfinement) -> Result<(std::os::fd::OwnedFd, bool), ExecError> {
         use landlock::{
             ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr,
-            RulesetCreatedAttr, path_beneath_rules,
+            RulesetCreatedAttr, Scope, path_beneath_rules,
         };
+        // Scopes (ABI v6, Linux 6.12) stop the command from connecting to
+        // abstract unix sockets (D-Bus, X11, ...) and from signalling
+        // processes outside its domain. Best effort: older kernels lack them.
+        let scoped = landlock_abi() >= 6;
         let abi = ABI::V3;
         let existing =
             |v: &[PathBuf]| -> Vec<PathBuf> { v.iter().filter(|p| p.exists()).cloned().collect() };
@@ -653,6 +668,14 @@ mod sys {
             .set_compatibility(CompatLevel::HardRequirement)
             .handle_access(AccessFs::from_all(abi))
             .map_err(err)?
+            .set_compatibility(if scoped {
+                CompatLevel::HardRequirement
+            } else {
+                CompatLevel::BestEffort
+            })
+            .scope(Scope::from_all(ABI::V6))
+            .map_err(err)?
+            .set_compatibility(CompatLevel::HardRequirement)
             .create()
             .map_err(err)?
             .add_rules(path_beneath_rules(
@@ -671,9 +694,25 @@ mod sys {
             ))
             .map_err(err)?;
         let fd: Option<std::os::fd::OwnedFd> = created.into();
-        fd.ok_or_else(|| {
+        fd.map(|fd| (fd, scoped)).ok_or_else(|| {
             ExecError::SandboxUnavailable("Landlock is not supported by this kernel".into())
         })
+    }
+
+    /// The kernel's Landlock ABI version (0 if unsupported).
+    #[cfg(target_os = "linux")]
+    fn landlock_abi() -> i64 {
+        const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
+        // SAFETY: with a null attribute and size 0 this only queries.
+        let v = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_create_ruleset,
+                std::ptr::null::<u8>(),
+                0usize,
+                LANDLOCK_CREATE_RULESET_VERSION,
+            )
+        };
+        v.max(0)
     }
 
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -803,44 +842,201 @@ mod sys {
         const BPF_LD_W_ABS: u16 = 0x20;
         const BPF_JMP_JEQ_K: u16 = 0x05 | 0x10;
         const BPF_JMP_JGE_K: u16 = 0x05 | 0x30;
+        const BPF_JMP_JSET_K: u16 = 0x05 | 0x40;
         const BPF_RET_K: u16 = 0x06;
         const OFF_NR: u32 = 0;
         const OFF_ARCH: u32 = 4;
         const OFF_ARG0: u32 = 16; // low 32 bits on little-endian
 
-        fn ins(code: u16, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
-            libc::sock_filter { code, jt, jf, k }
+        /// Syscalls a build or test command has no business making: process
+        /// inspection, mounts, kernel modules and kexec, BPF and perf,
+        /// kernel keyrings, handle-based opens (which bypass path checks),
+        /// swap, reboot, namespace changes and `io_uring` (whose operations
+        /// are not seen by seccomp).
+        pub(crate) fn denied_syscalls() -> Vec<(i64, &'static str)> {
+            #[allow(unused_mut)]
+            let mut v = vec![
+                (libc::SYS_ptrace, "ptrace"),
+                (libc::SYS_process_vm_readv, "process_vm_readv"),
+                (libc::SYS_process_vm_writev, "process_vm_writev"),
+                (libc::SYS_mount, "mount"),
+                (libc::SYS_umount2, "umount2"),
+                (libc::SYS_pivot_root, "pivot_root"),
+                (libc::SYS_fsopen, "fsopen"),
+                (libc::SYS_fsconfig, "fsconfig"),
+                (libc::SYS_fsmount, "fsmount"),
+                (libc::SYS_fspick, "fspick"),
+                (libc::SYS_move_mount, "move_mount"),
+                (libc::SYS_open_tree, "open_tree"),
+                (libc::SYS_mount_setattr, "mount_setattr"),
+                (libc::SYS_kexec_load, "kexec_load"),
+                (libc::SYS_kexec_file_load, "kexec_file_load"),
+                (libc::SYS_init_module, "init_module"),
+                (libc::SYS_finit_module, "finit_module"),
+                (libc::SYS_delete_module, "delete_module"),
+                (libc::SYS_bpf, "bpf"),
+                (libc::SYS_perf_event_open, "perf_event_open"),
+                (libc::SYS_userfaultfd, "userfaultfd"),
+                (libc::SYS_keyctl, "keyctl"),
+                (libc::SYS_add_key, "add_key"),
+                (libc::SYS_request_key, "request_key"),
+                (libc::SYS_open_by_handle_at, "open_by_handle_at"),
+                (libc::SYS_name_to_handle_at, "name_to_handle_at"),
+                (libc::SYS_swapon, "swapon"),
+                (libc::SYS_swapoff, "swapoff"),
+                (libc::SYS_reboot, "reboot"),
+                (libc::SYS_setns, "setns"),
+                (libc::SYS_unshare, "unshare"),
+                (libc::SYS_io_uring_setup, "io_uring_setup"),
+                (libc::SYS_io_uring_enter, "io_uring_enter"),
+                (libc::SYS_io_uring_register, "io_uring_register"),
+                (libc::SYS_acct, "acct"),
+                (libc::SYS_quotactl, "quotactl"),
+                (libc::SYS_syslog, "syslog"),
+                (libc::SYS_settimeofday, "settimeofday"),
+                (libc::SYS_clock_settime, "clock_settime"),
+                (libc::SYS_clock_adjtime, "clock_adjtime"),
+                (libc::SYS_adjtimex, "adjtimex"),
+                (libc::SYS_sethostname, "sethostname"),
+                (libc::SYS_setdomainname, "setdomainname"),
+                (libc::SYS_lookup_dcookie, "lookup_dcookie"),
+                (libc::SYS_fanotify_init, "fanotify_init"),
+                (libc::SYS_kcmp, "kcmp"),
+                (libc::SYS_pidfd_getfd, "pidfd_getfd"),
+            ];
+            #[cfg(target_arch = "x86_64")]
+            v.extend([
+                (libc::SYS_iopl, "iopl"),
+                (libc::SYS_ioperm, "ioperm"),
+                (libc::SYS_modify_ldt, "modify_ldt"),
+                (libc::SYS_uselib, "uselib"),
+                (libc::SYS__sysctl, "_sysctl"),
+            ]);
+            v
         }
 
-        /// Seccomp program: `socket`/`socketpair` with any family other than
-        /// `AF_UNIX`, and `io_uring_setup`, fail with `EACCES`; a foreign
-        /// architecture or the x32 ABI kills the process (fail closed).
-        pub(crate) fn socket_filter() -> Result<Vec<libc::sock_filter>, String> {
+        /// Namespace flags `clone` may not carry.
+        const CLONE_NS_FLAGS: u32 = (libc::CLONE_NEWNS
+            | libc::CLONE_NEWUTS
+            | libc::CLONE_NEWIPC
+            | libc::CLONE_NEWUSER
+            | libc::CLONE_NEWPID
+            | libc::CLONE_NEWNET
+            | libc::CLONE_NEWCGROUP) as u32;
+
+        #[derive(Clone, Copy)]
+        enum To {
+            Next,
+            Eperm,
+            Eacces,
+            Enosys,
+            Allow,
+            Kill,
+            Skip(u8),
+        }
+
+        /// A tiny assembler: jumps name a terminal (or skip n), offsets are
+        /// resolved once the program is laid out.
+        struct Asm(Vec<(u16, To, To, u32)>);
+        impl Asm {
+            fn op(&mut self, code: u16, t: To, f: To, k: u32) {
+                self.0.push((code, t, f, k));
+            }
+            fn finish(self) -> Result<Vec<libc::sock_filter>, String> {
+                let body = self.0.len();
+                // Terminals follow the body, in this order.
+                let term = |t: To| match t {
+                    To::Allow => Some(0),
+                    To::Eperm => Some(1),
+                    To::Eacces => Some(2),
+                    To::Enosys => Some(3),
+                    To::Kill => Some(4),
+                    _ => None,
+                };
+                let mut out = Vec::with_capacity(body + 5);
+                for (i, (code, t, f, k)) in self.0.iter().enumerate() {
+                    let off = |to: To| -> Result<u8, String> {
+                        let target = match to {
+                            To::Next => i + 1,
+                            To::Skip(n) => i + 1 + n as usize,
+                            other => body + term(other).unwrap_or(0),
+                        };
+                        u8::try_from(target - i - 1)
+                            .map_err(|_| "seccomp filter: jump too far".to_string())
+                    };
+                    out.push(libc::sock_filter {
+                        code: *code,
+                        jt: off(*t)?,
+                        jf: off(*f)?,
+                        k: *k,
+                    });
+                }
+                for k in [
+                    libc::SECCOMP_RET_ALLOW,
+                    libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+                    libc::SECCOMP_RET_ERRNO | libc::EACCES as u32,
+                    libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
+                    libc::SECCOMP_RET_KILL_PROCESS,
+                ] {
+                    out.push(libc::sock_filter {
+                        code: BPF_RET_K,
+                        jt: 0,
+                        jf: 0,
+                        k,
+                    });
+                }
+                Ok(out)
+            }
+        }
+
+        /// The seccomp program for a confined command:
+        /// * a foreign architecture or the x32 ABI kills the process;
+        /// * [`denied_syscalls`] fail with `EPERM`;
+        /// * `clone` with a namespace flag fails with `EPERM`; `clone3`
+        ///   (whose flags live in memory the filter cannot read) fails with
+        ///   `ENOSYS`, so libc falls back to `clone`;
+        /// * with `network_deny`, `socket`/`socketpair` of any family other
+        ///   than `AF_UNIX` fail with `EACCES` (the fallback network method).
+        pub(crate) fn filter(network_deny: bool) -> Result<Vec<libc::sock_filter>, String> {
             let arch = if cfg!(target_arch = "x86_64") {
                 AUDIT_ARCH_X86_64
             } else if cfg!(target_arch = "aarch64") {
                 AUDIT_ARCH_AARCH64
             } else {
-                return Err("seccomp network filter: unsupported architecture".into());
+                return Err("seccomp filter: unsupported architecture".into());
             };
-            let deny = libc::SECCOMP_RET_ERRNO | (libc::EACCES as u32);
-            let kill = libc::SECCOMP_RET_KILL_PROCESS;
-            let allow = libc::SECCOMP_RET_ALLOW;
-            Ok(vec![
-                /* 0 */ ins(BPF_LD_W_ABS, 0, 0, OFF_ARCH),
-                /* 1 */ ins(BPF_JMP_JEQ_K, 1, 0, arch),
-                /* 2 */ ins(BPF_RET_K, 0, 0, kill),
-                /* 3 */ ins(BPF_LD_W_ABS, 0, 0, OFF_NR),
-                /* 4 */ ins(BPF_JMP_JGE_K, 0, 1, 0x4000_0000),
-                /* 5 */ ins(BPF_RET_K, 0, 0, kill),
-                /* 6 */ ins(BPF_JMP_JEQ_K, 2, 0, libc::SYS_socket as u32),
-                /* 7 */ ins(BPF_JMP_JEQ_K, 1, 0, libc::SYS_socketpair as u32),
-                /* 8 */ ins(BPF_JMP_JEQ_K, 2, 3, libc::SYS_io_uring_setup as u32),
-                /* 9 */ ins(BPF_LD_W_ABS, 0, 0, OFF_ARG0),
-                /* 10 */ ins(BPF_JMP_JEQ_K, 1, 0, libc::AF_UNIX as u32),
-                /* 11 */ ins(BPF_RET_K, 0, 0, deny),
-                /* 12 */ ins(BPF_RET_K, 0, 0, allow),
-            ])
+            let mut a = Asm(Vec::new());
+            a.op(BPF_LD_W_ABS, To::Next, To::Next, OFF_ARCH);
+            a.op(BPF_JMP_JEQ_K, To::Next, To::Kill, arch);
+            a.op(BPF_LD_W_ABS, To::Next, To::Next, OFF_NR);
+            a.op(BPF_JMP_JGE_K, To::Kill, To::Next, 0x4000_0000);
+            for (nr, _) in denied_syscalls() {
+                a.op(BPF_JMP_JEQ_K, To::Eperm, To::Next, nr as u32);
+            }
+            a.op(BPF_JMP_JEQ_K, To::Enosys, To::Next, libc::SYS_clone3 as u32);
+            // clone: flags are the first argument on x86_64 and aarch64.
+            a.op(BPF_JMP_JEQ_K, To::Next, To::Skip(2), libc::SYS_clone as u32);
+            a.op(BPF_LD_W_ABS, To::Next, To::Next, OFF_ARG0);
+            a.op(BPF_JMP_JSET_K, To::Eperm, To::Allow, CLONE_NS_FLAGS);
+            if network_deny {
+                a.op(
+                    BPF_JMP_JEQ_K,
+                    To::Skip(1),
+                    To::Next,
+                    libc::SYS_socket as u32,
+                );
+                a.op(
+                    BPF_JMP_JEQ_K,
+                    To::Next,
+                    To::Allow,
+                    libc::SYS_socketpair as u32,
+                );
+                a.op(BPF_LD_W_ABS, To::Next, To::Next, OFF_ARG0);
+                a.op(BPF_JMP_JEQ_K, To::Allow, To::Eacces, libc::AF_UNIX as u32);
+            } else {
+                a.op(BPF_RET_K, To::Next, To::Next, libc::SECCOMP_RET_ALLOW);
+            }
+            a.finish()
         }
     }
 

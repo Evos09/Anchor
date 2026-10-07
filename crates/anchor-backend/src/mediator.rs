@@ -917,6 +917,8 @@ impl Mediator {
                         "network_isolated": o.isolation.network_isolated(),
                         "network_method": o.isolation.network.map(|m| format!("{m:?}")),
                         "fs_confined": o.isolation.fs_confined,
+                        "syscall_filter": o.isolation.syscall_filter,
+                        "landlock_scopes": o.isolation.landlock_scopes,
                     }),
                 );
                 ToolOutcome::Ok {

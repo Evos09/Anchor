@@ -338,3 +338,145 @@ fn filesystem_confinement_enforced() {
     assert!(!base.join("escape.txt").exists());
     assert_eq!(std::fs::read(creds.join("id_rsa")).unwrap(), b"PRIVATE");
 }
+
+/// The general syscall denylist (ADR-0003): process inspection, BPF,
+/// keyrings, namespaces and io_uring fail with the filter's errno, in both
+/// network tiers, while ordinary process creation keeps working.
+#[cfg(target_os = "linux")]
+#[test]
+fn dangerous_syscalls_are_refused() {
+    if resolve_program("python3", &path_var()).is_err() {
+        eprintln!("python3 not found: skipped");
+        return;
+    }
+    let calls: Vec<(String, i64)> = sys::linux_net::denied_syscalls()
+        .into_iter()
+        .filter(|(_, n)| {
+            [
+                "ptrace",
+                "bpf",
+                "keyctl",
+                "unshare",
+                "setns",
+                "io_uring_setup",
+                "perf_event_open",
+                "mount",
+                "process_vm_readv",
+            ]
+            .contains(n)
+        })
+        .map(|(nr, n)| (n.to_string(), nr))
+        .collect();
+    assert_eq!(calls.len(), 9);
+    let script = format!(
+        r#"
+import ctypes, errno, os, subprocess
+libc = ctypes.CDLL(None, use_errno=True)
+for name, nr in {calls:?}:
+    r = libc.syscall(nr, 0, 0, 0, 0, 0)
+    print(name, r, errno.errorcode.get(ctypes.get_errno(), "0") if r < 0 else "ok")
+# clone with CLONE_NEWUSER through os.unshare-like raw clone is refused...
+r = libc.syscall({clone}, 0x10000000 | 17, 0, 0, 0, 0)
+print("clone_newuser", r, errno.errorcode.get(ctypes.get_errno(), "0") if r < 0 else "ok")
+# ...while ordinary children and threads still work.
+print("child", subprocess.run(["/bin/echo", "hi"], capture_output=True).stdout.decode().strip())
+import threading; t = threading.Thread(target=lambda: None); t.start(); t.join(); print("thread ok")
+"#,
+        calls = calls,
+        clone = libc::SYS_clone,
+    );
+    for force_seccomp in [false, true] {
+        sys::linux_net::FORCE_SECCOMP.with(|f| f.set(force_seccomp));
+        let mut s = spec("python3", &["-c", &script], Network::Deny);
+        s.env.push(("PYTHONDONTWRITEBYTECODE".into(), "1".into()));
+        let out = run(&s).unwrap();
+        sys::linux_net::FORCE_SECCOMP.with(|f| f.set(false));
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.isolation.syscall_filter);
+        assert_eq!(
+            out.exit,
+            ExitKind::Exited(0),
+            "{text}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        for (name, _) in &calls {
+            assert!(
+                text.contains(&format!("{name} -1 EPERM")),
+                "{name} not refused:\n{text}"
+            );
+        }
+        assert!(text.contains("clone_newuser -1 EPERM"), "{text}");
+        assert!(text.contains("child hi"), "{text}");
+        assert!(text.contains("thread ok"), "{text}");
+    }
+}
+
+/// The filter program itself: every jump lands inside the program and the
+/// last instruction returns.
+#[cfg(target_os = "linux")]
+#[test]
+fn seccomp_program_is_well_formed() {
+    for net in [false, true] {
+        let p = sys::linux_net::filter(net).unwrap();
+        for (i, ins) in p.iter().enumerate() {
+            if ins.code & 0x07 == 0x05 {
+                assert!(i + 1 + (ins.jt as usize) < p.len());
+                assert!(i + 1 + (ins.jf as usize) < p.len());
+            }
+        }
+        assert_eq!(p.last().unwrap().code, 0x06);
+        assert!(p.len() < 4096);
+    }
+}
+
+/// Landlock scopes (Linux 6.12+): a confined command cannot reach an
+/// abstract unix socket outside its domain (D-Bus, X11, ...) nor signal
+/// processes outside it. On older kernels the gap is recorded instead.
+#[cfg(target_os = "linux")]
+#[test]
+fn landlock_scopes_block_abstract_sockets_and_signals() {
+    use std::os::linux::net::SocketAddrExt;
+    if resolve_program("python3", &path_var()).is_err() {
+        eprintln!("python3 not found: skipped");
+        return;
+    }
+    let name = format!("anchor-test-{}", std::process::id());
+    let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind_addr(&addr).unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let ws = std::fs::canonicalize(d.path()).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ws, std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+    let script = format!(
+        r#"
+import os, socket, signal
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    s.connect("\0{name}"); print("abstract connected")
+except OSError as e:
+    print("abstract refused", e.errno)
+try:
+    os.kill({parent}, 0); print("signal delivered")
+except OSError as e:
+    print("signal refused", e.errno)
+"#,
+        parent = std::process::id(),
+    );
+    let mut s = spec("python3", &["-c", &script], Network::Allow);
+    s.cwd = ws.clone();
+    s.fs = Some(FsConfinement {
+        read_write: vec![ws.clone()],
+        read_only: FsConfinement::system_read_only(),
+    });
+    let out = run(&s).unwrap();
+    drop(listener);
+    let text = String::from_utf8_lossy(&out.stdout);
+    if out.isolation.landlock_scopes {
+        assert!(text.contains("abstract refused"), "{text}");
+        assert!(text.contains("signal refused"), "{text}");
+    } else {
+        eprintln!("Landlock scopes unavailable on this kernel (ABI < 6): {text}");
+    }
+}
