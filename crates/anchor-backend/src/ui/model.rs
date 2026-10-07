@@ -527,7 +527,13 @@ impl Model {
     fn narrate(&self, e: &AuditEntry, agent: Option<&str>) -> (&'static str, Level, String) {
         use Level::*;
         let d = &e.data;
-        let who = agent.unwrap_or("the backend");
+        // Inside a session without a team name (`anchor run`, the app),
+        // the actor is the agent; outside one, the backend itself.
+        let who = agent.unwrap_or(if d["session_id"].is_string() {
+            "the agent"
+        } else {
+            "the backend"
+        });
         let path = || {
             s(&d["path"])
                 .or_else(|| s(&d["canonical_target"]))
@@ -1111,6 +1117,17 @@ impl Model {
                         "You restored snapshot {} from the dashboard",
                         short(&d["args"]["ref"], 60)
                     ),
+                    Some("start_task") => format!("You asked: {}", short(&d["args"]["text"], 400)),
+                    Some("cancel_task") => "You stopped the task".to_string(),
+                    Some("open_project") => {
+                        format!("You opened {}", short(&d["args"]["path"], 200))
+                    }
+                    Some("set_models") => {
+                        format!(
+                            "You chose the models file {}",
+                            short(&d["args"]["path"], 200)
+                        )
+                    }
                     _ => format!("Dashboard action: {}", short(d, 160)),
                 },
             ),

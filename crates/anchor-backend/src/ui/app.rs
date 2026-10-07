@@ -327,7 +327,7 @@ impl App {
                 // the session never started.
                 let _ = mediator.log(
                     "notice",
-                    json!({ "level": "error", "text": format!("the task could not run: {e}") }),
+                    json!({ "kind": "task_error", "detail": format!("the task could not run: {e}") }),
                 );
             }
             *state.workspace.lock().unwrap_or_else(|p| p.into_inner()) = Some(mediator);

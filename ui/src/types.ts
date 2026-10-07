@@ -58,7 +58,7 @@ export interface Pending {
 }
 
 export interface Overview {
-  mode: "live" | "inspect";
+  mode: "live" | "inspect" | "app";
   running: boolean;
   workspace: string;
   chain: { verified_entries: number; error: string | null };
@@ -254,4 +254,24 @@ export interface SnapshotsView {
   note?: string | null;
   snapshots: Snapshot[];
   rollback?: string | null;
+}
+
+// The desktop app (`anchor app`, ADR-0028).
+export interface AppState {
+  project: string | null;
+  running: boolean;
+  recent: string[];
+  models: { path: string; ok: boolean; error: string | null };
+  mock: boolean;
+  platform: string;
+  home: string | null;
+}
+
+export interface DirListing {
+  path: string | null;
+  parent: string | null;
+  dirs: string[];
+  names?: string[];
+  truncated?: boolean;
+  home: string | null;
 }
