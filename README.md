@@ -241,8 +241,9 @@ every §11 threat to its test and its per-platform status.
   - **Done-when tests:** `crates/anchor-backend/tests/verify.rs` and
     `tests/eval.rs`.
 
-- Phase 6, the collaboration dashboard (ADR-0025). Linux, locally; the
-  confirming CI run is pending.
+- Phase 6, the collaboration dashboard (ADR-0025). Green on Linux, macOS
+  and Windows in CI run 37551637739, including the Playwright browser test
+  (Linux).
   - **Serving:** `anchor team run --ui` (live, answering approvals) and
     `anchor ui` (after a run). Loopback only, with a per-launch token in
     the URL fragment, exact Host and same-origin checks, and a strict CSP.

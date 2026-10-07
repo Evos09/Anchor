@@ -129,17 +129,17 @@ approvals (ADR-0025). Its tests are in
 
 | Threat / requirement | Mitigation | Test | Status |
 |---|---|---|---|
-| A malicious web page drives the dashboard (CSRF) | Token required on every `/api/` call, as a header, never a cookie. A foreign `Origin` or `Sec-Fetch-Site: cross-site` gets 403. Writes need `application/json`, which no simple cross-site form can send | `dashboard_is_token_gated_same_origin_and_hardened` | ✅ Linux (local) · CI pending |
-| DNS rebinding | Exact `Host` check (`127.0.0.1:<port>` / `localhost:<port>`); a rebound name is refused even with the token | same test (`evil.example` Host → 403) | ✅ Linux (local) · CI pending |
-| Token leakage (URL, history, `Referer`, logs) | The token is in the URL fragment (never sent); the page removes it from the address bar and history; `Referrer-Policy: no-referrer`; the token is never in a request line | same test (URL shape); e2e `not.toHaveURL(/#t=/)` | ✅ Linux (local) · CI pending |
-| Another local user or process | Loopback bind; 256-bit per-launch token from the OS RNG; constant-time comparison. `--ui-url-file` is written 0600. *Residual:* any process running as the same user can read that process's memory and environment anyway | same test (missing, wrong and short tokens → 401) | ✅ Linux (local) · CI pending |
-| XSS from agent-written content | React renders text only (no `dangerouslySetInnerHTML`); `Content-Security-Policy: default-src 'none'; script-src 'self'` (no inline script); framing denied | same test (headers); content rendered as text in the e2e | ✅ Linux (local) · CI pending |
-| Path traversal to files outside the bundle | Static files come from an embedded table only; there is no filesystem lookup | same test (`/../Cargo.toml`, `%2e%2e`) | ✅ Linux (local) · CI pending |
-| A forged or replayed approval | Approvals are answered by id, with a choice from the offered set, once. Every answer is audited (`ui_action`, `approval_resolved via ui`), then goes through `prompt_response`. Rollback needs a one-time nonce from a preview, and is refused while a run holds the workspace | `two_model_collaboration_through_the_dashboard` (mid-run rollback → 409; nonce reuse → 409) | ✅ Linux (local) · CI pending |
-| Every inter-agent interaction is visible and auditable | Every audit entry is shown (unknown kinds generically), verified against the hash chain as it is read; every Hub row is reachable; agent actions are attributed | `two_model_collaboration_through_the_dashboard` (feed = audit log, seq for seq; Hub messages, claims, decisions and merges equal the API's; every session or agent-caller entry attributed) | ✅ Linux (local) · CI pending |
-| Failures are never hidden (§12.3) | Rejections with findings and evidence; conflicts in red; `fails_on_main` ("caught later"); a broken audit chain or a cost mismatch gives a red banner | `two_model_collaboration_through_the_dashboard`, `test_only_change_failing_is_flagged_as_caught_later`, e2e | ✅ Linux (local) · CI pending |
-| The cost meter is accurate | Each call is recomputed from the roles files' prices and compared with the runtime's report and the session's own totals; any mismatch is listed | `two_model_collaboration_through_the_dashboard` (per agent, session and total = tokens × prices exactly, review sessions included); `cost_is_recomputed_from_prices_and_mismatches_are_reported` (a lying runtime is flagged) | ✅ Linux (local) · CI pending |
-| The user's polling floods the audit log | User views read through `Hub::view_*` and do no audit writes. An unauthenticated request is *not* audited (a web page could otherwise spam the log) | `user_views_see_everything_and_write_no_audit_entries`, the hardening test (`audit.head()` unchanged) | ✅ Linux (local) · CI pending |
+| A malicious web page drives the dashboard (CSRF) | Token required on every `/api/` call, as a header, never a cookie. A foreign `Origin` or `Sec-Fetch-Site: cross-site` gets 403. Writes need `application/json`, which no simple cross-site form can send | `dashboard_is_token_gated_same_origin_and_hardened` | ✅ Linux, macOS, Windows (CI 37551637739) |
+| DNS rebinding | Exact `Host` check (`127.0.0.1:<port>` / `localhost:<port>`); a rebound name is refused even with the token | same test (`evil.example` Host → 403) | ✅ Linux, macOS, Windows (CI 37551637739) |
+| Token leakage (URL, history, `Referer`, logs) | The token is in the URL fragment (never sent); the page removes it from the address bar and history; `Referrer-Policy: no-referrer`; the token is never in a request line | same test (URL shape); e2e `not.toHaveURL(/#t=/)` | ✅ Linux, macOS, Windows; e2e on Linux (CI 37551637739) |
+| Another local user or process | Loopback bind; 256-bit per-launch token from the OS RNG; constant-time comparison. `--ui-url-file` is written 0600. *Residual:* any process running as the same user can read that process's memory and environment anyway | same test (missing, wrong and short tokens → 401) | ✅ Linux, macOS, Windows (CI 37551637739) |
+| XSS from agent-written content | React renders text only (no `dangerouslySetInnerHTML`); `Content-Security-Policy: default-src 'none'; script-src 'self'` (no inline script); framing denied | same test (headers); content rendered as text in the e2e | ✅ Linux, macOS, Windows; e2e on Linux (CI 37551637739) |
+| Path traversal to files outside the bundle | Static files come from an embedded table only; there is no filesystem lookup | same test (`/../Cargo.toml`, `%2e%2e`) | ✅ Linux, macOS, Windows (CI 37551637739) |
+| A forged or replayed approval | Approvals are answered by id, with a choice from the offered set, once. Every answer is audited (`ui_action`, `approval_resolved via ui`), then goes through `prompt_response`. Rollback needs a one-time nonce from a preview, and is refused while a run holds the workspace | `two_model_collaboration_through_the_dashboard` (mid-run rollback → 409; nonce reuse → 409) | ✅ Linux, macOS (CI 37551637739; the test is unix-only) |
+| Every inter-agent interaction is visible and auditable | Every audit entry is shown (unknown kinds generically), verified against the hash chain as it is read; every Hub row is reachable; agent actions are attributed | `two_model_collaboration_through_the_dashboard` (feed = audit log, seq for seq; Hub messages, claims, decisions and merges equal the API's; every session or agent-caller entry attributed) | ✅ Linux, macOS (CI 37551637739; the test is unix-only) |
+| Failures are never hidden (§12.3) | Rejections with findings and evidence; conflicts in red; `fails_on_main` ("caught later"); a broken audit chain or a cost mismatch gives a red banner | `two_model_collaboration_through_the_dashboard`, `test_only_change_failing_is_flagged_as_caught_later`, e2e | ✅ Linux, macOS; e2e on Linux (CI 37551637739) |
+| The cost meter is accurate | Each call is recomputed from the roles files' prices and compared with the runtime's report and the session's own totals; any mismatch is listed | `two_model_collaboration_through_the_dashboard` (per agent, session and total = tokens × prices exactly, review sessions included); `cost_is_recomputed_from_prices_and_mismatches_are_reported` (a lying runtime is flagged) | ✅ Linux, macOS (CI 37551637739; the test is unix-only) |
+| The user's polling floods the audit log | User views read through `Hub::view_*` and do no audit writes. An unauthenticated request is *not* audited (a web page could otherwise spam the log) | `user_views_see_everything_and_write_no_audit_entries`, the hardening test (`audit.head()` unchanged) | ✅ Linux, macOS, Windows (CI 37551637739) |
 
 ## Phase 2 "verified by instrumentation"
 
@@ -185,6 +185,19 @@ approvals (ADR-0025). Its tests are in
   and Windows. The §8 done-when tests pass on Linux and macOS, and the
   Windows gate fails closed. The Linux job ran the seeded-bug harness on
   the whole corpus.
+- Run 37521970692 (Phase 6, attempt 2): Linux green, including the
+  frontend build, `npm audit` and the Playwright dashboard test; macOS
+  green. Windows clippy failed: helpers used only by the unix-only
+  dashboard test were unused there.
+- Run 37550399552: Windows green. macOS failed `hardlink_attack_refused`
+  intermittently: `F_GETPATH` may report a hardlinked file's *outside*
+  name, so resolution refused it as escaping before the hardlink check
+  (fail-closed either way). The refusal now names the hardlink, and the
+  test accepts both outcomes. `symlink_swap_race_never_escapes` was made
+  robust on loaded machines at the same time.
+- Run 37551637739 (Phase 6): all jobs green on Linux, macOS and Windows. The §12
+  dashboard tests pass on all three (the two-model collaboration test on
+  Linux and macOS), and the Playwright test passes in Chromium on Linux.
 
 ## Out of scope for this push
 
