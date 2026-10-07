@@ -458,6 +458,83 @@ fn unclaimed_changes_are_rejected_at_merge() {
     assert_eq!(inbox[0].content["feedback"]["reason"], "claims");
 }
 
+/// Review findings T-1 and H-2: git internals never merge, whatever the
+/// claims; a claim the user revoked, or a retired agent, authorizes
+/// nothing.
+#[test]
+fn git_internals_revoked_claims_and_retired_agents_never_merge() {
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = fx.open();
+    let hub = hub_of(&opened);
+    let mut q = MergeQueue::new(hub.clone(), &mut opened.mediator, Box::new(NoGate), true);
+
+    // A hook planted next to a claimed edit.
+    let (id, i) = iso_agent(&mut q, &fx, "planter", &["src/"]);
+    hub.request_claim(Caller::Agent(id), "src/a.txt", ClaimType::Edit, false, None)
+        .unwrap();
+    std::fs::write(i.ws.root().join("src/a.txt"), "claimed edit\n").unwrap();
+    std::fs::create_dir_all(i.ws.root().join("src/.git/hooks")).unwrap();
+    std::fs::write(
+        i.ws.root().join("src/.git/hooks/post-checkout"),
+        "#!/bin/sh\nevil\n",
+    )
+    .unwrap();
+    let o = submit(&mut q, id, &i);
+    let Outcome::Rejected { feedback, .. } = &o else {
+        panic!("{o:?}")
+    };
+    assert_eq!(feedback["paths"][0]["path"], "src/.git/hooks/post-checkout");
+    assert_eq!(
+        feedback["paths"][0]["reason"],
+        "git internals are never merged"
+    );
+    assert_eq!(feedback["paths"].as_array().unwrap().len(), 1);
+
+    // A revoked claim.
+    let (id2, i2) = iso_agent(&mut q, &fx, "revoked", &["src/"]);
+    let c = hub
+        .request_claim(
+            Caller::Agent(id2),
+            "src/b.txt",
+            ClaimType::Edit,
+            false,
+            None,
+        )
+        .unwrap();
+    hub.revoke_claim(Caller::User, c.id).unwrap();
+    std::fs::write(i2.ws.root().join("src/b.txt"), "after revocation\n").unwrap();
+    let o = submit(&mut q, id2, &i2);
+    let Outcome::Rejected { feedback, .. } = &o else {
+        panic!("{o:?}")
+    };
+    assert_eq!(
+        feedback["paths"][0]["reason"],
+        "changed without an edit claim"
+    );
+
+    // A retired agent.
+    let (id3, i3) = iso_agent(&mut q, &fx, "retired", &["src/"]);
+    hub.request_claim(
+        Caller::Agent(id3),
+        "src/b.txt",
+        ClaimType::Edit,
+        false,
+        None,
+    )
+    .unwrap();
+    std::fs::write(i3.ws.root().join("src/b.txt"), "after retirement\n").unwrap();
+    hub.retire_agent(Caller::User, id3).unwrap();
+    let o = submit(&mut q, id3, &i3);
+    let Outcome::Rejected { feedback, .. } = &o else {
+        panic!("{o:?}")
+    };
+    assert_eq!(feedback["paths"][0]["reason"], "the agent was retired");
+    drop(q);
+    assert_eq!(fx.read("src/a.txt"), "a1\n");
+    assert_eq!(fx.read("src/b.txt"), "b1\n");
+}
+
 /// A new directory is checked file by file: claiming one file in it
 /// entitles exactly that file.
 #[test]

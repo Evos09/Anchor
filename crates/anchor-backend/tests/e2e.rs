@@ -608,6 +608,48 @@ fn rollback_after_command_restores_gitignored_and_dotgit() {
     assert_eq!(tree_state(&fx.ws), initial);
 }
 
+/// Review finding T-1: a command cannot plant git hooks or config that the
+/// user's own git would later run outside the sandbox; the change is put
+/// back, audited and reported, while ordinary repository writes stay.
+#[cfg(unix)]
+#[test]
+fn commands_cannot_plant_git_hooks_or_config() {
+    use std::os::unix::fs::PermissionsExt;
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    std::fs::create_dir_all(fx.ws.join(".git/hooks")).unwrap();
+    std::fs::write(fx.ws.join(".git/config"), "[core]\n").unwrap();
+    for d in [".git", ".git/hooks"] {
+        std::fs::set_permissions(fx.ws.join(d), std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+    std::fs::set_permissions(
+        fx.ws.join(".git/config"),
+        std::fs::Permissions::from_mode(0o666),
+    )
+    .unwrap();
+    let mut opened = open(&fx, true, ResumeChoice::FreshSession);
+    let script = r#"{"steps": [
+      {"content": "", "tool_calls": [
+        {"tool": "run_command", "args": {"program": "sh", "args": ["-c",
+          "printf '#!/bin/sh\\nevil\\n' > .git/hooks/post-checkout; printf '[core]\\n\\tfsmonitor = evil\\n' > .git/config; echo ok > .git/ORIG_HEAD"]}}
+      ]},
+      {"content": "done"}
+    ]}"#;
+    let report = run(&fx, &mut opened, script, 0.8, ROLES);
+    assert_eq!(report.stats.commands, 1, "{report:?}");
+    assert!(!fx.ws.join(".git/hooks/post-checkout").exists());
+    assert_eq!(
+        std::fs::read_to_string(fx.ws.join(".git/config")).unwrap(),
+        "[core]\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fx.ws.join(".git/ORIG_HEAD")).unwrap(),
+        "ok\n"
+    );
+    let log = std::fs::read_to_string(&opened.paths.audit).unwrap();
+    assert!(log.contains("git_internals_reverted"), "{log}");
+}
+
 /// Spec §16.4 durability: kill the backend mid-turn; a valid checkpoint and
 /// an intact audit chain remain, and a new session resumes from it.
 #[cfg(unix)]

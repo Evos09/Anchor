@@ -410,6 +410,14 @@ impl<'m> MergeQueue<'m> {
     /// Paths of `changes` the agent was not entitled to change.
     fn claim_violations(&self, agent: AgentId, changes: &[Change]) -> Result<Vec<Value>, String> {
         let me = self.hub.agent(agent).map_err(|e| e.to_string())?;
+        // A retired agent's authority is withdrawn, its work included
+        // (review finding H-2).
+        if me.status == anchor_hub::AgentStatus::Retired {
+            return Ok(changes
+                .iter()
+                .map(|c| json!({ "path": slash_path(&c.path), "reason": "the agent was retired" }))
+                .collect());
+        }
         let within: Vec<ClaimPath> = me
             .permissions
             .claim_within
@@ -421,7 +429,11 @@ impl<'m> MergeQueue<'m> {
             .claim_history(agent)
             .map_err(|e| e.to_string())?
             .into_iter()
-            .filter(|c| c.claim_type == ClaimType::Edit)
+            // Released and expired claims still cover the work done under
+            // them; a claim the user revoked does not.
+            .filter(|c| {
+                c.claim_type == ClaimType::Edit && c.status != anchor_hub::ClaimStatus::Revoked
+            })
             .filter_map(|c| ClaimPath::parse(&c.path).ok())
             .collect();
         let mut bad = Vec::new();
@@ -429,6 +441,12 @@ impl<'m> MergeQueue<'m> {
         for c in changes {
             let p = slash_path(&c.path);
             if !seen.insert(p.clone()) {
+                continue;
+            }
+            // Git executes its internals (hooks, config): never merged,
+            // whatever the claims (review finding T-1).
+            if p.split('/').any(|seg| seg.eq_ignore_ascii_case(".git")) {
+                bad.push(json!({ "path": p, "reason": "git internals are never merged" }));
                 continue;
             }
             let Ok(target) = ClaimPath::file(&p) else {

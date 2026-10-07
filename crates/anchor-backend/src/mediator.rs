@@ -904,7 +904,31 @@ impl Mediator {
                 read_only: self.exec_read_only.clone(),
             }),
         };
-        match anchor_exec::run(&spec) {
+        // Git executes its hooks and config; a command must not plant them
+        // (review finding T-1).
+        let git_before = crate::gitguard::GitState::capture(self.ws.root());
+        let result = anchor_exec::run(&spec);
+        let git_now = crate::gitguard::GitState::capture(self.ws.root());
+        let git_reverted = if git_now == git_before {
+            Vec::new()
+        } else {
+            git_before.restore(self.ws.root(), &git_now)
+        };
+        if !git_reverted.is_empty() {
+            let _ = self.log(
+                "git_internals_reverted",
+                serde_json::json!({
+                    "turn": self.turn,
+                    "program": spec.program,
+                    "paths": git_reverted,
+                }),
+            );
+            self.interact.notify(&format!(
+                "anchor: the command changed git hooks or config; put back: {}",
+                git_reverted.join(", ")
+            ));
+        }
+        match result {
             Ok(o) => {
                 self.stats.commands += 1;
                 let _ = self.log(
@@ -923,7 +947,7 @@ impl Mediator {
                 );
                 ToolOutcome::Ok {
                     output: format!(
-                        "exit: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}{}{}",
+                        "exit: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}{}{}{}",
                         o.exit,
                         String::from_utf8_lossy(&o.stdout),
                         String::from_utf8_lossy(&o.stderr),
@@ -936,6 +960,14 @@ impl Mediator {
                             "\n[note: the backend runs as root; the command ran as uid 65534 so resource limits apply]"
                         } else {
                             ""
+                        },
+                        if git_reverted.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "\n[anchor: changes to git hooks/config were reverted: {}]",
+                                git_reverted.join(", ")
+                            )
                         }
                     ),
                 }
