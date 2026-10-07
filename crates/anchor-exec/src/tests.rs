@@ -517,6 +517,115 @@ c.kill(); c.wait(); print("own child killed", c.returncode)
     }
 }
 
+/// Review finding S-4: the Seatbelt profile denies by default and is well
+/// formed (checked on every Unix; only macOS runs it).
+#[cfg(unix)]
+#[test]
+fn seatbelt_profile_denies_by_default() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = spec("sh", &["-c", "true"], Network::Deny);
+    s.fs = Some(FsConfinement {
+        read_write: vec![d.path().join("we \"quote\" (paren)")],
+        read_only: FsConfinement::system_read_only(),
+    });
+    std::fs::create_dir(&s.fs.as_ref().unwrap().read_write[0]).unwrap();
+    for (net, fs) in [
+        (Network::Deny, true),
+        (Network::Allow, true),
+        (Network::Deny, false),
+    ] {
+        let mut s = s.clone();
+        s.network = net;
+        if !fs {
+            s.fs = None;
+        }
+        let p = sys::macos_profile(&s);
+        assert!(p.starts_with("(version 1)(deny default)"), "{p}");
+        assert!(!p.contains("(allow default)"), "{p}");
+        assert_eq!(p.contains("(deny network*)"), net == Network::Deny, "{p}");
+        // Balanced parentheses outside string literals.
+        let (mut depth, mut in_str, mut esc) = (0i32, false, false);
+        for c in p.chars() {
+            match (in_str, esc, c) {
+                (true, true, _) => esc = false,
+                (true, false, '\\') => esc = true,
+                (_, false, '"') => in_str = !in_str,
+                (false, _, '(') => depth += 1,
+                (false, _, ')') => {
+                    depth -= 1;
+                    assert!(depth >= 0, "{p}");
+                }
+                _ => {}
+            }
+        }
+        assert!(depth == 0 && !in_str, "{p}");
+        if fs {
+            assert!(p.contains("(allow process-exec (subpath"), "{p}");
+            assert!(p.contains("Keychains"), "{p}");
+        }
+    }
+}
+
+/// Review finding S-4 on macOS: a confined command cannot reach Mach
+/// services outside its allowlist (the pasteboard, Apple Events, the
+/// keychain daemon), which `(allow default)` left open.
+#[cfg(target_os = "macos")]
+#[test]
+fn mach_services_are_unreachable_macos() {
+    if resolve_program("python3", &path_var()).is_err() {
+        eprintln!("SKIPPED: python3 not available");
+        return;
+    }
+    let probe = r#"
+import ctypes
+lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+bp = ctypes.c_uint.in_dll(lib, "bootstrap_port")
+for name in ("com.apple.securityd", "com.apple.coreservices.launchservicesd",
+             "com.apple.pasteboard.1", "com.apple.coreservices.appleevents"):
+    port = ctypes.c_uint(0)
+    r = lib.bootstrap_look_up(bp, name.encode(), ctypes.byref(port))
+    print(name, "reached" if r == 0 else "refused")
+"#;
+    let d = tempfile::tempdir().unwrap();
+    let ws = std::fs::canonicalize(d.path()).unwrap();
+    let open = run(&spec("python3", &["-c", probe], Network::Allow)).unwrap();
+    let mut s = spec("python3", &["-c", probe], Network::Deny);
+    s.cwd = ws.clone();
+    s.fs = Some(FsConfinement {
+        read_write: vec![ws],
+        read_only: FsConfinement::system_read_only()
+            .into_iter()
+            .chain(path_var().split(':').map(PathBuf::from))
+            .filter(|p| p.is_absolute() && p.exists())
+            .collect(),
+    });
+    let out = run(&s).unwrap();
+    let (free, confined) = (
+        String::from_utf8_lossy(&open.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    );
+    assert!(
+        confined.lines().count() == 4,
+        "{confined} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let reachable: Vec<&str> = free
+        .lines()
+        .filter(|l| l.ends_with(" reached"))
+        .map(|l| l.split(' ').next().unwrap())
+        .collect();
+    assert!(
+        !reachable.is_empty(),
+        "no probe service exists here: {free}"
+    );
+    for name in reachable {
+        assert!(
+            confined.contains(&format!("{name} refused")),
+            "{name} reachable from the sandbox: {confined}"
+        );
+    }
+}
+
 /// Threat 6 on macOS: Seatbelt `(deny network*)` blocks TCP and UDP egress
 /// while local `AF_UNIX` pairs keep working.
 #[cfg(target_os = "macos")]

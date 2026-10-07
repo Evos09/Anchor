@@ -27,9 +27,12 @@ fn main() -> ExitCode {
     }
     let status = restrict_self();
     eprintln!("anchor-agent: sandbox: {status:?}");
-    // Fail closed where a sandbox exists (Linux): an unconfined runtime
-    // would read the user's files and reach their terminal and sockets.
-    if cfg!(target_os = "linux") && matches!(status, SandboxStatus::NotEnforced(_)) {
+    // Fail closed where a sandbox exists (Linux, macOS): an unconfined
+    // runtime would read the user's files and reach their terminal and
+    // sockets.
+    if cfg!(any(target_os = "linux", target_os = "macos"))
+        && matches!(status, SandboxStatus::NotEnforced(_))
+    {
         eprintln!("anchor-agent: refusing to run without the sandbox");
         return ExitCode::from(3);
     }
@@ -52,6 +55,11 @@ fn selftest() -> ExitCode {
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);
     let target = line.trim().to_string();
+    // An optional second line: a listening unix socket outside the
+    // sandbox (the user's D-Bus, an ssh agent) to try to connect to.
+    let mut sock = String::new();
+    let _ = std::io::stdin().read_line(&mut sock);
+    let sock = sock.trim().to_string();
     let status = restrict_self();
     println!(
         "sandbox {}",
@@ -68,6 +76,10 @@ fn selftest() -> ExitCode {
     {
         let unix = std::os::unix::net::UnixDatagram::unbound().is_ok();
         println!("unix_socket {}", if unix { "ALLOWED" } else { "DENIED" });
+        if !sock.is_empty() {
+            let c = std::os::unix::net::UnixStream::connect(&sock).is_ok();
+            println!("unix_connect {}", if c { "ALLOWED" } else { "DENIED" });
+        }
     }
     ExitCode::SUCCESS
 }

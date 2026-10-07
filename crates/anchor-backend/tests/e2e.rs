@@ -360,31 +360,48 @@ fn overwrite_of_unread_file_requires_diff_confirmation() {
     );
 }
 
-/// The runtime process has no filesystem authority and no unix sockets
-/// (Landlock and seccomp self-sandbox on Linux).
-#[cfg(target_os = "linux")]
+/// The runtime process has no filesystem authority and cannot reach unix
+/// sockets (Landlock and seccomp on Linux, Seatbelt on macOS).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn runtime_process_cannot_touch_the_filesystem() {
     use std::io::Write;
     let fx = fixture();
     let target = fx.ws.join("src/main.py");
+    let sock_dir = tempfile::tempdir().unwrap();
+    let sock = std::fs::canonicalize(sock_dir.path())
+        .unwrap()
+        .join("agent.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
     let mut child = std::process::Command::new(agent_bin())
         .arg("--selftest-fs-denied")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    writeln!(child.stdin.take().unwrap(), "{}", target.display()).unwrap();
+    writeln!(
+        child.stdin.take().unwrap(),
+        "{}\n{}",
+        target.display(),
+        sock.display()
+    )
+    .unwrap();
     let out = child.wait_with_output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    if text.contains("sandbox not-enforced") {
+    if cfg!(target_os = "linux") && text.contains("sandbox not-enforced") {
         eprintln!("SKIPPED: Landlock unavailable on this kernel: {text}");
         return;
     }
     assert!(text.contains("read DENIED"), "{text}");
     assert!(text.contains("write DENIED"), "{text}");
+    assert!(text.contains("sandbox enforced"), "{text}");
     // Review finding S-1: no unix sockets (the user's D-Bus, ssh agent).
-    assert!(text.contains("unix_socket DENIED"), "{text}");
+    // On Linux none can even be created; on macOS none outside can be
+    // reached.
+    if cfg!(target_os = "linux") {
+        assert!(text.contains("unix_socket DENIED"), "{text}");
+    }
+    assert!(text.contains("unix_connect DENIED"), "{text}");
     assert!(!fx.ws.join("src/main.py.agent-write").exists());
 }
 

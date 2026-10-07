@@ -784,7 +784,7 @@ mod sys {
     ];
 
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    fn macos_profile(spec: &CommandSpec) -> String {
+    pub(super) fn macos_profile(spec: &CommandSpec) -> String {
         // Seatbelt profile (ADR-0003). Paths are quoted with escaping.
         // Seatbelt matches real paths: `/var/...` is `/private/var/...`.
         let q = |p: &Path| {
@@ -797,34 +797,69 @@ mod sys {
                     .replace('"', "\\\"")
             )
         };
-        let mut prof = String::from("(version 1)(allow default)");
+        // Everything not allowed below is denied (review finding S-4):
+        // in particular Mach services (the pasteboard, Apple Events to
+        // other apps, the keychain daemon, launchd job control), IOKit,
+        // and signals or process inspection outside the sandbox.
+        let mut prof = String::from(
+            "(version 1)(deny default)\
+             (allow process-fork)\
+             (allow signal (target same-sandbox))\
+             (allow process-info* (target same-sandbox))\
+             (allow sysctl-read)\
+             (allow user-preference-read)\
+             (allow ipc-posix-sem)\
+             (allow ipc-posix-shm-read-data (ipc-posix-name \"apple.shm.notification_center\"))\
+             (allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\") \
+                (global-name \"com.apple.system.notification_center\") \
+                (global-name \"com.apple.system.logger\") \
+                (global-name \"com.apple.logd\") \
+                (global-name \"com.apple.cfprefsd.daemon\") \
+                (global-name \"com.apple.cfprefsd.agent\"))\
+             (allow file-read-metadata)\
+             (allow file-read* file-write-data file-ioctl \
+                (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/dtracehelper\"))\
+             (allow file-read* (literal \"/dev/random\") (literal \"/dev/urandom\"))\
+             (allow file-read* file-write* (subpath \"/dev/fd\"))",
+        );
         if spec.network == Network::Deny {
             prof.push_str("(deny network*)");
+        } else {
+            prof.push_str(
+                "(allow network* system-socket)\
+                 (allow mach-lookup (global-name \"com.apple.dnssd.service\") \
+                    (global-name \"com.apple.SystemConfiguration.configd\"))",
+            );
         }
-        if let Some(fs) = &spec.fs {
-            prof.push_str("(deny file-write*)");
-            prof.push_str("(allow file-write* (literal \"/dev/null\")");
-            for p in &fs.read_write {
-                prof.push_str(&format!(" (subpath {})", q(p)));
-            }
-            prof.push(')');
-            // Reads mirror Landlock: nothing but the granted roots and what
-            // macOS needs to start a process. Metadata stays readable, as
-            // path lookup needs it (Landlock likewise does not gate stat).
-            prof.push_str("(deny file-read*)(allow file-read-metadata)");
-            prof.push_str("(allow file-read* (literal \"/\")");
-            for p in fs
-                .read_write
-                .iter()
-                .chain(fs.read_only.iter())
-                .map(PathBuf::as_path)
-                .chain(MACOS_READ.iter().map(Path::new))
-            {
-                if p.exists() {
+        match &spec.fs {
+            None => prof.push_str("(allow process-exec file-read* file-write*)"),
+            Some(fs) => {
+                prof.push_str("(allow file-write*");
+                for p in &fs.read_write {
                     prof.push_str(&format!(" (subpath {})", q(p)));
                 }
+                prof.push(')');
+                // Reads mirror Landlock: nothing but the granted roots and
+                // what macOS needs to start a process. Metadata stays
+                // readable, as path lookup needs it (Landlock likewise does
+                // not gate stat). Programs run only from readable roots.
+                let mut roots = String::new();
+                for p in fs
+                    .read_write
+                    .iter()
+                    .chain(fs.read_only.iter())
+                    .map(PathBuf::as_path)
+                    .chain(MACOS_READ.iter().map(Path::new))
+                {
+                    if p.exists() {
+                        roots.push_str(&format!(" (subpath {})", q(p)));
+                    }
+                }
+                prof.push_str(&format!("(allow file-read* (literal \"/\"){roots})"));
+                prof.push_str(&format!("(allow process-exec{roots})"));
             }
-            prof.push(')');
+        }
+        if spec.fs.is_some() {
             // Keychains stay unreadable even under a granted root.
             prof.push_str("(deny file-read* (subpath \"/Library/Keychains\"))");
             if let Some(home) = std::env::var_os("HOME") {
