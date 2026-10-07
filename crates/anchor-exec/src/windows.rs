@@ -548,6 +548,22 @@ fn pipe(sa: &SECURITY_ATTRIBUTES) -> Result<(OwnedHandle, OwnedHandle), ExecErro
     Ok((r, w))
 }
 
+/// A pipe whose read end the child inherits (its stdin); the write end
+/// stays here.
+fn pipe_in(sa: &SECURITY_ATTRIBUTES) -> Result<(OwnedHandle, OwnedHandle), ExecError> {
+    let (mut r, mut w): (HANDLE, HANDLE) = (std::ptr::null_mut(), std::ptr::null_mut());
+    // SAFETY: valid out-pointers and attributes.
+    if unsafe { CreatePipe(&mut r, &mut w, sa, 0) } == 0 {
+        return Err(unavailable("pipe"));
+    }
+    let (r, w) = (owned(r, "pipe")?, owned(w, "pipe")?);
+    // SAFETY: a handle we own.
+    if unsafe { SetHandleInformation(w.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return Err(unavailable("pipe"));
+    }
+    Ok((r, w))
+}
+
 fn job(limits: &Limits) -> Result<OwnedHandle, ExecError> {
     // SAFETY: anonymous job with default security.
     let job = owned(
@@ -653,6 +669,149 @@ impl Drop for Attributes {
     }
 }
 
+/// What [`launch`] starts: a program in an AppContainer (`sec`), inside
+/// `job` from its first instruction, with only its stdio inherited.
+struct Launch<'a> {
+    /// The real (canonical) program path.
+    program: &'a Path,
+    args: &'a [String],
+    env: &'a [(String, String)],
+    cwd: &'a Path,
+    sec: &'a SECURITY_CAPABILITIES,
+    job: &'a OwnedHandle,
+    /// A pipe for stdin (a service the caller talks to), or `NUL`.
+    piped_stdin: bool,
+}
+
+struct Launched {
+    process: OwnedHandle,
+    pid: u32,
+    stdin: Option<OwnedHandle>,
+    stdout: OwnedHandle,
+    stderr: OwnedHandle,
+}
+
+fn launch(l: &Launch<'_>) -> Result<Launched, ExecError> {
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 1,
+    };
+    let (out_r, out_w) = pipe(&sa)?;
+    let (err_r, err_w) = pipe(&sa)?;
+    let nul = wide(OsStr::new("NUL"));
+    let (stdin, stdin_w) = if l.piped_stdin {
+        let (r, w) = pipe_in(&sa)?;
+        (r, Some(w))
+    } else {
+        let h = owned(
+            // SAFETY: valid name and attributes.
+            unsafe {
+                CreateFileW(
+                    nul.as_ptr(),
+                    GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    &sa,
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            },
+            "NUL",
+        )?;
+        (h, None)
+    };
+
+    let inherit: [HANDLE; 3] = [
+        stdin.as_raw_handle(),
+        out_w.as_raw_handle(),
+        err_w.as_raw_handle(),
+    ];
+    let jobs: [HANDLE; 1] = [l.job.as_raw_handle()];
+    let mut attrs = Attributes::new(3)?;
+    // SAFETY: the values live until CreateProcessW returns.
+    unsafe {
+        attrs.set(
+            PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+            l.sec,
+            std::mem::size_of::<SECURITY_CAPABILITIES>(),
+        )?;
+        attrs.set(
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inherit.as_ptr(),
+            std::mem::size_of_val(&inherit),
+        )?;
+        attrs.set(
+            PROC_THREAD_ATTRIBUTE_JOB_LIST,
+            jobs.as_ptr(),
+            std::mem::size_of_val(&jobs),
+        )?;
+    }
+    let mut si = STARTUPINFOEXW::default();
+    si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = inherit[0];
+    si.StartupInfo.hStdOutput = inherit[1];
+    si.StartupInfo.hStdError = inherit[2];
+    si.lpAttributeList = attrs.list();
+
+    let program = plain(l.program);
+    let app = wide(program.as_os_str());
+    let mut cmdline = wide(OsStr::new(&command_line(&program, l.args)));
+    let env = env_block(l.env);
+    let cwd = wide(plain(l.cwd).as_os_str());
+    let mut pi = PROCESS_INFORMATION {
+        hProcess: std::ptr::null_mut(),
+        hThread: std::ptr::null_mut(),
+        dwProcessId: 0,
+        dwThreadId: 0,
+    };
+    // SAFETY: every pointer is valid for the call; the attribute values
+    // are alive; handles in the list are inheritable.
+    let ok = unsafe {
+        CreateProcessW(
+            app.as_ptr(),
+            cmdline.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+            env.as_ptr().cast(),
+            cwd.as_ptr(),
+            &si.StartupInfo,
+            &mut pi,
+        )
+    };
+    if ok == 0 {
+        // SAFETY: no preconditions.
+        let code = unsafe { GetLastError() };
+        // Names only (never values), to diagnose environment errors.
+        let block = String::from_utf16_lossy(&env);
+        let names: Vec<&str> = block
+            .split('\0')
+            .filter_map(|e| e.split('=').next())
+            .filter(|n| !n.is_empty())
+            .collect();
+        return Err(ExecError::Spawn(format!(
+            "CreateProcessW in AppContainer: {} (environment: {})",
+            IoError::from_raw_os_error(code as i32),
+            names.join(", ")
+        )));
+    }
+    let process = owned(pi.hProcess, "process")?;
+    drop(owned(pi.hThread, "thread")?);
+    drop(attrs);
+    // The child holds its own copies; ours would keep the pipes open.
+    drop((stdin, out_w, err_w));
+    Ok(Launched {
+        process,
+        pid: pi.dwProcessId,
+        stdin: stdin_w,
+        stdout: out_r,
+        stderr: err_r,
+    })
+}
+
 /// Run a confined command (network denied and/or filesystem confined).
 pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
     let Some(fs) = &spec.fs else {
@@ -721,113 +880,18 @@ pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
         Reserved: 0,
     };
 
-    let sa = SECURITY_ATTRIBUTES {
-        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: std::ptr::null_mut(),
-        bInheritHandle: 1,
-    };
-    let (out_r, out_w) = pipe(&sa)?;
-    let (err_r, err_w) = pipe(&sa)?;
-    let nul = wide(OsStr::new("NUL"));
-    // SAFETY: valid name and attributes.
-    let stdin = owned(
-        unsafe {
-            CreateFileW(
-                nul.as_ptr(),
-                GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                &sa,
-                OPEN_EXISTING,
-                0,
-                std::ptr::null_mut(),
-            )
-        },
-        "NUL",
-    )?;
     let job = job(&spec.limits)?;
-
-    let inherit: [HANDLE; 3] = [
-        stdin.as_raw_handle(),
-        out_w.as_raw_handle(),
-        err_w.as_raw_handle(),
-    ];
-    let jobs: [HANDLE; 1] = [job.as_raw_handle()];
-    let mut attrs = Attributes::new(3)?;
-    // SAFETY: the values live until CreateProcessW returns.
-    unsafe {
-        attrs.set(
-            PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-            &sec,
-            std::mem::size_of::<SECURITY_CAPABILITIES>(),
-        )?;
-        attrs.set(
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            inherit.as_ptr(),
-            std::mem::size_of_val(&inherit),
-        )?;
-        attrs.set(
-            PROC_THREAD_ATTRIBUTE_JOB_LIST,
-            jobs.as_ptr(),
-            std::mem::size_of_val(&jobs),
-        )?;
-    }
-    let mut si = STARTUPINFOEXW::default();
-    si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    si.StartupInfo.hStdInput = inherit[0];
-    si.StartupInfo.hStdOutput = inherit[1];
-    si.StartupInfo.hStdError = inherit[2];
-    si.lpAttributeList = attrs.list();
-
-    let program = plain(&real);
-    let app = wide(program.as_os_str());
-    let mut cmdline = wide(OsStr::new(&command_line(&program, &spec.args)));
-    let env = env_block(&spec.env);
-    let cwd = wide(plain(&spec.cwd).as_os_str());
-    let mut pi = PROCESS_INFORMATION {
-        hProcess: std::ptr::null_mut(),
-        hThread: std::ptr::null_mut(),
-        dwProcessId: 0,
-        dwThreadId: 0,
-    };
     let start = Instant::now();
-    // SAFETY: every pointer is valid for the call; the attribute values
-    // are alive; handles in the list are inheritable.
-    let ok = unsafe {
-        CreateProcessW(
-            app.as_ptr(),
-            cmdline.as_mut_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-            env.as_ptr().cast(),
-            cwd.as_ptr(),
-            &si.StartupInfo,
-            &mut pi,
-        )
-    };
-    if ok == 0 {
-        // SAFETY: no preconditions.
-        let code = unsafe { GetLastError() };
-        // Names only (never values), to diagnose environment errors.
-        let block = String::from_utf16_lossy(&env);
-        let names: Vec<&str> = block
-            .split('\0')
-            .filter_map(|e| e.split('=').next())
-            .filter(|n| !n.is_empty())
-            .collect();
-        return Err(ExecError::Spawn(format!(
-            "CreateProcessW in AppContainer: {} (environment: {})",
-            IoError::from_raw_os_error(code as i32),
-            names.join(", ")
-        )));
-    }
-    let process = owned(pi.hProcess, "process")?;
-    drop(owned(pi.hThread, "thread")?);
-    drop(attrs);
-    // The child holds its own copies; ours would keep the pipes open.
-    drop((stdin, out_w, err_w));
+    let child = launch(&Launch {
+        program: &real,
+        args: &spec.args,
+        env: &spec.env,
+        cwd: &spec.cwd,
+        sec: &sec,
+        job: &job,
+        piped_stdin: false,
+    })?;
+    let (process, out_r, err_r) = (child.process, child.stdout, child.stderr);
 
     let cap = spec.limits.max_output_bytes;
     let out_reader = spawn_reader(Some(std::fs::File::from(out_r)), cap);
@@ -926,4 +990,177 @@ pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
         elapsed: start.elapsed(),
         rusage,
     })
+}
+
+/// A long-lived process confined in an AppContainer that talks over its
+/// stdio: the agent runtime on Windows (Layer 2, AR-7). Unlike a command
+/// it gets no file grants at all (beyond reading its own executable's
+/// directory) and no resource limits beyond one process, so it cannot
+/// start others; `internet` adds the `internetClient` capability (outbound
+/// internet, never loopback or the private network).
+#[derive(Debug, Clone)]
+pub struct IsolatedSpec {
+    pub program: std::path::PathBuf,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    /// Stable AppContainer profile name.
+    pub profile: String,
+    pub internet: bool,
+}
+
+/// A running [`IsolatedSpec`] process. Dropping it kills the process
+/// (the job is kill-on-close).
+pub struct IsolatedChild {
+    pub stdin: Option<std::fs::File>,
+    pub stdout: Option<std::fs::File>,
+    pub stderr: Option<std::fs::File>,
+    process: OwnedHandle,
+    job: OwnedHandle,
+    pid: u32,
+}
+
+impl std::fmt::Debug for IsolatedChild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IsolatedChild")
+            .field("pid", &self.pid)
+            .finish()
+    }
+}
+
+impl IsolatedChild {
+    pub fn id(&self) -> u32 {
+        self.pid
+    }
+
+    /// Kill the process (and anything in its job).
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        // SAFETY: a job handle we own.
+        if unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) } == 0 {
+            return Err(IoError::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Wait for the process to exit; its exit code.
+    pub fn wait(&mut self) -> std::io::Result<i32> {
+        // SAFETY: a process handle we own.
+        if unsafe { WaitForSingleObject(self.process.as_raw_handle(), u32::MAX) } != WAIT_OBJECT_0 {
+            return Err(IoError::last_os_error());
+        }
+        let mut code = 0u32;
+        // SAFETY: as above.
+        if unsafe { GetExitCodeProcess(self.process.as_raw_handle(), &mut code) } == 0 {
+            return Err(IoError::last_os_error());
+        }
+        Ok(code as i32)
+    }
+}
+
+/// Start `spec` confined; see [`IsolatedSpec`].
+pub fn spawn_isolated(spec: &IsolatedSpec) -> Result<IsolatedChild, ExecError> {
+    let real = std::fs::canonicalize(&spec.program).map_err(|e| ExecError::Io(e.to_string()))?;
+    let ext = real
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase());
+    if ext.as_deref() != Some("exe") {
+        return Err(ExecError::SandboxUnavailable(format!(
+            "only .exe programs run isolated, not {}",
+            real.display()
+        )));
+    }
+    let dir = real
+        .parent()
+        .ok_or_else(|| ExecError::SandboxUnavailable("program has no directory".into()))?
+        .to_path_buf();
+    let sid = container_sid(&spec.profile)?;
+    let read = read_capability()?;
+    {
+        let _guard = GRANTS.lock().unwrap_or_else(|e| e.into_inner());
+        // Its own executable, through the shared read capability (a
+        // toolchain's PATH directory usually has it already).
+        grant(&dir, read.ptr, READ_EXECUTE).map_err(ExecError::SandboxUnavailable)?;
+    }
+    let internet;
+    let mut caps: Vec<SID_AND_ATTRIBUTES> = vec![SID_AND_ATTRIBUTES {
+        Sid: read.ptr,
+        Attributes: SE_GROUP_ENABLED,
+    }];
+    if spec.internet {
+        internet = string_sid(INTERNET_CLIENT_SID)?;
+        caps.push(SID_AND_ATTRIBUTES {
+            Sid: internet.ptr,
+            Attributes: SE_GROUP_ENABLED,
+        });
+    }
+    let sec = SECURITY_CAPABILITIES {
+        AppContainerSid: sid.ptr,
+        Capabilities: caps.as_mut_ptr(),
+        CapabilityCount: caps.len() as u32,
+        Reserved: 0,
+    };
+    let job = service_job()?;
+    let child = launch(&Launch {
+        program: &real,
+        args: &spec.args,
+        env: &spec.env,
+        // Its own directory: readable, and nothing else is.
+        cwd: &dir,
+        sec: &sec,
+        job: &job,
+        piped_stdin: true,
+    })?;
+    Ok(IsolatedChild {
+        stdin: child.stdin.map(std::fs::File::from),
+        stdout: Some(std::fs::File::from(child.stdout)),
+        stderr: Some(std::fs::File::from(child.stderr)),
+        process: child.process,
+        job,
+        pid: child.pid,
+    })
+}
+
+/// The job of an isolated service: one process, killed with the job,
+/// the same UI restrictions as commands.
+fn service_job() -> Result<OwnedHandle, ExecError> {
+    // SAFETY: anonymous job with default security.
+    let job = owned(
+        unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) },
+        "job object",
+    )?;
+    // SAFETY: zeroed is a valid initial value for this plain struct.
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    let b = &mut info.BasicLimitInformation;
+    b.LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+    b.ActiveProcessLimit = 1;
+    let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS {
+        UIRestrictionsClass: JOB_OBJECT_UILIMIT_DESKTOP
+            | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
+            | JOB_OBJECT_UILIMIT_EXITWINDOWS
+            | JOB_OBJECT_UILIMIT_GLOBALATOMS
+            | JOB_OBJECT_UILIMIT_HANDLES
+            | JOB_OBJECT_UILIMIT_READCLIPBOARD
+            | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
+            | JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+    };
+    // SAFETY: valid job handle and correctly sized structs.
+    unsafe {
+        if SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) == 0
+            || SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectBasicUIRestrictions,
+                (&ui as *const JOBOBJECT_BASIC_UI_RESTRICTIONS).cast(),
+                std::mem::size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
+            ) == 0
+        {
+            return Err(unavailable("job limits"));
+        }
+    }
+    Ok(job)
 }

@@ -95,7 +95,8 @@ Confined commands run in a per-workspace AppContainer (no capabilities
 with the network denied) inside a Job Object attached at creation, with
 explicit ACL grants for the workspace and PATH directories, an explicit
 handle list, `CommandLineToArgvW`-exact quoting and batch files refused.
-The agent runtime is not yet confined on Windows (AR-7). WSL2 was
+The agent runtime runs in its own AppContainer on Windows, except with a
+loopback provider (AR-7). WSL2 was
 rejected as the default because of the heavy dependency.
 
 ## Alternatives rejected
@@ -120,7 +121,7 @@ The residual risks are recorded, with what still holds, in
   delegation is available.
 - AR-14..AR-16: Windows `anchor-fs` and runner hygiene; macOS
   preference reads.
-- AR-7: Windows runtime unconfined. AR-8: Linux `/proc` command lines.
+- AR-7: Windows runtime unconfined with a loopback provider. AR-8: Linux `/proc` command lines.
   AR-13: Windows ACE persistence.
 - Measured performance cost: not yet measured under realistic load (§17 Q3
   requires it).

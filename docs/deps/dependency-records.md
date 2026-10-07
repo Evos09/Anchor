@@ -48,6 +48,10 @@ features of the already-vetted `windows-sys` 0.61.2:
 Features select bindings from the same crate, which has the same license
 and source. `cargo deny check` covers the tree unchanged.
 
+`anchor-runtime` uses `Win32_Foundation`, `Win32_Security` and
+`Win32_System_Threading` of the same crate, to read its own token
+(`TokenIsAppContainer`) on Windows.
+
 The new workspace crate `anchor-sandbox-validation` (`publish = false`)
 uses only `libc`, plus `anchor-exec` and `tempfile` for tests, all
 already vetted.

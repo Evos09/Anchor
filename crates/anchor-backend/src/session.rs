@@ -2,9 +2,9 @@
 //! speaks the NDJSON protocol with it, and routes every request through the
 //! [`Mediator`].
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use anchor_checkpoint::CheckpointStore;
 use anchor_protocol::{
@@ -103,6 +103,164 @@ fn runtime_env(roles_toml: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Providers (and proxies) on the loopback interface: an AppContainer can
+/// never reach them, so on Windows such a session's runtime runs
+/// unconfined, warned and audited (AR-7, ADR-0026).
+pub fn loopback_endpoints(roles_toml: &str, env: &[(String, String)]) -> Vec<String> {
+    fn is_loopback(url: &str) -> bool {
+        let rest = url.split_once("://").map_or(url, |(_, r)| r);
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        let host = if let Some(v6) = host_port.strip_prefix('[') {
+            v6.split(']').next().unwrap_or("")
+        } else {
+            host_port.split(':').next().unwrap_or("")
+        };
+        let host = host.to_ascii_lowercase();
+        host == "localhost"
+            || host.ends_with(".localhost")
+            || host == "::1"
+            || host == "0.0.0.0"
+            || host
+                .parse::<std::net::Ipv4Addr>()
+                .is_ok_and(|a| a.is_loopback())
+    }
+    let mut found = Vec::new();
+    if let Ok(v) = roles_toml.parse::<toml::Table>()
+        && let Some(providers) = v.get("providers").and_then(|p| p.as_table())
+    {
+        for (name, p) in providers {
+            if let Some(u) = p.get("base_url").and_then(|u| u.as_str())
+                && is_loopback(u)
+            {
+                found.push(format!("provider {name} ({u})"));
+            }
+        }
+    }
+    for (k, v) in env {
+        if k.to_ascii_lowercase().ends_with("_proxy")
+            && !k.eq_ignore_ascii_case("no_proxy")
+            && is_loopback(v)
+        {
+            found.push(format!("{k} ({v})"));
+        }
+    }
+    found
+}
+
+/// The runtime process, and how it was started.
+pub struct RuntimeProcess {
+    pub stdin: Option<Box<dyn Write + Send>>,
+    pub stdout: Option<Box<dyn Read + Send>>,
+    pub stderr: Option<Box<dyn Read + Send>>,
+    /// Started inside an AppContainer by the backend (Windows). On Linux
+    /// and macOS the runtime confines itself, so this stays false there.
+    pub isolated: bool,
+    child: RuntimeChild,
+}
+
+impl std::fmt::Debug for RuntimeProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeProcess")
+            .field("pid", &self.id())
+            .field("isolated", &self.isolated)
+            .finish()
+    }
+}
+
+enum RuntimeChild {
+    Plain(Child),
+    #[cfg(windows)]
+    Isolated(anchor_exec::IsolatedChild),
+}
+
+impl RuntimeProcess {
+    pub fn id(&self) -> u32 {
+        match &self.child {
+            RuntimeChild::Plain(c) => c.id(),
+            #[cfg(windows)]
+            RuntimeChild::Isolated(c) => c.id(),
+        }
+    }
+
+    pub fn kill(&mut self) {
+        match &mut self.child {
+            RuntimeChild::Plain(c) => {
+                let _ = c.kill();
+            }
+            #[cfg(windows)]
+            RuntimeChild::Isolated(c) => {
+                let _ = c.kill();
+            }
+        }
+    }
+
+    pub fn wait(&mut self) {
+        match &mut self.child {
+            RuntimeChild::Plain(c) => {
+                let _ = c.wait();
+            }
+            #[cfg(windows)]
+            RuntimeChild::Isolated(c) => {
+                let _ = c.wait();
+            }
+        }
+    }
+}
+
+/// Start `anchor-agent` with `args` and exactly `env`. On Windows it runs
+/// in its own AppContainer (`internetClient` only, no file grants) unless
+/// `unconfined` (a loopback provider; see [`loopback_endpoints`]). On
+/// Linux and macOS it sandboxes itself before reading its first frame.
+pub fn spawn_runtime(
+    agent_bin: &Path,
+    args: &[String],
+    env: Vec<(String, String)>,
+    unconfined: bool,
+) -> std::io::Result<RuntimeProcess> {
+    #[cfg(windows)]
+    if !unconfined {
+        let spec = anchor_exec::IsolatedSpec {
+            program: agent_bin.to_path_buf(),
+            args: args.to_vec(),
+            env,
+            profile: "anchor.runtime".into(),
+            internet: true,
+        };
+        let mut c = anchor_exec::spawn_isolated(&spec).map_err(std::io::Error::other)?;
+        return Ok(RuntimeProcess {
+            stdin: c.stdin.take().map(|f| Box::new(f) as Box<dyn Write + Send>),
+            stdout: c.stdout.take().map(|f| Box::new(f) as Box<dyn Read + Send>),
+            stderr: c.stderr.take().map(|f| Box::new(f) as Box<dyn Read + Send>),
+            isolated: true,
+            child: RuntimeChild::Isolated(c),
+        });
+    }
+    let _ = unconfined;
+    let mut cmd = Command::new(agent_bin);
+    // Its own process group: `kill(0, ..)` from the runtime then reaches
+    // only itself, never the backend's group (round 2 finding K-2).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut c = cmd
+        .args(args)
+        .env_clear()
+        .envs(env)
+        // The runtime never needs the workspace as its cwd.
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    Ok(RuntimeProcess {
+        stdin: c.stdin.take().map(|f| Box::new(f) as Box<dyn Write + Send>),
+        stdout: c.stdout.take().map(|f| Box::new(f) as Box<dyn Read + Send>),
+        stderr: c.stderr.take().map(|f| Box::new(f) as Box<dyn Read + Send>),
+        isolated: false,
+        child: RuntimeChild::Plain(c),
+    })
+}
+
 /// Checkpoints kept per session (the newest).
 const CHECKPOINTS_KEPT: usize = 8;
 
@@ -171,8 +329,8 @@ fn forward_stderr(stderr: impl std::io::Read, tx: &std::sync::mpsc::SyncSender<S
 }
 
 struct Wire {
-    child: Child,
-    stdin: ChildStdin,
+    child: RuntimeProcess,
+    stdin: Box<dyn Write + Send>,
     next_id: u64,
 }
 
@@ -191,21 +349,31 @@ pub fn run(
     checkpoints: &CheckpointStore,
 ) -> Result<SessionReport, SessionError> {
     mediator.set_session(&cfg.session_id);
-    let mut cmd = Command::new(&cfg.agent_bin);
-    // Its own process group: `kill(0, ..)` from the runtime then reaches
-    // only itself, never the backend's group (round 2 finding K-2).
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    let mut child = cmd
-        .env_clear()
-        .envs(runtime_env(&cfg.roles_toml))
-        // The runtime never needs the workspace as its cwd.
-        .current_dir(std::env::temp_dir())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let env = runtime_env(&cfg.roles_toml);
+    // On Windows a loopback provider cannot be reached from an
+    // AppContainer: that runtime runs unconfined, said and audited (AR-7).
+    let loopback = if cfg!(windows) {
+        loopback_endpoints(&cfg.roles_toml, &env)
+    } else {
+        Vec::new()
+    };
+    let mut child = spawn_runtime(&cfg.agent_bin, &[], env, !loopback.is_empty())
         .map_err(|e| SessionError::Spawn(cfg.agent_bin.clone(), e))?;
+    if !loopback.is_empty() {
+        mediator.interact().notify(&format!(
+            "warning: the agent runtime runs without its sandbox, because a Windows \
+             AppContainer cannot reach loopback endpoints: {}",
+            loopback.join(", ")
+        ));
+        let _ = mediator.log(
+            "runtime_unconfined",
+            serde_json::json!({
+                "session_id": cfg.session_id,
+                "reason": "loopback_endpoint",
+                "endpoints": loopback,
+            }),
+        );
+    }
     let stdout = child.stdout.take().ok_or(SessionError::RuntimeExited)?;
     let stderr = child.stderr.take().ok_or(SessionError::RuntimeExited)?;
     let stdin = child.stdin.take().ok_or(SessionError::RuntimeExited)?;
@@ -233,6 +401,7 @@ pub fn run(
         serde_json::json!({
             "session_id": cfg.session_id,
             "runtime_pid": report.runtime_pid,
+            "runtime_isolated": wire.child.isolated,
             "review": cfg.review.is_some(),
         }),
     );
@@ -433,13 +602,13 @@ pub fn run(
     })();
 
     if result.is_err() {
-        let _ = wire.child.kill();
+        wire.child.kill();
     }
     if let Some((stop, t)) = ticker {
         drop(stop);
         let _ = t.join();
     }
-    let _ = wire.child.wait();
+    wire.child.wait();
     let _ = stderr_thread.join();
     while let Ok(line) = rx.try_recv() {
         mediator.interact().notify(&format!("[runtime] {line}"));
@@ -534,5 +703,58 @@ mod tests {
         forward_stderr(&small[..], &tx);
         drop(tx);
         assert_eq!(t.join().unwrap(), ["a", "b", "c"]);
+    }
+}
+
+#[cfg(test)]
+mod loopback_tests {
+    use super::loopback_endpoints;
+
+    /// Which runtimes Windows must leave outside the AppContainer: those
+    /// with a provider or proxy on loopback, and only those (AR-7).
+    #[test]
+    fn loopback_endpoints_are_found() {
+        let roles = r#"
+[providers.local]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
+[providers.other]
+kind = "openai_compatible"
+base_url = "http://LOCALHOST:8080/v1"
+[providers.v6]
+kind = "openai_compatible"
+base_url = "http://[::1]:1234/v1"
+[providers.hosted]
+kind = "openai_compatible"
+base_url = "https://api.example.com/v1"
+[providers.tricky]
+kind = "openai_compatible"
+base_url = "https://user@127.0.0.1.example.com/v1"
+"#;
+        let env = vec![
+            (
+                "HTTPS_PROXY".to_string(),
+                "http://127.0.0.2:3128".to_string(),
+            ),
+            ("NO_PROXY".to_string(), "localhost".to_string()),
+            (
+                "http_proxy".to_string(),
+                "http://proxy.corp:3128".to_string(),
+            ),
+        ];
+        let found = loopback_endpoints(roles, &env);
+        let names: Vec<&str> = found
+            .iter()
+            .map(|f| f.split(' ').nth(1).unwrap_or(f.as_str()))
+            .collect();
+        assert_eq!(found.len(), 4, "{found:?}");
+        for n in ["local", "other", "v6"] {
+            assert!(names.contains(&n), "{found:?}");
+        }
+        assert!(
+            found.iter().any(|f| f.starts_with("HTTPS_PROXY")),
+            "{found:?}"
+        );
+        assert!(loopback_endpoints("[providers.h]\nbase_url = \"https://x.y/v1\"", &[]).is_empty());
     }
 }

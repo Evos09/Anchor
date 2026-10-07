@@ -405,6 +405,40 @@ fn runtime_process_cannot_touch_the_filesystem() {
     assert!(!fx.ws.join("src/main.py.agent-write").exists());
 }
 
+/// Windows: the backend starts the runtime in its own AppContainer, where
+/// it can neither read nor write the workspace (AR-7, ADR-0026).
+#[cfg(windows)]
+#[test]
+fn runtime_process_cannot_touch_the_filesystem_windows() {
+    use std::io::{Read, Write};
+    let fx = fixture();
+    let target = fx.ws.join("src/main.py");
+    let mut child = session::spawn_runtime(
+        &agent_bin(),
+        &["--selftest-fs-denied".to_string()],
+        Vec::new(),
+        false,
+    )
+    .unwrap();
+    assert!(child.isolated);
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, "{}\n", target.display()).unwrap();
+    }
+    let mut text = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut text)
+        .unwrap();
+    child.wait();
+    assert!(text.contains("sandbox enforced"), "{text}");
+    assert!(text.contains("read DENIED"), "{text}");
+    assert!(text.contains("write DENIED"), "{text}");
+    assert!(!fx.ws.join("src/main.py.agent-write").exists());
+}
+
 /// Spec §5.4: a session that fills the context pauses and writes a
 /// threshold checkpoint; a fresh session seeded from it resumes.
 #[test]

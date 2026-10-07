@@ -106,9 +106,13 @@ through `crates/anchor-exec/src/windows.rs`.
   run (AR-13). Cleanup
   belongs to a future `anchor workspace forget`: remove the ACEs, then
   `DeleteAppContainerProfile`.
-- **Runtime.** The agent runtime (Layer 2) is not yet confined on Windows
-  (AR-7). The plan is a second AppContainer with only `internetClient`
-  and no file grants.
+- **Runtime.** The backend starts the agent runtime (Layer 2) in its own
+  AppContainer, `anchor.runtime`: `internetClient` only, no file grants
+  beyond reading its executable's directory, a job of one process
+  (`anchor_exec::spawn_isolated`). The runtime checks its token
+  (`TokenIsAppContainer`) and reports it. A loopback provider cannot be
+  reached from an AppContainer, so such a session's runtime runs
+  unconfined, warned and audited (AR-7).
 - **Junction swaps.** `anchor-fs` pins directory chains on Windows, so a
   junction swapped mid-operation cannot redirect the backend's own file
   operations (review finding P-3). This matters more now that Windows

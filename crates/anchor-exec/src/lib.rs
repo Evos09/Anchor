@@ -1364,6 +1364,8 @@ pub use sys::{effective_uid, group_alive, running_as_root};
 
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+pub use windows::{IsolatedChild, IsolatedSpec, spawn_isolated};
 
 #[cfg(test)]
 mod tests;

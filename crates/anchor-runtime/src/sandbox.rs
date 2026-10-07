@@ -11,6 +11,13 @@
 //! On macOS the runtime applies a Seatbelt profile to itself
 //! (`sandbox_init`, [`MACOS_PROFILE`]) with the same intent, and likewise
 //! refuses to run without it.
+//!
+//! On Windows a process cannot confine itself: the backend starts the
+//! runtime inside an AppContainer with only the `internetClient`
+//! capability and no file grants (ADR-0026). The runtime reports whether
+//! its token is an AppContainer token. It runs unconfined only when a role
+//! uses a loopback provider, which no AppContainer may reach; the backend
+//! then warns and audits it (AR-7).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxStatus {
@@ -129,7 +136,40 @@ pub fn restrict_self() -> SandboxStatus {
     SandboxStatus::NotEnforced(msg)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+pub fn restrict_self() -> SandboxStatus {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenIsAppContainer};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: the current-process pseudo handle and a valid out-pointer.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return SandboxStatus::NotEnforced("cannot open the process token".into());
+    }
+    let mut is_ac: u32 = 0;
+    let mut len = 0u32;
+    // SAFETY: a token handle we own and a correctly sized out-buffer.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenIsAppContainer,
+            (&mut is_ac as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+            &mut len,
+        )
+    };
+    // SAFETY: the handle was opened above.
+    unsafe { CloseHandle(token) };
+    match (ok, is_ac) {
+        (0, _) => SandboxStatus::NotEnforced("cannot read the process token".into()),
+        (_, 0) => SandboxStatus::NotEnforced(
+            "not started in an AppContainer (a loopback provider; ADR-0026, AR-7)".into(),
+        ),
+        _ => SandboxStatus::FullyEnforced,
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn restrict_self() -> SandboxStatus {
     SandboxStatus::NotEnforced(
         "no self-sandbox on this platform yet; isolation relies on the process boundary (ADR-0003)"

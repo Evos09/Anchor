@@ -289,7 +289,9 @@ every §11 threat to its test and its per-platform status.
 
 **Known platform gaps:**
 
-- **Windows runtime:** the agent runtime is not yet confined (AR-7).
+- **Windows runtime:** the agent runtime runs in an AppContainer, but
+  unconfined (warned and audited) when a role uses a loopback provider,
+  which no AppContainer can reach (AR-7).
 - The OpenAI-compatible adapter has not been run against a live endpoint:
   there was no local server or API key in the build environment.
 

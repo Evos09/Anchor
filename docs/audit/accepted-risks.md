@@ -18,7 +18,7 @@ snapshots undo. An accepted risk weakens one layer, never all of them.
 | AR-4 | Medium | V-1 | all | Runner-tampering detection is pattern-based |
 | AR-5 | Low | T-6 | all | Audit-log volume and runtime-reported cost are not bounded |
 | AR-6 | Medium | P-5 | all | A huge number of workspace entries slows or blocks snapshots |
-| AR-7 | Medium | — | Windows | The agent runtime (Layer 2) runs unconfined |
+| AR-7 | Low | — | Windows | The agent runtime runs unconfined only with a loopback provider |
 | AR-8 | Low | S-9 | Linux | `/proc` is readable: other processes' command lines |
 | AR-9 | Low | T-7, T-8 | all | Deletion confirmations unaudited; PATH inside the workspace |
 | AR-10 | Low | H-5..H-9, U-2..U-4 | all | Hub and dashboard hygiene items |
@@ -121,18 +121,28 @@ validation suite check it.
 - **Would close it.** An entry-count limit per turn that fails the turn
   with a clear error.
 
-### AR-7: Windows agent runtime unconfined
+### AR-7: Windows agent runtime unconfined with a loopback provider
 
-- **Exposure.** On Windows the `anchor-agent` process (which talks to
-  model providers) runs with the user's rights. Its code is Anchor's
-  own, but a memory-safety bug reachable from model output would not be
-  contained.
+- **Exposure.** Since Phase 7 the backend starts `anchor-agent` on
+  Windows in its own AppContainer (`anchor.runtime`): the
+  `internetClient` capability only, no file grants beyond reading its own
+  executable's directory, one process, no UI access
+  (`anchor_exec::spawn_isolated`, ADR-0026). Windows does not let an
+  AppContainer reach loopback. A session whose roles name a provider on
+  127.0.0.1, `localhost` or `::1` (a local Ollama, say), or a proxy there,
+  therefore runs its runtime unconfined, with the user's rights. The user
+  chose this over refusing local models (2026-10-07). The backend says so
+  at start and audits it (`runtime_unconfined`, with the endpoints).
 - **Still holds.** The runtime has no file tools: every file operation
   goes through the backend's mediator and policy, and every command
-  through the AppContainer sandbox. The runtime's own code is safe Rust
-  apart from the platform sandbox calls in `sandbox.rs`.
-- **Would close it.** Launch the runtime in its own AppContainer with
-  only the `internetClient` capability (planned; ADR-0026).
+  through the AppContainer sandbox. Its own code is safe Rust apart from
+  the platform calls in `sandbox.rs`.
+- **Would close it.** A loopback exemption for the `anchor.runtime`
+  profile (`NetworkIsolationSetAppContainerConfig`, administrator only),
+  or a relay in the backend that forwards the provider connection.
+- **Tests.** `runtime_process_cannot_touch_the_filesystem_windows`
+  (sandboxed: reads and writes denied, token is an AppContainer token);
+  `loopback_endpoints_are_found`.
 
 ### AR-8: `/proc` readable on Linux
 
