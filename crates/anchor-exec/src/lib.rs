@@ -134,6 +134,8 @@ pub enum NetworkMethod {
     Seccomp,
     /// macOS Seatbelt `(deny network*)`.
     Seatbelt,
+    /// Windows AppContainer without network capabilities.
+    AppContainer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -249,6 +251,10 @@ pub fn run(spec: &CommandSpec) -> Result<Output, ExecError> {
     }
     if spec.args.iter().any(|a| a.contains('\0')) {
         return Err(ExecError::NulInArgument);
+    }
+    #[cfg(windows)]
+    if spec.network == Network::Deny || spec.fs.is_some() {
+        return windows::run_confined(spec);
     }
     let (mut cmd, isolation, steps) = sys::build(spec)?;
     cmd.current_dir(&spec.cwd)
@@ -1107,10 +1113,10 @@ mod sys {
     pub(super) fn build(
         spec: &CommandSpec,
     ) -> Result<(Command, Isolation, Option<StepPipe>), ExecError> {
+        // Confined commands never get here (`windows::run_confined`).
         if spec.network == Network::Deny || spec.fs.is_some() {
             return Err(ExecError::SandboxUnavailable(
-                "network/filesystem isolation on Windows (AppContainer) is not implemented yet; refusing"
-                    .into(),
+                "confined commands run through the AppContainer path".into(),
             ));
         }
         let mut c = Command::new(&spec.program);
@@ -1157,25 +1163,205 @@ mod sys {
 
 pub use sys::{effective_uid, group_alive, running_as_root};
 
+#[cfg(windows)]
+mod windows;
+
 #[cfg(test)]
 mod tests;
 
 #[cfg(all(test, windows))]
+#[allow(clippy::unwrap_used)]
 mod tests_windows {
     use super::*;
 
-    /// Until AppContainer support exists, confined commands must refuse.
-    #[test]
-    fn windows_refuses_confined_commands() {
-        let spec = CommandSpec {
-            program: PathBuf::from(r"C:\Windows\System32\cmd.exe"),
-            args: vec![],
-            cwd: PathBuf::from(r"C:\"),
-            env: vec![],
-            limits: Limits::default(),
+    fn path_var() -> String {
+        std::env::var("PATH").unwrap_or_default()
+    }
+
+    /// A confined spec in `ws`, with system and PATH directories readable
+    /// (as the backend grants them).
+    fn confined(program: &str, args: &[&str], ws: &Path) -> CommandSpec {
+        CommandSpec {
+            program: resolve_program(program, &path_var()).unwrap(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            cwd: ws.to_path_buf(),
+            env: vec![("PATH".into(), path_var())],
+            limits: Limits {
+                wall_timeout: Duration::from_secs(60),
+                ..Limits::default()
+            },
             network: Network::Deny,
-            fs: None,
+            fs: Some(FsConfinement {
+                read_write: vec![ws.to_path_buf()],
+                read_only: std::env::split_paths(&path_var())
+                    .filter(|p| p.is_absolute() && p.exists())
+                    .collect(),
+            }),
+        }
+    }
+
+    fn text(o: &Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        )
+    }
+
+    #[test]
+    fn command_lines_round_trip_through_argv_quoting() {
+        let mut s = String::new();
+        for (arg, want) in [
+            ("plain", "plain"),
+            ("", "\"\""),
+            ("two words", "\"two words\""),
+            (r#"say "hi""#, r#""say \"hi\"""#),
+            (r"C:\dir\", r"C:\dir\"),
+            (r"C:\a dir\", r#""C:\a dir\\""#),
+            (r#"x\"y"#, r#""x\\\"y""#),
+        ] {
+            s.clear();
+            windows::quote_arg(arg, &mut s);
+            assert_eq!(s, want, "{arg:?}");
+        }
+        assert_eq!(
+            windows::plain(Path::new(r"\\?\C:\Windows\cmd.exe")),
+            PathBuf::from(r"C:\Windows\cmd.exe")
+        );
+    }
+
+    /// Threats 5 and 7 on Windows: the AppContainer reads and writes the
+    /// workspace only.
+    #[test]
+    fn confined_commands_reach_the_workspace_only() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(ws_dir.path()).unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = std::fs::canonicalize(outside_dir.path()).unwrap();
+        std::fs::write(ws.join("in.txt"), "inside-content").unwrap();
+        std::fs::write(outside.join("secret.txt"), "outside-secret").unwrap();
+        let p = |d: &Path, f: &str| windows::plain(&d.join(f)).display().to_string();
+
+        let o = run(&confined(
+            "cmd",
+            &["/c", &format!("type {}", p(&ws, "in.txt"))],
+            &ws,
+        ))
+        .unwrap();
+        assert_eq!(o.exit, ExitKind::Exited(0), "{}", text(&o));
+        assert!(text(&o).contains("inside-content"), "{}", text(&o));
+        assert_eq!(o.isolation.network, Some(NetworkMethod::AppContainer));
+        assert!(o.isolation.fs_confined);
+
+        let o = run(&confined(
+            "cmd",
+            &["/c", &format!("type {}", p(&outside, "secret.txt"))],
+            &ws,
+        ))
+        .unwrap();
+        assert_ne!(o.exit, ExitKind::Exited(0), "{}", text(&o));
+        assert!(!text(&o).contains("outside-secret"), "{}", text(&o));
+
+        let o = run(&confined(
+            "cmd",
+            &["/c", &format!("echo x> {}", p(&ws, "out.txt"))],
+            &ws,
+        ))
+        .unwrap();
+        assert_eq!(o.exit, ExitKind::Exited(0), "{}", text(&o));
+        assert!(ws.join("out.txt").exists());
+
+        let o = run(&confined(
+            "cmd",
+            &["/c", &format!("echo x> {}", p(&outside, "planted.txt"))],
+            &ws,
+        ))
+        .unwrap();
+        assert_ne!(o.exit, ExitKind::Exited(0), "{}", text(&o));
+        assert!(!outside.join("planted.txt").exists());
+
+        // The user's profile (credentials live there) is out of reach.
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            let o = run(&confined(
+                "cmd",
+                &[
+                    "/c",
+                    &format!("dir /b \"{}\"", PathBuf::from(profile).display()),
+                ],
+                &ws,
+            ))
+            .unwrap();
+            assert_ne!(o.exit, ExitKind::Exited(0), "{}", text(&o));
+        }
+    }
+
+    /// Threat 6 on Windows: no network, loopback included.
+    #[test]
+    fn confined_commands_have_no_network() {
+        let Ok(curl) = resolve_program("curl", &path_var()) else {
+            eprintln!("SKIPPED: curl.exe not available");
+            return;
         };
-        assert!(matches!(run(&spec), Err(ExecError::SandboxUnavailable(_))));
+        let _ = curl;
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(ws_dir.path()).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        for url in [
+            "http://1.1.1.1/".to_string(),
+            format!("http://127.0.0.1:{port}/"),
+        ] {
+            let o = run(&confined("curl", &["-s", "-m", "5", &url], &ws)).unwrap();
+            assert_ne!(o.exit, ExitKind::Exited(0), "{url}: {}", text(&o));
+        }
+        drop(listener);
+    }
+
+    /// Threat 7 on Windows: the wall clock ends the whole job.
+    #[test]
+    fn confined_commands_are_killed_at_the_deadline() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(ws_dir.path()).unwrap();
+        let mut s = confined("cmd", &["/c", "for /l %i in (0,0,1) do @rem"], &ws);
+        s.limits.wall_timeout = Duration::from_secs(2);
+        let t = Instant::now();
+        let o = run(&s).unwrap();
+        assert_eq!(o.exit, ExitKind::TimedOut);
+        assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
+    }
+
+    /// The job's memory limit holds, and is reported as such.
+    #[test]
+    fn confined_memory_is_limited() {
+        let Ok(_) = resolve_program("python", &path_var()) else {
+            eprintln!("SKIPPED: python not available");
+            return;
+        };
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(ws_dir.path()).unwrap();
+        let mut s = confined(
+            "python",
+            &[
+                "-c",
+                "x = bytearray(1024 * 1024 * 1024); print('allocated')",
+            ],
+            &ws,
+        );
+        s.limits.address_space_bytes = 256 << 20;
+        let o = run(&s).unwrap();
+        assert!(!text(&o).contains("allocated"), "{}", text(&o));
+        assert_eq!(o.exit, ExitKind::MemoryExceeded, "{}", text(&o));
+        assert!(o.rusage.is_some());
+    }
+
+    /// Batch files would be re-parsed by cmd.exe; they are refused.
+    #[test]
+    fn confined_batch_files_are_refused() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(ws_dir.path()).unwrap();
+        std::fs::write(ws.join("x.bat"), "@echo hi\r\n").unwrap();
+        let mut s = confined("cmd", &[], &ws);
+        s.program = ws.join("x.bat");
+        assert!(matches!(run(&s), Err(ExecError::SandboxUnavailable(_))));
     }
 }
