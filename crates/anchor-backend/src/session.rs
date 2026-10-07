@@ -103,6 +103,9 @@ fn runtime_env(roles_toml: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Checkpoints kept per session (the newest).
+const CHECKPOINTS_KEPT: usize = 8;
+
 /// Runtime stderr lines held for display at most, and the longest line
 /// shown; the rest is dropped, never buffered (review finding T-5).
 const STDERR_QUEUE: usize = 256;
@@ -327,6 +330,11 @@ pub fn run(
                     cp.validate().map_err(SessionError::Protocol)?;
                     let path = checkpoints
                         .save(&cp)
+                        .map_err(|e| SessionError::Checkpoint(e.to_string()))?;
+                    // Only the latest few are ever resumed from; a runtime
+                    // cannot fill the disk with them (review finding T-6).
+                    checkpoints
+                        .prune(&cfg.session_id, CHECKPOINTS_KEPT)
                         .map_err(|e| SessionError::Checkpoint(e.to_string()))?;
                     audit(
                         mediator,

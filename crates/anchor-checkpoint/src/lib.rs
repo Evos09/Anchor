@@ -126,6 +126,26 @@ impl CheckpointStore {
         let bytes =
             serde_json::to_vec_pretty(cp).map_err(|e| CheckpointError::Parse(e.to_string()))?;
         let final_path = self.path_for(&cp.checkpoint_id);
+        // An id is a file name: a runtime must not replace another
+        // session's checkpoint by reusing its id (review finding T-6).
+        match Self::load_path(&final_path) {
+            Ok(old) if old.session_id != cp.session_id => {
+                return Err(CheckpointError::Invalid(format!(
+                    "checkpoint id {} belongs to another session",
+                    cp.checkpoint_id
+                )));
+            }
+            Err(CheckpointError::Io(e)) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(CheckpointError::Io(e));
+            }
+            Err(CheckpointError::Parse(_) | CheckpointError::Invalid(_)) => {
+                return Err(CheckpointError::Invalid(format!(
+                    "checkpoint id {} is taken by an unreadable file",
+                    cp.checkpoint_id
+                )));
+            }
+            _ => {}
+        }
         let tmp = self.dir.join(format!(
             "{TMP_PREFIX}{}-{}",
             std::process::id(),
@@ -201,6 +221,21 @@ impl CheckpointStore {
             ))
         });
         Ok((ok, bad))
+    }
+
+    /// Delete all but the `keep` most recent checkpoints (by turn) of
+    /// `session_id`; returns how many were deleted.
+    pub fn prune(&self, session_id: &str, keep: usize) -> Result<usize, CheckpointError> {
+        let (all, _) = self.list()?;
+        let mine: Vec<_> = all
+            .into_iter()
+            .filter(|c| c.session_id == session_id)
+            .collect();
+        let excess = mine.len().saturating_sub(keep);
+        for c in &mine[..excess] {
+            fs::remove_file(&c.path)?;
+        }
+        Ok(excess)
     }
 
     /// The most recent valid checkpoint (highest turn) for a session, or

@@ -24,14 +24,20 @@ use crate::model::Caller;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
+    /// Threads running handlers on complete requests.
     pub workers: usize,
-    /// Pending connections beyond the busy workers; more get `503`.
+    /// Complete requests waiting for a worker; more get `503`.
     pub backlog: usize,
+    /// Connections whose request is still being received; more get `503`.
+    /// Reading happens apart from the workers, so idle or slow clients
+    /// hold a reader, never a worker (review finding H-1).
+    pub readers: usize,
     pub max_header_bytes: usize,
     pub max_body_bytes: usize,
     /// Total time allowed to receive one request (slow clients are cut
     /// off; a worker is never held longer than this plus the handler).
     pub request_deadline: Duration,
+    /// Total time allowed to send one response.
     pub write_timeout: Duration,
 }
 
@@ -40,6 +46,7 @@ impl Default for ServerConfig {
         ServerConfig {
             workers: 8,
             backlog: 32,
+            readers: 128,
             max_header_bytes: 16 << 10,
             max_body_bytes: 1 << 20,
             request_deadline: Duration::from_secs(10),
@@ -125,7 +132,9 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
-fn write_response(stream: &mut TcpStream, r: &Response) -> std::io::Result<()> {
+/// Write a response within `limit` in total (not per write call), so a
+/// client reading slowly cannot hold the writer longer.
+fn write_response(stream: &mut TcpStream, r: &Response, limit: Duration) -> std::io::Result<()> {
     let mut head = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n",
         r.status,
@@ -137,8 +146,17 @@ fn write_response(stream: &mut TcpStream, r: &Response) -> std::io::Result<()> {
         head.push_str(&format!("{n}: {v}\r\n"));
     }
     head.push_str("\r\n");
-    stream.write_all(head.as_bytes())?;
-    stream.write_all(&r.body)?;
+    let deadline = Instant::now() + limit;
+    for part in [head.as_bytes(), &r.body[..]] {
+        for chunk in part.chunks(16 << 10) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            stream.set_write_timeout(Some(left))?;
+            stream.write_all(chunk)?;
+        }
+    }
     stream.flush()
 }
 
@@ -385,26 +403,21 @@ pub fn serve_on(
         ));
     }
     let stop = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = sync_channel::<TcpStream>(cfg.backlog);
+    let (tx, rx) = sync_channel::<(TcpStream, Request)>(cfg.backlog);
     let rx = Arc::new(Mutex::new(rx));
     for _ in 0..cfg.workers.max(1) {
         let (rx, routes, cfg) = (rx.clone(), routes.clone(), cfg.clone());
         std::thread::spawn(move || {
             loop {
                 let next = rx.lock().unwrap_or_else(|p| p.into_inner()).recv();
-                let Ok(mut stream) = next else { return };
-                let _ = stream.set_write_timeout(Some(cfg.write_timeout));
-                let resp = match read_request(&mut stream, &cfg) {
-                    Ok(req) => routes.handle(&req),
-                    Err(r) => r,
-                };
-                let _ = write_response(&mut stream, &resp);
-                let _ = stream.shutdown(std::net::Shutdown::Both);
+                let Ok((mut stream, req)) = next else { return };
+                let resp = routes.handle(&req);
+                finish(&mut stream, &resp, cfg.write_timeout);
             }
         });
     }
     let stop2 = stop.clone();
-    let accept = std::thread::spawn(move || accept_loop(listener, tx, stop2));
+    let accept = std::thread::spawn(move || accept_loop(listener, tx, stop2, cfg));
     Ok(ServerHandle {
         addr,
         stop,
@@ -412,15 +425,53 @@ pub fn serve_on(
     })
 }
 
-fn accept_loop(listener: TcpListener, tx: SyncSender<TcpStream>, stop: Arc<AtomicBool>) {
+fn finish(stream: &mut TcpStream, resp: &Response, limit: Duration) {
+    let _ = write_response(stream, resp, limit);
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+/// Accept connections and give each a reader thread (at most
+/// `cfg.readers` at once); a reader hands the complete request to the
+/// workers, or answers the error itself.
+fn accept_loop(
+    listener: TcpListener,
+    tx: SyncSender<(TcpStream, Request)>,
+    stop: Arc<AtomicBool>,
+    cfg: ServerConfig,
+) {
+    let reading = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let busy = |mut s: TcpStream| {
+        finish(
+            &mut s,
+            &Response::error(503, "busy"),
+            Duration::from_secs(1),
+        )
+    };
     for conn in listener.incoming() {
         if stop.load(Ordering::SeqCst) {
             return;
         }
         let Ok(stream) = conn else { continue };
-        if let Err(TrySendError::Full(mut s)) = tx.try_send(stream) {
-            let _ = s.set_write_timeout(Some(Duration::from_secs(1)));
-            let _ = write_response(&mut s, &Response::error(503, "busy"));
+        if reading.fetch_add(1, Ordering::SeqCst) >= cfg.readers.max(1) {
+            reading.fetch_sub(1, Ordering::SeqCst);
+            busy(stream);
+            continue;
+        }
+        let (tx, count, cfg) = (tx.clone(), reading.clone(), cfg.clone());
+        let spawned = std::thread::Builder::new().spawn(move || {
+            let mut stream = stream;
+            let read = read_request(&mut stream, &cfg);
+            count.fetch_sub(1, Ordering::SeqCst);
+            match read {
+                Ok(req) => match tx.try_send((stream, req)) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full((s, _)) | TrySendError::Disconnected((s, _))) => busy(s),
+                },
+                Err(r) => finish(&mut stream, &r, cfg.write_timeout),
+            }
+        });
+        if spawned.is_err() {
+            reading.fetch_sub(1, Ordering::SeqCst);
         }
     }
 }

@@ -204,3 +204,39 @@ fn kill_mid_write_leaves_valid_checkpoint() {
             .starts_with(TMP_PREFIX)
     }));
 }
+
+/// Review finding T-6: a checkpoint id taken by another session is not
+/// overwritten, and pruning keeps only a session's newest checkpoints.
+#[test]
+fn ids_are_not_stolen_and_pruning_keeps_the_newest() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(dir.path()).unwrap();
+    let a = sample("sess-a", 1, 10);
+    store.save(&a).unwrap();
+    let mut thief = sample("sess-b", 9, 10);
+    thief.checkpoint_id = a.checkpoint_id.clone();
+    assert!(matches!(
+        store.save(&thief),
+        Err(CheckpointError::Invalid(_))
+    ));
+    assert_eq!(store.load(&a.checkpoint_id).unwrap(), a);
+    // The same session may rewrite its own.
+    store.save(&a).unwrap();
+
+    for t in 2..=6 {
+        store.save(&sample("sess-a", t, 10)).unwrap();
+    }
+    store.save(&sample("sess-b", 1, 10)).unwrap();
+    assert_eq!(store.prune("sess-a", 2).unwrap(), 4);
+    let (all, bad) = store.list().unwrap();
+    assert!(bad.is_empty());
+    let left: Vec<(String, u64)> = all.into_iter().map(|c| (c.session_id, c.turn)).collect();
+    assert_eq!(
+        left,
+        [
+            ("sess-a".to_string(), 5),
+            ("sess-a".to_string(), 6),
+            ("sess-b".to_string(), 1)
+        ]
+    );
+}

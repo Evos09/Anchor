@@ -663,6 +663,24 @@ fn hostile_http_is_refused() {
     let _ = (&f.ws, &f.hub);
 }
 
+/// Review finding H-1: idle connections hold readers, not workers, so
+/// more of them than workers and backlog together do not lock agents out.
+#[test]
+fn idle_connections_do_not_starve_requests() {
+    let f = fx();
+    let port = f.server.port();
+    let idle: Vec<TcpStream> = (0..60)
+        .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
+        .collect();
+    std::thread::sleep(Duration::from_millis(200));
+    let t = std::time::Instant::now();
+    let (s, _) = mcp(port, &f.beta.1, "tools/list", json!({}));
+    assert_eq!(s, 200);
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    drop(idle);
+    let _ = (&f.ws, &f.hub);
+}
+
 #[test]
 fn artifacts_are_hashed_by_the_hub() {
     let f = fx();
