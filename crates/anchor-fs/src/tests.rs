@@ -566,8 +566,8 @@ mod symlinks {
 // ---------------------------------------------------------------------------
 
 /// A hardlink inside the workspace to a file outside is detected and refused
-/// for both reading and writing.
-#[cfg(unix)]
+/// for both reading and writing (on Windows too: NTFS hard links need no
+/// privilege, and the handle's link count is checked).
 #[test]
 fn hardlink_attack_refused() {
     let f = fixture();
