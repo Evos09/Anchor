@@ -119,7 +119,7 @@ impl GitState {
                 if !self.entries.contains_key(rel) {
                     remove_no_follow(&root.join(rel));
                 }
-                fixed.push(rel.display().to_string());
+                fixed.push(slash(rel));
             }
         }
         for (rel, entry) in &self.entries {
@@ -128,15 +128,24 @@ impl GitState {
             }
             if let Entry::File { bytes, mode } = entry
                 && write_no_follow(root, rel, bytes, *mode)
-                && !fixed.contains(&rel.display().to_string())
+                && !fixed.contains(&slash(rel))
             {
-                fixed.push(rel.display().to_string());
+                fixed.push(slash(rel));
             }
         }
         fixed.sort();
         fixed.dedup();
         fixed
     }
+}
+
+/// A workspace-relative path with `/` separators on every platform, as
+/// audit entries write paths.
+fn slash(rel: &Path) -> String {
+    rel.iter()
+        .map(|c| c.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn read_entry(p: &Path, m: &std::fs::Metadata) -> Entry {

@@ -355,14 +355,32 @@ pub(crate) fn command_line(program: &Path, args: &[String]) -> String {
 
 /// The environment block: exactly `env` (sorted, as Windows expects),
 /// plus `SystemRoot`, without which much of Windows fails to start.
+/// Variables Windows needs in an AppContainer's environment, copied from
+/// the backend when the spec does not set them: DLL loading needs
+/// `SystemRoot`, and process creation rewrites the profile variables to
+/// the container's own folders and fails (error 203) when they are missing
+/// (CI run 37611621725). They are paths, not secrets, and the container
+/// cannot read what they name.
+const REQUIRED_ENV: [&str; 9] = [
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+    "ProgramData",
+];
+
 fn env_block(env: &[(String, String)]) -> Vec<u16> {
     let mut vars: Vec<(String, String)> = env.to_vec();
-    if !vars
-        .iter()
-        .any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot"))
-        && let Ok(v) = std::env::var("SystemRoot")
-    {
-        vars.push(("SystemRoot".into(), v));
+    for name in REQUIRED_ENV {
+        if !vars.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
+            && let Ok(v) = std::env::var(name)
+        {
+            vars.push((name.into(), v));
+        }
     }
     vars.sort_by_key(|(k, _)| k.to_uppercase());
     let mut block = Vec::new();
@@ -656,9 +674,17 @@ pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
     if ok == 0 {
         // SAFETY: no preconditions.
         let code = unsafe { GetLastError() };
+        // Names only (never values), to diagnose environment errors.
+        let block = String::from_utf16_lossy(&env);
+        let names: Vec<&str> = block
+            .split('\0')
+            .filter_map(|e| e.split('=').next())
+            .filter(|n| !n.is_empty())
+            .collect();
         return Err(ExecError::Spawn(format!(
-            "CreateProcessW in AppContainer: {}",
-            IoError::from_raw_os_error(code as i32)
+            "CreateProcessW in AppContainer: {} (environment: {})",
+            IoError::from_raw_os_error(code as i32),
+            names.join(", ")
         )));
     }
     let process = owned(pi.hProcess, "process")?;

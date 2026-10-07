@@ -69,8 +69,17 @@ through `crates/anchor-exec/src/windows.rs`.
   re-parses a batch file's arguments (the BatBadBut class), which would
   reopen threat 4. Program names with `:` (drive-relative paths, streams)
   or a trailing dot or space are refused at resolution.
-- **Environment.** Cleared and set explicitly. Only `SystemRoot` is
-  added, because Windows DLL loading needs it.
+- **Environment.** Cleared and set explicitly. Windows needs a few
+  variables, so they are copied from the backend when the command does
+  not set them:
+  - `SystemRoot`, `SystemDrive` and `windir`, for DLL loading;
+  - `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP` and
+    `ProgramData`. Process creation rewrites these to the container's
+    own folders, and fails with error 203 when they are missing (CI run
+    37611621725).
+
+  They are paths, not secrets, and the container cannot read the
+  directories they name.
 
 ## Consequences
 

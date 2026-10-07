@@ -702,6 +702,9 @@ pub fn run(
                 repair_note(reason, &feedback)
             );
             sessions.push(std::mem::replace(&mut session, Err(String::new())));
+            // Closed first: on Windows the open workspace pins its
+            // directory, which `prepare` removes for the next attempt.
+            drop(p);
             p = prepare(queue, i, attempt, &cand, &pre, instruction)?;
             session =
                 session::run(&p.cfg, &mut p.mediator, &p.checkpoints).map_err(|e| e.to_string());
@@ -717,7 +720,11 @@ pub fn run(
         if merge.as_ref().is_some_and(Outcome::is_merged) {
             let store_arc = queue.main().shared_store();
             let store = lock_store(&store_arc);
-            iso::teardown(&store, &p.iso.root, p.iso.ws.root())?;
+            let (root, dir) = (p.iso.root.clone(), p.iso.ws.root().to_path_buf());
+            // Every handle on the directory is closed first: on Windows the
+            // open workspace pins it against removal (F-1).
+            drop(p);
+            iso::teardown(&store, &root, &dir)?;
         }
         results[i] = Some(AgentResult {
             name: team.agents[i].name.clone(),
