@@ -542,7 +542,8 @@ mod sys {
         // socket-family rule is added when it is the network method.
         #[cfg(target_os = "linux")]
         let seccomp_prog: Vec<libc::sock_filter> =
-            linux_net::filter(use_seccomp).map_err(ExecError::SandboxUnavailable)?;
+            linux_net::filter(use_seccomp, &anchor_seccomp::protected_pids(true))
+                .map_err(ExecError::SandboxUnavailable)?;
         #[cfg(target_os = "linux")]
         {
             isolation.syscall_filter = true;

@@ -426,7 +426,7 @@ import threading; t = threading.Thread(target=lambda: None); t.start(); t.join()
 #[test]
 fn seccomp_program_is_well_formed() {
     for net in [false, true] {
-        let p = sys::linux_net::filter(net).unwrap();
+        let p = sys::linux_net::filter(net, &[1234, 5678, 91011, 1213]).unwrap();
         for (i, ins) in p.iter().enumerate() {
             if ins.code & 0x07 == 0x05 {
                 assert!(i + 1 + (ins.jt as usize) < p.len());
@@ -480,8 +480,18 @@ try:
     os.kill({parent}, 0); print("signal delivered")
 except OSError as e:
     print("signal refused", e.errno)
+for label, pid in (("all", -1), ("group", -{pgrp})):
+    try:
+        os.kill(pid, 0); print(label, "delivered")
+    except OSError as e:
+        print(label, "refused", e.errno)
+import subprocess
+c = subprocess.Popen(["sleep", "30"])
+c.kill(); c.wait(); print("own child killed", c.returncode)
 "#,
         parent = std::process::id(),
+        // SAFETY: no preconditions.
+        pgrp = unsafe { libc::getpgrp() },
         sock = sock.display(),
     );
     let mut s = spec("python3", &["-c", &script], Network::Allow);
@@ -496,10 +506,14 @@ except OSError as e:
     // The seccomp filter refuses AF_UNIX sockets on every kernel.
     assert!(text.contains("abstract refused"), "{text}");
     assert!(text.contains("pathname refused"), "{text}");
-    if out.isolation.landlock_scopes {
-        assert!(text.contains("signal refused"), "{text}");
-    } else {
-        eprintln!("Landlock scopes unavailable on this kernel (ABI < 6): {text}");
+    // The backend, its group and every-process kill are refused on every
+    // kernel (seccomp); Landlock's scope adds the rest on 6.12+.
+    assert!(text.contains("signal refused"), "{text}");
+    assert!(text.contains("all refused"), "{text}");
+    assert!(text.contains("group refused"), "{text}");
+    assert!(text.contains("own child killed -9"), "{text}");
+    if !out.isolation.landlock_scopes {
+        eprintln!("Landlock scopes unavailable on this kernel (ABI < 6)");
     }
 }
 
