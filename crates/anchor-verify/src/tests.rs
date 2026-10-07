@@ -310,3 +310,70 @@ fn test_paths() {
         assert!(!is_test_path(p), "{p}");
     }
 }
+
+#[test]
+fn runner_tampering_is_found() {
+    let code = change(
+        "calc.py",
+        &[
+            (1, "import os"),
+            (2, "os._exit(0)"),
+            (3, "pat = re.compile(r'x')  # eval( in a comment"),
+            (4, "import unittest"),
+            (5, "print('x', file=sys.stderr)"),
+            (6, "my_builtins_list = []"),
+            (7, "def run(): return 1"),
+        ],
+    );
+    let test = change(
+        "tests/test_calc.py",
+        &[
+            (1, "import unittest"),
+            (2, "unittest.TestResult.addFailure = lambda *a: None"),
+            (3, "from os import _exit"),
+        ],
+    );
+    assert_eq!(
+        rules::runner_tampering(&[code, test]),
+        [
+            "calc.py:2: _exit",
+            "calc.py:4: unittest",
+            "calc.py:5: stderr",
+            "tests/test_calc.py:2: TestResult",
+            "tests/test_calc.py:3: _exit",
+        ]
+    );
+}
+
+#[test]
+fn startup_hooks_and_unreviewable_code_are_found() {
+    let mut big = change("big.py", &[]);
+    big.status = FileStatus::Opaque;
+    let mut gone = change("old/sitecustomize.py", &[]);
+    gone.status = FileStatus::Removed;
+    let all = [
+        change("pkg/evil.pth", &[]),
+        change("lib/sitecustomize.py", &[]),
+        change("usercustomize/__init__.py", &[]),
+        change("calc/__pycache__/calc.cpython-312.pyc", &[]),
+        change("tests/conftest.py", &[]),
+        change("calc.py", &[]),
+        change("calc.cpython-312-x86_64-linux-gnu.so", &[]),
+        big,
+        gone,
+    ];
+    assert_eq!(
+        rules::startup_hooks(&all),
+        [
+            "pkg/evil.pth",
+            "lib/sitecustomize.py",
+            "usercustomize/__init__.py",
+            "calc/__pycache__/calc.cpython-312.pyc",
+            "tests/conftest.py",
+        ]
+    );
+    assert_eq!(
+        rules::unreviewable_code(&all),
+        ["calc.cpython-312-x86_64-linux-gnu.so", "big.py"]
+    );
+}

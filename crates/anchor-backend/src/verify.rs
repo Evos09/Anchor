@@ -383,6 +383,11 @@ pub struct VerifyGate {
     /// Tests that passed, by the tree they ran on (the pre-merge baseline).
     baseline: HashMap<Id, BTreeSet<String>>,
     stdlib: Option<BTreeSet<String>>,
+    /// An empty, read-only `HOME` for this check's commands (never the
+    /// candidate's tree, whose files would become per-user startup hooks).
+    home: Option<PathBuf>,
+    /// Evidence files of the current check the Hub failed to record.
+    unrecorded: Vec<String>,
     runs: u64,
     /// The last decision (the seeded-bug harness reads it).
     pub last: Option<GateRun>,
@@ -427,6 +432,8 @@ impl VerifyGate {
             read_only,
             baseline: HashMap::new(),
             stdlib: None,
+            home: None,
+            unrecorded: Vec::new(),
             runs: 0,
             last: None,
         })
@@ -466,16 +473,28 @@ impl VerifyGate {
                 };
             }
         };
+        let home = self
+            .home
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/nonexistent"));
+        let mut read_only = self.read_only.clone();
+        if self.home.is_some() {
+            read_only.push(home.clone());
+        }
         let spec = anchor_exec::CommandSpec {
             program,
             args: argv[1..].to_vec(),
             cwd: cwd.to_path_buf(),
+            // The environment is exactly this (anchor-exec clears the
+            // rest, so PYTHONPATH and PYTHONSTARTUP are unset); no user
+            // site directory is consulted.
             env: vec![
                 ("PATH".into(), self.path_var.clone()),
-                ("HOME".into(), cwd.display().to_string()),
+                ("HOME".into(), home.display().to_string()),
                 ("LANG".into(), "C.UTF-8".into()),
                 ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
                 ("PYTHONHASHSEED".into(), "0".into()),
+                ("PYTHONNOUSERSITE".into(), "1".into()),
             ],
             limits: anchor_exec::Limits {
                 cpu_seconds: self.spec.timeout.as_secs(),
@@ -485,7 +504,7 @@ impl VerifyGate {
             network: anchor_exec::Network::Deny,
             fs: Some(anchor_exec::FsConfinement {
                 read_write: rw.to_vec(),
-                read_only: self.read_only.clone(),
+                read_only,
             }),
         };
         match anchor_exec::run(&spec) {
@@ -540,7 +559,7 @@ impl VerifyGate {
 
     /// Store one evidence file; returns its reference.
     fn persist(
-        &self,
+        &mut self,
         group: &str,
         file: &str,
         kind: ArtifactKind,
@@ -551,7 +570,10 @@ impl VerifyGate {
         match &self.hub {
             Some(hub) => match hub.register_evidence(Caller::System, kind, &name, bytes, meta) {
                 Ok(a) => a.path,
-                Err(e) => format!("unrecorded:{name} ({e})"),
+                Err(e) => {
+                    self.unrecorded.push(name.clone());
+                    format!("unrecorded:{name} ({e})")
+                }
             },
             None => format!("local:{name}"),
         }
@@ -592,6 +614,37 @@ impl VerifyGate {
         self.stdlib = Some(names.clone());
         names
     }
+}
+
+/// Largest coverage report the backend reads.
+const MAX_COVER_BYTES: u64 = 8 << 20;
+
+/// Read a file a sandboxed command could have planted: never through a
+/// symlink, never blocking on a FIFO or device, only a regular file of at
+/// most `cap` bytes (review finding V-3).
+fn read_untrusted(path: &Path, cap: u64) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(not(unix))]
+    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(std::io::Error::other("symlink"));
+    }
+    let f = o.open(path)?;
+    let md = f.metadata()?;
+    if !md.is_file() || md.len() > cap {
+        return Err(std::io::Error::other(
+            "not a regular file within the size cap",
+        ));
+    }
+    let mut text = String::new();
+    f.take(cap).read_to_string(&mut text)?;
+    Ok(text)
 }
 
 /// The changed files between `pre` and `cand`, with their line diffs.
@@ -685,6 +738,7 @@ impl VerifyGate {
         store: &SharedStore,
     ) -> Result<GateRun, String> {
         self.runs += 1;
+        self.unrecorded.clear();
         let group = format!(
             "verify-{:010}-{}-{}",
             ctx.seq,
@@ -738,9 +792,11 @@ impl VerifyGate {
         let cand_ws = run_dir.join("ws");
         let pre_ws = run_dir.join("pre");
         let cover = run_dir.join("cover");
-        for d in [&cand_ws, &pre_ws, &cover] {
+        let home = run_dir.join("home");
+        for d in [&cand_ws, &pre_ws, &cover, &home] {
             std::fs::create_dir(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
+        self.home = Some(home);
         // Read everything needed from the store, then let go of it.
         let (changes, pre_tree) = {
             let st = lock_store(store);
@@ -795,6 +851,32 @@ impl VerifyGate {
                 Stage::Rules,
                 "shadows_stdlib",
                 json!({ "paths": shadowing }),
+            ));
+        }
+        // Hard rules: nothing that reaches the interpreter's startup, the
+        // test runner or the verdict's channel, and no unreadable code.
+        let hooks = anchor_verify::rules::startup_hooks(&changes);
+        if !hooks.is_empty() {
+            prior.push(Finding::new(
+                Stage::Rules,
+                "startup_hook",
+                json!({ "paths": hooks }),
+            ));
+        }
+        let opaque = anchor_verify::rules::unreviewable_code(&changes);
+        if !opaque.is_empty() {
+            prior.push(Finding::new(
+                Stage::Rules,
+                "unreviewable_code",
+                json!({ "paths": opaque }),
+            ));
+        }
+        let sites = anchor_verify::rules::runner_tampering(&changes);
+        if !sites.is_empty() {
+            prior.push(Finding::new(
+                Stage::Rules,
+                "runner_tampering",
+                json!({ "sites": sites }),
             ));
         }
 
@@ -877,7 +959,7 @@ impl VerifyGate {
                     let Some(name) = anchor_verify::parse::cover_name(&ch.path) else {
                         continue;
                     };
-                    let fc = match std::fs::read_to_string(cover.join(&name)) {
+                    let fc = match read_untrusted(&cover.join(&name), MAX_COVER_BYTES) {
                         Ok(text) => FileCoverage {
                             path: ch.path.clone(),
                             instrumented: true,
@@ -943,7 +1025,7 @@ impl VerifyGate {
             truncated: false,
         };
         fit(&mut input);
-        let decision = decide(&input, prior, auto, self.reviewer.as_mut());
+        let mut decision = decide(&input, prior, auto, self.reviewer.as_mut());
         let bytes = serde_json::to_vec_pretty(&input).unwrap_or_default();
         self.persist(
             group,
@@ -960,6 +1042,16 @@ impl VerifyGate {
             &bytes,
             json!({"type": "decision", "merge": ctx.seq, "approved": decision.approved}),
         );
+        // Evidence the Hub could not record: the merge would have no
+        // record of why it was allowed, so it is not (review finding V-4).
+        if !self.unrecorded.is_empty() {
+            decision.approved = false;
+            decision.findings.push(Finding::new(
+                Stage::Rules,
+                "evidence_unrecorded",
+                json!({ "files": std::mem::take(&mut self.unrecorded) }),
+            ));
+        }
         Ok(GateRun {
             input,
             decision,
@@ -1212,5 +1304,28 @@ mod tests {
         assert!(file("reviewer = \"model\"").is_err());
         assert!(file("unknown = 1").is_err());
         assert!(file("build = []").is_err());
+    }
+
+    /// Review finding V-3: coverage files a sandboxed command planted are
+    /// read only as small regular files, never through a link or a FIFO.
+    #[cfg(unix)]
+    #[test]
+    fn untrusted_reads_refuse_links_fifos_and_large_files() {
+        let d = tempfile::tempdir().unwrap();
+        let p = |n: &str| d.path().join(n);
+        std::fs::write(p("ok"), "fine").unwrap();
+        std::fs::write(p("secret"), "secret").unwrap();
+        std::os::unix::fs::symlink(p("secret"), p("link")).unwrap();
+        std::fs::write(p("big"), vec![b'x'; 100]).unwrap();
+        let st = std::process::Command::new("mkfifo")
+            .arg(p("fifo"))
+            .status()
+            .unwrap();
+        assert!(st.success());
+        assert_eq!(read_untrusted(&p("ok"), 64).unwrap(), "fine");
+        assert!(read_untrusted(&p("link"), 64).is_err());
+        assert!(read_untrusted(&p("big"), 64).is_err());
+        // Returns at once instead of waiting for a writer.
+        assert!(read_untrusted(&p("fifo"), 64).is_err());
     }
 }

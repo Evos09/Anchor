@@ -580,6 +580,92 @@ fn stdlib_shadowing_rejected() {
     assert!(codes(&o).contains(&"shadows_stdlib".to_string()), "{o:?}");
 }
 
+/// Review finding V-1: a test module that patches the runner so failures
+/// are not counted is rejected before its verdict is believed.
+#[cfg(unix)]
+#[test]
+fn runner_tampering_rejected() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = fx.open();
+    let hub = hub_of(&opened);
+    let g = gate(&fx, &opened, spec());
+    let mut q = MergeQueue::new(hub, &mut opened.mediator, Box::new(g), true);
+    let tests = format!("{TEST_CLAMP}\nunittest.TestResult.addFailure = lambda *a, **k: None\n");
+    let o = submit_change(
+        &mut q,
+        &fx,
+        |r| {
+            // Still buggy: the patched runner would report it passing.
+            write(r, "tests/test_clamp.py", &tests);
+        },
+        &[clamp_claim()],
+    );
+    assert!(codes(&o).contains(&"runner_tampering".to_string()), "{o:?}");
+}
+
+/// Review finding V-2: files the interpreter or runner loads on its own
+/// are rejected, and commands never see the candidate as `HOME` or a
+/// user site directory.
+#[cfg(unix)]
+#[test]
+fn startup_hooks_rejected_and_home_is_empty() {
+    need_python!();
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let fx = fixture();
+    let mut opened = fx.open();
+    let hub = hub_of(&opened);
+    let g = gate(&fx, &opened, spec());
+    let mut q = MergeQueue::new(hub, &mut opened.mediator, Box::new(g), true);
+    let o = submit_change(
+        &mut q,
+        &fx,
+        |r| {
+            write(r, "calc.py", GOOD_CALC);
+            write(r, "tests/test_clamp.py", TEST_CLAMP);
+            write(r, "tests/evil.pth", "import calc\n");
+            write(r, "tests/conftest.py", "\n");
+        },
+        &[clamp_claim()],
+    );
+    let c = codes(&o);
+    assert_eq!(c, ["startup_hook"], "{o:?}");
+    drop(q);
+    drop(opened);
+
+    let fx = fixture();
+    let mut opened = fx.open();
+
+    let mut s = spec();
+    s.build = Some(vec![
+        "python3".into(),
+        "-c".into(),
+        "import os, sys\n\
+         h = os.environ['HOME']\n\
+         ok = os.listdir(h) == [] and os.path.realpath(h) != os.getcwd() \\\n\
+             and os.environ.get('PYTHONNOUSERSITE') == '1' \\\n\
+             and 'PYTHONPATH' not in os.environ\n\
+         try:\n    open(os.path.join(h, 'x'), 'w')\n    ok = False\n\
+         except OSError:\n    pass\n\
+         sys.exit(0 if ok else 1)"
+            .into(),
+    ]);
+    let hub = hub_of(&opened);
+    let g = gate(&fx, &opened, s);
+    let mut q = MergeQueue::new(hub, &mut opened.mediator, Box::new(g), true);
+    let o = submit_change(
+        &mut q,
+        &fx,
+        |r| {
+            write(r, "calc.py", GOOD_CALC);
+            write(r, "tests/test_clamp.py", TEST_CLAMP);
+        },
+        &[clamp_claim()],
+    );
+    assert!(o.is_merged(), "{o:?}");
+}
+
 #[cfg(unix)]
 #[test]
 fn verification_commands_cannot_write_outside_scratch() {
