@@ -581,7 +581,7 @@ mod sys {
         let limits = [
             (
                 libc::RLIMIT_NPROC as Resource,
-                spec.limits.max_processes,
+                nproc_limit(spec.limits.max_processes, is_root),
                 12u8,
             ),
             (
@@ -960,6 +960,84 @@ mod sys {
             let dir = std::ffi::CStr::from_ptr(pw.pw_dir);
             Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
         }
+    }
+
+    /// The `RLIMIT_NPROC` value that lets a command start at most `max`
+    /// new processes. The kernel compares the limit with *every* process
+    /// (on Linux, every thread) of the uid, so for a backend running as
+    /// the user the user's existing count is added; otherwise a busy
+    /// desktop session leaves no room at all (macOS CI run 37608878226:
+    /// `fork: Resource temporarily unavailable`). As root, commands run as
+    /// `nobody`, whose count starts near zero. Commands running at the
+    /// same time share the headroom (AR-2).
+    pub(super) fn nproc_limit(max: u64, is_root: bool) -> u64 {
+        if is_root {
+            return max;
+        }
+        // SAFETY: no preconditions.
+        let uid = unsafe { libc::getuid() };
+        user_process_count(uid).saturating_add(max)
+    }
+
+    /// Processes (Linux: threads) the kernel counts against `uid`.
+    #[cfg(target_os = "macos")]
+    pub(super) fn user_process_count(uid: libc::uid_t) -> u64 {
+        const PROC_UID_ONLY: u32 = 4;
+        // SAFETY: a null buffer asks for the size needed.
+        let need = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
+        if need <= 0 {
+            return 0;
+        }
+        // Room for processes started between the two calls.
+        let mut pids =
+            vec![0 as libc::pid_t; need as usize / std::mem::size_of::<libc::pid_t>() + 64];
+        let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+        // SAFETY: the buffer holds `bytes` bytes.
+        let got =
+            unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), bytes) };
+        if got <= 0 {
+            return 0;
+        }
+        pids[..got as usize / std::mem::size_of::<libc::pid_t>()]
+            .iter()
+            .filter(|&&p| p > 0)
+            .count() as u64
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn user_process_count(uid: libc::uid_t) -> u64 {
+        let Ok(dir) = std::fs::read_dir("/proc") else {
+            return 0;
+        };
+        let mut n = 0u64;
+        for e in dir.flatten() {
+            if !e
+                .file_name()
+                .to_str()
+                .is_some_and(|s| s.bytes().all(|b| b.is_ascii_digit()))
+            {
+                continue;
+            }
+            let Ok(status) = std::fs::read_to_string(e.path().join("status")) else {
+                continue;
+            };
+            let field = |name: &str| {
+                status
+                    .lines()
+                    .find_map(|l| l.strip_prefix(name))
+                    .and_then(|v| v.split_whitespace().next())
+                    .and_then(|v| v.parse::<u64>().ok())
+            };
+            if field("Uid:") == Some(u64::from(uid)) {
+                n += field("Threads:").unwrap_or(1);
+            }
+        }
+        n
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(super) fn user_process_count(_uid: libc::uid_t) -> u64 {
+        0
     }
 
     #[cfg(target_os = "linux")]

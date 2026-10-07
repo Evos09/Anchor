@@ -113,7 +113,10 @@ The residual risks are recorded, with what still holds, in
 - AR-1: before Linux 6.12 a command can signal other same-user processes
   (not Anchor's own).
 - AR-2: limits are per process or per file (disk fill; no per-file cap
-  on Windows). A cgroup `pids.max`/`memory.max` is preferable where
+  on Windows). `RLIMIT_NPROC` is per uid, so a backend running as the
+  user sets it to the user's current process count plus the command's
+  allowance (macOS CI run 37608878226 found a desktop session leaves no
+  room otherwise). A cgroup `pids.max`/`memory.max` is preferable where
   delegation is available.
 - AR-14..AR-16: Windows `anchor-fs` and runner hygiene; macOS
   preference reads.

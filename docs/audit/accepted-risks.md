@@ -62,7 +62,11 @@ snapshots undo. An accepted risk weakens one layer, never all of them.
     per-file cap at all (the validation suite reports this row as an
     accepted risk).
   - `RLIMIT_AS` is per process, so the worst case is `AS × NPROC` on
-    Linux. macOS polls the process group's resident size every 5 ms,
+    Linux.
+  - `RLIMIT_NPROC` counts all of the uid's processes. A backend running
+    as the user therefore sets it to the user's current count plus the
+    command's allowance. Commands running at the same time share that
+    headroom, and processes the user starts meanwhile reduce it. macOS polls the process group's resident size every 5 ms,
     so a fast allocation can overshoot briefly before the kill.
 - **Still holds.** CPU time, the wall timeout, the process count and the
   group kill bound how long any of it lasts. The Windows Job Object

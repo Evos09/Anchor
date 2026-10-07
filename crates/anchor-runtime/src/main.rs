@@ -60,6 +60,8 @@ fn selftest() -> ExitCode {
     let mut sock = String::new();
     let _ = std::io::stdin().read_line(&mut sock);
     let sock = sock.trim().to_string();
+    #[cfg(not(unix))]
+    let _ = sock;
     let status = restrict_self();
     println!(
         "sandbox {}",

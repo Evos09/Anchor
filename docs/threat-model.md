@@ -171,7 +171,7 @@ Each CI job appends its platform's table to the job summary.
 | P-1 append-only reshaping; P-2 restore skipped | `heuristic_detection_is_sticky`, `tracked_files_replaced_by_untracked_entries_are_restored` | ✅ Linux (local) |
 | V-1 verdict forged by runner tampering; V-2 startup hooks | `runner_tampering_rejected`, `startup_hooks_rejected_and_home_is_empty` | ✅ Linux (local); residual AR-4 |
 | Round 2: W-1 workspace ACLs rewritable; F-1 pins did not block renames | ACE mask and `SET_ACCESS`; `open_workspace_root_cannot_be_renamed` | 🟡 Windows (CI pending) |
-| Round 2: M-1 `/System/Volumes/Data`; M-2 unix sockets with network | `seatbelt_closes_unix_sockets_data_volume_and_keychains_macos` | 🟡 macOS (CI pending) |
+| Round 2: M-2 unix sockets with network; M-5 keychains; M-1 `/System/Volumes/Data` (not reproduced: Seatbelt resolves firmlinks) | `seatbelt_closes_unix_sockets_data_volume_and_keychains_macos` | 🟡 macOS (M-2 and M-5 seen holding in CI run 37608878226; the test is now corrected) |
 | Round 2: K-1 backend threads signalled | `protected_processes_cannot_be_signalled` (tkill to a thread) | ✅ Linux (local) |
 
 ## Phase 2 "verified by instrumentation"

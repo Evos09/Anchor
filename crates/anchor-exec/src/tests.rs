@@ -544,7 +544,7 @@ fn seatbelt_profile_denies_by_default() {
 
 /// Round 2 findings M-1, M-2 and M-5 on macOS: with the network allowed a
 /// command still cannot connect to a unix socket outside (only IP), the
-/// data volume's path to the home directory is closed, and keychains stay
+/// data volume's path gives no access the canonical path does not, and keychains stay
 /// unreadable even when the whole home is granted (the deny comes last).
 #[cfg(target_os = "macos")]
 #[test]
@@ -557,6 +557,8 @@ fn seatbelt_closes_unix_sockets_data_volume_and_keychains_macos() {
     let base = std::fs::canonicalize(d.path()).unwrap();
     let ws = base.join("ws");
     std::fs::create_dir(&ws).unwrap();
+    let outside = base.join("outside");
+    std::fs::create_dir(&outside).unwrap();
     let sock = base.join("agent.sock");
     let _unix = std::os::unix::net::UnixListener::bind(&sock).unwrap();
     let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -576,11 +578,13 @@ def tcp():
     s = socket.create_connection(("127.0.0.1", {port}), timeout=3)
 tryit("unix", unix)
 tryit("tcp", tcp)
-tryit("data", lambda: os.listdir("/System/Volumes/Data{home}"))
+tryit("data", lambda: os.listdir("/System/Volumes/Data{outside}"))
+tryit("data_granted", lambda: os.listdir("/System/Volumes/Data{home}"))
 tryit("home", lambda: os.listdir("{home}"))
 tryit("keychains", lambda: os.listdir("{home}/Library/Keychains"))
 "#,
         sock = sock.display(),
+        outside = outside.display(),
     );
     let mut s = spec("python3", &["-c", &script], Network::Allow);
     s.cwd = ws.clone();
@@ -598,7 +602,12 @@ tryit("keychains", lambda: os.listdir("{home}/Library/Keychains"))
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(text.contains("unix refused"), "{text} {err}");
     assert!(text.contains("tcp allowed"), "{text} {err}");
+    // A directory nobody granted stays closed through the data volume's
+    // path. Seatbelt resolves that firmlinked path to the canonical one, so
+    // a granted directory is reachable either way (no extra access: round
+    // 2 M-1 did not reproduce; CI run 37608878226).
     assert!(text.contains("data refused"), "{text} {err}");
+    assert!(text.contains("data_granted allowed"), "{text} {err}");
     assert!(text.contains("home allowed"), "{text} {err}");
     assert!(text.contains("keychains refused"), "{text} {err}");
     drop(tcp);
@@ -777,4 +786,16 @@ fn malformed_environment_is_refused() {
             "{k:?}={v:?}"
         );
     }
+}
+
+/// The process limit counts the user's existing processes (macOS CI run
+/// 37608878226): a command still gets `max` new ones, never fewer.
+#[test]
+fn process_limit_leaves_headroom_above_the_users_processes() {
+    // SAFETY: no preconditions.
+    let uid = unsafe { libc::getuid() };
+    let existing = sys::user_process_count(uid);
+    assert!(existing >= 1, "this test process itself is counted");
+    assert!(sys::nproc_limit(16, false) >= existing + 16);
+    assert_eq!(sys::nproc_limit(16, true), 16);
 }
