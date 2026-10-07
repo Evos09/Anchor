@@ -4,11 +4,14 @@
 //! * **AppContainer** (one profile per workspace, `anchor.<hash>`): a
 //!   lowbox token with no capabilities when the network is denied, so no
 //!   internet, private network or loopback; `internetClient` only when it
-//!   is allowed. Files are reachable only where the container's SID holds
-//!   an ACE: "Modify" (no ACL or owner changes) on [`FsConfinement::read_write`], read/execute on
-//!   [`FsConfinement::read_only`] (granted here, inheritable), plus what
-//!   Windows grants ALL APPLICATION PACKAGES (system directories). The
-//!   user's profile, credentials and other processes are out of reach.
+//!   is allowed. Files are reachable only where the container holds an
+//!   ACE: "Modify" (no ACL or owner changes) for its own SID on
+//!   [`FsConfinement::read_write`]; read/execute on
+//!   [`FsConfinement::read_only`] for one custom capability every Anchor
+//!   container carries (granted once, inheritable, so toolchain trees are
+//!   not re-propagated per workspace); plus what Windows grants ALL
+//!   APPLICATION PACKAGES (system directories). The user's profile,
+//!   credentials and other processes are out of reach.
 //! * **Job Object**, attached at creation (`PROC_THREAD_ATTRIBUTE_JOB_LIST`,
 //!   no window before assignment): active-process, job-memory and job CPU
 //!   time limits, kill-on-close, no breakaway, UI restrictions (clipboard,
@@ -24,6 +27,7 @@ use std::io::Error as IoError;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{
@@ -40,9 +44,9 @@ use windows_sys::Win32::Security::Isolation::{
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
-    DACL_SECURITY_INFORMATION, EqualSid, FreeSid, GetAce, GetAclInformation, NO_INHERITANCE,
-    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
-    SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    DACL_SECURITY_INFORMATION, DeriveCapabilitySidsFromName, EqualSid, FreeSid, GetAce,
+    GetAclInformation, NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+    SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
@@ -78,11 +82,22 @@ const CONTAINER_INHERIT_ACE: u8 = 0x2;
 const INHERIT_ONLY_ACE: u8 = 0x8;
 /// The "Modify" right set: read, write, execute and delete, without
 /// WRITE_DAC, WRITE_OWNER or ACCESS_SYSTEM_SECURITY.
-const MODIFY: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
+pub(crate) const MODIFY: u32 =
+    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
 const SE_GROUP_ENABLED: u32 = 4;
 /// The `internetClient` capability: outbound internet, no loopback or
 /// private networks.
 const INTERNET_CLIENT_SID: &str = "S-1-15-3-1";
+/// The custom capability that read-only grants go to. Every Anchor
+/// container carries it, so a toolchain directory is granted (and its tree
+/// propagated) once per machine, not once per workspace (CI run
+/// 37613963524, round 2 W-5). It conveys no network access.
+const READ_CAPABILITY: &str = "anchorReadExecute";
+/// What read-only entries get.
+pub(crate) const READ_EXECUTE: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+/// ACL edits propagate through whole trees; two at once on one tree would
+/// race (read-modify-write) and waste minutes.
+static GRANTS: Mutex<()> = Mutex::new(());
 
 fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
@@ -107,8 +122,8 @@ fn unavailable(what: &str) -> ExecError {
 }
 
 /// A SID and how it must be freed.
-struct Sid {
-    ptr: PSID,
+pub(crate) struct Sid {
+    pub(crate) ptr: PSID,
     local: bool,
 }
 
@@ -144,7 +159,7 @@ pub(crate) fn profile_name(fs: &FsConfinement, cwd: &Path) -> String {
     format!("anchor.{h:016x}")
 }
 
-fn container_sid(name: &str) -> Result<Sid, ExecError> {
+pub(crate) fn container_sid(name: &str) -> Result<Sid, ExecError> {
     let n = wide(OsStr::new(name));
     let desc = wide(OsStr::new("Anchor agent commands"));
     let mut sid: PSID = std::ptr::null_mut();
@@ -190,6 +205,75 @@ fn string_sid(s: &str) -> Result<Sid, ExecError> {
         ptr: sid,
         local: true,
     })
+}
+
+/// The SID of [`READ_CAPABILITY`].
+pub(crate) fn read_capability() -> Result<Sid, ExecError> {
+    let name = wide(OsStr::new(READ_CAPABILITY));
+    let (mut groups, mut ngroups): (*mut PSID, u32) = (std::ptr::null_mut(), 0);
+    let (mut caps, mut ncaps): (*mut PSID, u32) = (std::ptr::null_mut(), 0);
+    // SAFETY: valid wide string and out-pointers.
+    let ok = unsafe {
+        DeriveCapabilitySidsFromName(
+            name.as_ptr(),
+            &mut groups,
+            &mut ngroups,
+            &mut caps,
+            &mut ncaps,
+        )
+    };
+    if ok == 0 {
+        return Err(unavailable("read capability SID"));
+    }
+    // SAFETY: both arrays and every SID in them were LocalAlloc'd by the
+    // call; the first capability SID is kept (freed by `Sid`'s drop).
+    unsafe {
+        for i in 0..ngroups as usize {
+            LocalFree(*groups.add(i) as HLOCAL);
+        }
+        LocalFree(groups as HLOCAL);
+        let kept = (ncaps > 0).then(|| *caps);
+        for i in 1..ncaps as usize {
+            LocalFree(*caps.add(i) as HLOCAL);
+        }
+        LocalFree(caps as HLOCAL);
+        match kept {
+            Some(ptr) => Ok(Sid { ptr, local: true }),
+            None => Err(ExecError::SandboxUnavailable(
+                "read capability SID: none derived".into(),
+            )),
+        }
+    }
+}
+
+/// Whether `path`'s DACL holds an explicit allow ACE for `sid` with
+/// exactly `access` (tests).
+#[cfg(test)]
+pub(crate) fn path_has_ace(path: &Path, sid: PSID, access: u32) -> bool {
+    let w = wide(path.as_os_str());
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: valid path and out-pointers; `sd` is freed below.
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            w.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if rc != 0 {
+        return false;
+    }
+    // SAFETY: `dacl` came from the call above; `sid` is valid.
+    let found = !dacl.is_null() && unsafe { has_ace(dacl, sid, access, path.is_dir()) };
+    // SAFETY: allocated by GetNamedSecurityInfoW.
+    unsafe { LocalFree(sd as HLOCAL) };
+    found
 }
 
 /// Whether `dacl` already holds an explicit allow ACE for `sid` with at
@@ -545,8 +629,10 @@ pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
     }
 
     let sid = container_sid(&profile_name(fs, &spec.cwd))?;
+    let read = read_capability()?;
     let home = std::env::home_dir();
     let too_broad = |p: &Path| p.parent().is_none() || home.as_deref() == Some(p);
+    let guard = GRANTS.lock().unwrap_or_else(|e| e.into_inner());
     for p in &fs.read_write {
         if too_broad(p) {
             return Err(ExecError::SandboxUnavailable(format!(
@@ -562,11 +648,15 @@ pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
     for p in fs.read_only.iter().filter(|p| p.exists() && !too_broad(p)) {
         // Best effort: system directories are readable by every
         // AppContainer already, and their ACLs belong to the system.
-        let _ = grant(p, sid.ptr, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE);
+        let _ = grant(p, read.ptr, READ_EXECUTE);
     }
+    drop(guard);
 
     let internet;
-    let mut caps: Vec<SID_AND_ATTRIBUTES> = Vec::new();
+    let mut caps: Vec<SID_AND_ATTRIBUTES> = vec![SID_AND_ATTRIBUTES {
+        Sid: read.ptr,
+        Attributes: SE_GROUP_ENABLED,
+    }];
     if spec.network == Network::Allow {
         internet = string_sid(INTERNET_CLIENT_SID)?;
         caps.push(SID_AND_ATTRIBUTES {

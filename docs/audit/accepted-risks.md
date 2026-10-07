@@ -228,10 +228,15 @@ validation suite check it.
 
 - **Exposure.**
   - **W-4:** read and execute ACEs are added to PATH directories that may
-    already be readable.
-  - **W-5:** the verify gate's scratch folders would each create a
-    profile. This is not active, because Windows verify still fails
-    closed.
+    already be readable. Since CI run 37613963524 they go to one shared
+    capability (`anchorReadExecute`), once per directory per machine.
+  - **W-5, partly fixed.** Read-only grants no longer churn per
+    workspace: they go to the shared capability, so a new workspace adds
+    nothing to a toolchain's ACL (regression test
+    `read_only_grants_use_the_shared_capability`). The verify gate's
+    scratch folders would still each create a profile and a "Modify" ACE
+    on their own fresh folder. This is not active, because Windows verify
+    still fails closed.
   - **W-6:** the stdio handles are inheritable for the instant of
     creation.
   - **W-7:** the job CPU limit counts user time and reports exit 1816.

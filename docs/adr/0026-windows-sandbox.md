@@ -29,8 +29,17 @@ through `crates/anchor-exec/src/windows.rs`.
   - The container SID gets inheritable ACEs. On `read_write` it gets
     "Modify": read, write, execute and delete. It does not get
     `WRITE_DAC` or `WRITE_OWNER`, so a command cannot rewrite the
-    workspace's ACLs (round 2 finding W-1). On `read_only` entries
-    (absolute PATH directories) it gets read and execute.
+    workspace's ACLs (round 2 finding W-1).
+  - `read_only` entries (absolute PATH directories) get read and execute
+    for a custom capability, `anchorReadExecute`
+    (`DeriveCapabilitySidsFromName`), which every Anchor container
+    carries. It conveys no network access. Granting a directory
+    propagates the ACE through its whole tree, which takes minutes for a
+    toolchain. With a per-workspace SID that happened again for every
+    workspace, and parallel grants with different SIDs could overwrite
+    each other (CI run 37613963524: a lost grant left python without its
+    DLLs). A shared SID is granted once per machine. Grants are also
+    serialized within the process.
   - Drive roots and the user profile are never granted.
   - An ACE is written (`SET_ACCESS`) unless one with exactly that mask
     and inheritance exists, so repeated runs neither grow the ACL nor

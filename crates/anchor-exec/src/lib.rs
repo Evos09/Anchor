@@ -1193,10 +1193,14 @@ mod sys {
         }
     }
 
-    /// Kill the child's whole process group until nothing is left.
+    /// Kill the child's whole process group until nothing is left, for at
+    /// most two seconds: bounded by time, not by a count, because on a
+    /// loaded machine a group of dying processes can keep `killpg`
+    /// succeeding for long (CI run 37613963524, macOS).
     pub(super) fn kill_tree(child: &mut Child) {
         let pgid = child.id() as libc::pid_t;
-        for _ in 0..1000 {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
             // SAFETY: killpg has no memory-safety preconditions.
             let r = unsafe { libc::killpg(pgid, libc::SIGKILL) };
             if r != 0 {
@@ -1484,6 +1488,10 @@ mod tests_windows {
     fn confined_commands_are_killed_at_the_deadline() {
         let ws_dir = tempfile::tempdir().unwrap();
         let ws = std::fs::canonicalize(ws_dir.path()).unwrap();
+        // The first run in a workspace grants its ACLs (once per PATH tree
+        // per machine); the bound below is about the deadline, not that.
+        let warm = run(&confined("cmd", &["/c", "rem"], &ws)).unwrap();
+        assert_eq!(warm.exit, ExitKind::Exited(0), "{}", text(&warm));
         let mut s = confined("cmd", &["/c", "for /l %i in (0,0,1) do @rem"], &ws);
         s.limits.wall_timeout = Duration::from_secs(2);
         let t = Instant::now();
@@ -1514,6 +1522,37 @@ mod tests_windows {
         assert!(!text(&o).contains("allocated"), "{}", text(&o));
         assert_eq!(o.exit, ExitKind::MemoryExceeded, "{}", text(&o));
         assert!(o.rusage.is_some());
+    }
+
+    /// Read-only grants go to the shared capability, not to each
+    /// workspace's container, so a second workspace adds nothing to a
+    /// toolchain's ACL (round 2 W-5, CI run 37613963524).
+    #[test]
+    fn read_only_grants_use_the_shared_capability() {
+        let tools = tempfile::tempdir().unwrap();
+        let tools = std::fs::canonicalize(tools.path()).unwrap();
+        let read = windows::read_capability().unwrap();
+        for _ in 0..2 {
+            let ws_dir = tempfile::tempdir().unwrap();
+            let ws = std::fs::canonicalize(ws_dir.path()).unwrap();
+            let mut s = confined("cmd", &["/c", "rem"], &ws);
+            s.fs.as_mut().unwrap().read_only.push(tools.clone());
+            let o = run(&s).unwrap();
+            assert_eq!(o.exit, ExitKind::Exited(0), "{}", text(&o));
+            let fs = s.fs.as_ref().unwrap();
+            let sid = windows::container_sid(&windows::profile_name(fs, &ws)).unwrap();
+            assert!(!windows::path_has_ace(
+                &tools,
+                sid.ptr,
+                windows::READ_EXECUTE
+            ));
+            assert!(windows::path_has_ace(&ws, sid.ptr, windows::MODIFY));
+        }
+        assert!(windows::path_has_ace(
+            &tools,
+            read.ptr,
+            windows::READ_EXECUTE
+        ));
     }
 
     /// Batch files would be re-parsed by cmd.exe; they are refused.
