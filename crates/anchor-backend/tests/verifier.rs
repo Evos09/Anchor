@@ -63,9 +63,16 @@ fn a_hanging_plugin_times_out_and_fails_closed() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    // Answers describe at once; never answers verify.
     std::fs::write(
         d.path().join("verifier.py"),
-        "import time\ntime.sleep(120)\n",
+        "import json, sys, time\n\
+         req = json.loads(sys.stdin.readline())\n\
+         if req['msg']['kind'] == 'describe':\n    \
+             print(json.dumps({'v': 1, 'id': req['id'], 'msg': {'kind': 'info', \
+             'payload': {'name': 'sleeper', 'version': '1', 'protocol': [1]}}}))\n    \
+             sys.exit(0)\n\
+         time.sleep(120)\n",
     )
     .unwrap();
     std::fs::write(
@@ -76,14 +83,20 @@ fn a_hanging_plugin_times_out_and_fails_closed() {
     let plugin = Plugin::load(d.path(), &std::env::var("PATH").unwrap_or_default()).unwrap();
     let input: ReviewInput =
         serde_json::from_str(include_str!("../../../docs/verifier/fixtures/passing.json")).unwrap();
+    // Untimed warm-up: the first sandboxed run on a fresh Windows runner
+    // pays a one-time ACL grant over the PATH trees (CI run 37694430534),
+    // which the time bound below is not about.
+    runner().describe(&plugin, 1).unwrap();
     let mut r = PluginVerifier::new(plugin, runner());
     let t = Instant::now();
     let vs = r.review(&input).unwrap();
-    assert!(t.elapsed() < Duration::from_secs(30), "{:?}", t.elapsed());
+    let elapsed = t.elapsed();
+    // The verdicts first, so a timeout that did not fire shows its note.
     assert_eq!(vs.len(), input.claims.len());
     for v in &vs {
         assert_eq!(v.verdict, Verdict::Unverifiable);
         assert_eq!(v.reason_code, "verifier_failed");
         assert!(v.note.contains("timed out"), "{}", v.note);
     }
+    assert!(elapsed < Duration::from_secs(30), "{elapsed:?}");
 }
