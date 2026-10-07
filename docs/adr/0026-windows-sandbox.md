@@ -112,7 +112,11 @@ through `crates/anchor-exec/src/windows.rs`.
   (`anchor_exec::spawn_isolated`). The runtime checks its token
   (`TokenIsAppContainer`) and reports it. A loopback provider cannot be
   reached from an AppContainer, so such a session's runtime runs
-  unconfined, warned and audited (AR-7).
+  unconfined, warned and audited (AR-7). A team starts several runtimes
+  at once on that one profile, and concurrent `CreateAppContainerProfile`
+  calls for one name fail transiently (`ERROR_BAD_ENVIRONMENT`, CI run
+  37668713946), so profile creation is serialized in the process and
+  retried with backoff for a racer in another process.
 - **Junction swaps.** `anchor-fs` pins directory chains on Windows, so a
   junction swapped mid-operation cannot redirect the backend's own file
   operations (review finding P-3). This matters more now that Windows

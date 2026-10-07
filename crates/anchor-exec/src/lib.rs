@@ -1608,6 +1608,23 @@ mod tests_windows {
         release(fs, &ws).unwrap();
     }
 
+    /// Many threads creating one profile at once all get its SID (a team's
+    /// runtimes share `anchor.runtime`; CI run 37668713946).
+    #[test]
+    fn concurrent_profile_creation_succeeds() {
+        let name = format!("anchor.test-concurrent-{}", std::process::id());
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let name = name.clone();
+                std::thread::spawn(move || windows::container_sid(&name).map(|_| ()))
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap().unwrap();
+        }
+        assert!(windows::delete_profile(&name).unwrap());
+    }
+
     /// Batch files would be re-parsed by cmd.exe; they are refused.
     #[test]
     fn confined_batch_files_are_refused() {

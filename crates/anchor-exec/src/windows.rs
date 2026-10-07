@@ -98,6 +98,8 @@ pub(crate) const READ_EXECUTE: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 /// ACL edits propagate through whole trees; two at once on one tree would
 /// race (read-modify-write) and waste minutes.
 static GRANTS: Mutex<()> = Mutex::new(());
+/// Profile creation and deletion, one at a time in this process.
+static PROFILES: Mutex<()> = Mutex::new(());
 
 fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
@@ -162,41 +164,51 @@ pub(crate) fn profile_name(fs: &FsConfinement, cwd: &Path) -> String {
 pub(crate) fn container_sid(name: &str) -> Result<Sid, ExecError> {
     let n = wide(OsStr::new(name));
     let desc = wide(OsStr::new("Anchor agent commands"));
-    let mut sid: PSID = std::ptr::null_mut();
-    // SAFETY: valid wide strings and out-pointer; no capabilities.
-    let hr = unsafe {
-        CreateAppContainerProfile(
-            n.as_ptr(),
-            n.as_ptr(),
-            desc.as_ptr(),
-            std::ptr::null(),
-            0,
-            &mut sid,
-        )
-    };
     let exists = (0x8007_0000u32 | ERROR_ALREADY_EXISTS) as i32;
-    if hr == exists {
-        // SAFETY: as above.
-        let hr = unsafe { DeriveAppContainerSidFromAppContainerName(n.as_ptr(), &mut sid) };
-        if hr < 0 {
-            return Err(ExecError::SandboxUnavailable(format!(
-                "AppContainer profile {name}: HRESULT {hr:#x}"
-            )));
+    // Concurrent creation of one name (a team's runtimes share
+    // `anchor.runtime`) fails transiently with ERROR_BAD_ENVIRONMENT while
+    // the first registration is in progress (CI run 37668713946). Serialize
+    // within the process, and retry for a racer in another process.
+    let _guard = PROFILES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut hr = 0;
+    for attempt in 0..5u32 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(10 << attempt));
         }
-    } else if hr < 0 {
-        return Err(ExecError::SandboxUnavailable(format!(
-            "AppContainer profile {name}: HRESULT {hr:#x}"
-        )));
+        let mut sid: PSID = std::ptr::null_mut();
+        // SAFETY: valid wide strings and out-pointer; no capabilities.
+        hr = unsafe {
+            CreateAppContainerProfile(
+                n.as_ptr(),
+                n.as_ptr(),
+                desc.as_ptr(),
+                std::ptr::null(),
+                0,
+                &mut sid,
+            )
+        };
+        if hr == exists {
+            // Derive only once creation said the profile is there: it
+            // would compute a SID for a missing profile too.
+            // SAFETY: as above.
+            hr = unsafe { DeriveAppContainerSidFromAppContainerName(n.as_ptr(), &mut sid) };
+        }
+        if hr >= 0 {
+            return Ok(Sid {
+                ptr: sid,
+                local: false,
+            });
+        }
     }
-    Ok(Sid {
-        ptr: sid,
-        local: false,
-    })
+    Err(ExecError::SandboxUnavailable(format!(
+        "AppContainer profile {name}: HRESULT {hr:#x}"
+    )))
 }
 
 /// Delete the AppContainer profile `name`: `Ok(false)` if there was none.
 pub(crate) fn delete_profile(name: &str) -> Result<bool, ExecError> {
     let n = wide(OsStr::new(name));
+    let _guard = PROFILES.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: a valid wide string.
     let hr = unsafe { DeleteAppContainerProfile(n.as_ptr()) };
     if hr >= 0 {
