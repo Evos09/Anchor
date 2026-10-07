@@ -294,10 +294,17 @@ pub(crate) fn resolve_follow(
     let fd = open_follow(root, root_path, rel)?;
     let st = rfs::fstat(&fd).map_err(io)?;
     let canonical = fd_path(fd.as_fd())?;
+    let meta = meta_of(&st);
     if !starts_with_equivalent(&canonical, root_path) {
+        // macOS `F_GETPATH` reports whichever name the kernel has cached for
+        // a hardlinked file, which may be a link outside the root. Name the
+        // real cause: the file has another name (refused either way).
+        if meta.kind == Kind::File && meta.nlink > 1 {
+            return Err(FsError::HardlinkRefused(meta.nlink));
+        }
         return Err(FsError::EscapesWorkspace);
     }
-    Ok((canonical, meta_of(&st)))
+    Ok((canonical, meta))
 }
 
 pub(crate) fn is_symlink(

@@ -498,7 +498,7 @@ mod symlinks {
     #[test]
     fn symlink_swap_race_never_escapes() {
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
         let f = fixture();
         fs::create_dir(f.ws.join("inside")).unwrap();
@@ -507,6 +507,8 @@ mod symlinks {
         let ws = f.ws.clone();
         let outside = f.outside.clone();
         let s2 = stop.clone();
+        let flips = Arc::new(AtomicU64::new(0));
+        let f2 = flips.clone();
         let flipper = std::thread::spawn(move || {
             let mut n = 0u64;
             while !s2.load(Ordering::Relaxed) {
@@ -519,13 +521,21 @@ mod symlinks {
                 let _ = symlink(target, &tmp);
                 let _ = fs::rename(&tmp, ws.join("flip"));
                 n += 1;
+                f2.store(n, Ordering::Relaxed);
             }
             n
         });
         let w = Workspace::open(&f.ws).unwrap();
         let mut ok = 0;
         let mut refused = 0;
-        for i in 0..2000 {
+        // At least 2000 attempts, and on until the flipper has really raced
+        // us (a loaded machine may starve it at first).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut i = 0;
+        while i < 2000
+            || (flips.load(Ordering::Relaxed) <= 100 && std::time::Instant::now() < deadline)
+        {
+            i += 1;
             let name = format!("flip/f{i}.txt");
             match w.resolve(&name) {
                 Ok(r) => {
@@ -545,7 +555,7 @@ mod symlinks {
         stop.store(true, Ordering::Relaxed);
         let flips = flipper.join().unwrap();
         assert!(flips > 100, "flipper barely ran ({flips})");
-        assert!(ok + refused == 2000);
+        assert!(ok + refused == i);
         assert_outside_untouched(&f);
         eprintln!("swap race: {ok} writes landed inside, {refused} refused, {flips} flips");
     }
@@ -563,7 +573,19 @@ fn hardlink_attack_refused() {
     let f = fixture();
     fs::hard_link(f.outside.join("secret"), f.ws.join("innocent.txt")).unwrap();
     let w = Workspace::open(&f.ws).unwrap();
-    let r = w.resolve("innocent.txt").unwrap();
+    // On macOS the handle's path may read back as the outside name, and
+    // resolution itself refuses; otherwise reading and writing refuse.
+    let r = match w.resolve("innocent.txt") {
+        Ok(r) => r,
+        #[cfg(target_os = "macos")]
+        Err(e) => {
+            assert_eq!(e, FsError::HardlinkRefused(2));
+            assert_outside_untouched(&f);
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err(e) => panic!("unexpected refusal: {e:?}"),
+    };
     assert_eq!(w.read(&r), Err(FsError::HardlinkRefused(2)));
     let a = approve(&f, &w, &r, Operation::Write);
     let res = w.write(
