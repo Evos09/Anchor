@@ -66,6 +66,7 @@ USAGE:
                              the desktop app in a browser: open a project,
                              run tasks, approve, undo (ADR-0028)
       --mock-script FILE     scripted responses for mock providers (demos)
+      --exit-with-stdin      exit when stdin closes (the desktop shell)
 
   anchor eval run --corpus DIR [options]   seeded-bug harness (spec §8.5)
       --reviewer R           rule (default), model, accept-all or oracle
@@ -103,6 +104,7 @@ impl Args {
             "--all",
             "--ui",
             "--ui-exit",
+            "--exit-with-stdin",
         ];
         let mut pos = Vec::new();
         let mut flags = Vec::new();

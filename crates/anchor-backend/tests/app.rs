@@ -385,3 +385,38 @@ fn the_app_endpoints_are_gated() {
         400
     );
 }
+
+/// The desktop shell keeps `anchor app`'s stdin open; if the shell dies
+/// without stopping it, the pipe closes and the backend must not linger.
+#[test]
+fn the_app_exits_when_the_shell_goes_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = dir.path().join("url");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_anchor"))
+        .args(["app", "--exit-with-stdin", "--ui-url-file"])
+        .arg(&url)
+        .env("ANCHOR_STATE_DIR", dir.path().join("state"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !url.exists() {
+        assert!(Instant::now() < deadline, "the app did not start");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Still serving while the pipe is open.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(child.try_wait().unwrap().is_none());
+    drop(child.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "{status}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "the app outlived its shell");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

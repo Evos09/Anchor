@@ -3,3 +3,9 @@
 .anchor/
 __pycache__/
 *.pyc
+
+# The desktop shell (desktop/): its build output and the bundled backend
+# binaries CI copies in.
+desktop/target/
+desktop/binaries/
+desktop/gen/

@@ -15,6 +15,9 @@ members = [
     "crates/anchor-backend",
     "crates/anchor-sandbox-validation",
 ]
+# The desktop shell has its own workspace and lockfile (ADR-0028), so the
+# main build never needs a webview toolkit.
+exclude = ["desktop"]
 
 [workspace.package]
 version = "0.1.0"

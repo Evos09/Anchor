@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Anchor",
+  "version": "0.9.0",
+  "identifier": "dev.anchor.desktop",
+  "build": {
+    "frontendDist": "dist"
+  },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": false,
+    "security": {
+      "csp": "default-src 'none'",
+      "capabilities": []
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": ["binaries/anchor", "binaries/anchor-agent"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "A coding agent you can trust",
+    "longDescription": "Anchor is a coding agent that cannot lose your work, leak your credentials, or ship unverified changes. Open a project, give it a task, approve each change, and undo any turn.",
+    "license": "Apache-2.0",
+    "homepage": "https://github.com/evos09/anchor",
+    "publisher": "Anchor contributors",
+    "copyright": "Anchor contributors, Apache-2.0"
+  }
+}

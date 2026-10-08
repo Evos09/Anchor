@@ -618,8 +618,22 @@ pub fn cmd_app(a: &Args) -> Result<ExitCode, String> {
             .unwrap_or_else(session::default_agent_bin),
         policy: a.get("--policy").map(PathBuf::from),
     });
-    let ui = anchor_backend::ui::start_app(app, ui_port(a)?).map_err(|e| format!("app: {e}"))?;
+    let ui =
+        anchor_backend::ui::start_app(app.clone(), ui_port(a)?).map_err(|e| format!("app: {e}"))?;
     announce_ui(a, &ui)?;
+    if a.has("--exit-with-stdin") {
+        // The desktop shell holds our stdin open; when it goes away, even
+        // without a chance to stop us, the pipe closes and so do we.
+        std::thread::spawn(move || {
+            let mut sink = [0u8; 64];
+            let mut stdin = std::io::stdin();
+            while std::io::Read::read(&mut stdin, &mut sink).is_ok_and(|n| n > 0) {}
+            app.shutdown();
+            // Let a cancelled task's runtime be killed and audited.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::process::exit(0);
+        });
+    }
     eprintln!("anchor: the app is running. Press Ctrl-C to quit.");
     ui.wait();
     Ok(ExitCode::SUCCESS)

@@ -1,0 +1,29 @@
+# The desktop shell (ADR-0028): one window over the bundled `anchor app`
+# backend. Outside the main workspace so contributors never need a
+# webview toolkit; it has its own lockfile and `deny.toml`.
+[package]
+name = "anchor-desktop"
+version = "0.9.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/evos09/anchor"
+description = "Anchor's desktop app: a window over the loopback app the bundled `anchor` backend serves."
+publish = false
+rust-version = "1.89"
+
+# Standalone: not a member of the repository's workspace.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "=2.11.6", features = [] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+
+[dev-dependencies]
+serde_json = "1"

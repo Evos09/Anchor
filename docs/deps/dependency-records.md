@@ -138,6 +138,54 @@ and a router. The panels are hand-written CSS and SVG, which keeps the
 shipped JavaScript to React. The browser's own `fetch` is the only HTTP
 client.
 
+## Desktop shell (Phase 9, ADR-0028)
+
+Check date: **2026-10-08**. The shell (`desktop/`) is outside the main
+workspace, with its own `Cargo.lock` and `desktop/deny.toml`; nothing in the
+main tree depends on it. It holds no authority: no Tauri commands, plugins or
+capabilities (ADR-0028).
+
+| Crate | Version | Released | License (read) | Used for | Fitness evidence |
+|---|---|---|---|---|---|
+| tauri | 2.11.6 | 2026-09-19 (newest 2.x at least two weeks old; 2.12.0 and 2.12.1 are newer) | Apache-2.0 OR MIT (`LICENSE_APACHE-2.0`, `LICENSE_MIT`: standard) | the window and its webview (WebView2, WKWebView, WebKitGTK) | `desktop` tests; the packaged app's `--smoke` on each OS in CI; the window rendered the app under Xvfb (2026-10-08) |
+| tauri-build | 2.6.3 | 2026-06-17 (the version `tauri` 2.11.6 names) | Apache-2.0 OR MIT (standard) | build script: config, icons, sidecars | builds |
+| tauri-cli (tool, not linked) | 2.11.5 | 2026-09-19 (same release train) | Apache-2.0 OR MIT (standard) | `cargo tauri build`: the installers; installed `--locked` in CI | the CI desktop job; locally the .deb, .rpm and AppImage were built, and the .deb installed and ran |
+| serde_json (dev) | as resolved | — | already recorded above | the config test | — |
+
+1. **Existence.** These are the canonical crates of tauri-apps/tauri (its own
+   docs and templates name them); the `tauri-*` subcrates resolved by the
+   lockfile are all from the 2.11 release train (`tauri-runtime` 2.11.3,
+   `tauri-runtime-wry` 2.11.4, `tauri-utils` 2.9.3, `tauri-macros` and
+   `tauri-codegen` 2.6.3).
+2. **Maintenance.** Three 2.x releases in the 90 days before the check
+   (2.11.6, 2.12.0, 2.12.1) and an active 3.0 alpha line. As above, GitHub
+   activity was not reachable from the build environment.
+3. **License.** The tree is checked by `desktop/deny.toml`: the main allow
+   list, plus **MPL-2.0 for five crates by name**, each used unmodified with
+   its source on crates.io (MPL-2.0 is file-level copyleft; the text was
+   read): `cssparser`, `cssparser-macros`, `dtoa-short`, `selectors` (HTML
+   processing in `tauri-utils`, through `dom_query`) and `option-ext`
+   (through `dirs`).
+4. **Fitness.** Built and run on Linux here (WebKitGTK 2.52): the window
+   loads the app from the bundled backend; `--smoke` passes from the
+   installed .deb; killing the shell stops the backend (`--exit-with-stdin`).
+   macOS and Windows: the CI desktop job (build, tests, bundle, `--smoke`).
+5. **Security.** `cargo deny check` on `desktop/`: no vulnerability
+   advisories. **Six unmaintained notices are accepted by ID**, none a
+   vulnerability and none avoidable within Tauri 2:
+   `RUSTSEC-2024-0370` (`proc-macro-error`, compile time only, under the
+   GTK 3 bindings on Linux) and `RUSTSEC-2025-0075`, `-0080`, `-0081`,
+   `-0098`, `-0100` (the `unic-*` Unicode tables, through `urlpattern` in
+   `tauri-utils`). The tree: 430 crates in the lockfile across platforms;
+   362 resolved for Linux, 299 for Windows, 295 for macOS.
+
+The Linux AppImage bundler downloads unpinned helper tools
+(`linuxdeploy`, its plugins) at build time, so CI builds only `.deb` and
+`.rpm` on Linux. On Windows the bundler downloads pinned WiX 3 and NSIS
+releases and verifies them against hashes compiled into `tauri-bundler`
+2.9.4 (WiX: SHA-256; NSIS: SHA-1 only, a weaker check, recorded here). The
+macOS bundler uses the runner's own tools.
+
 ## Rejected or not adopted
 
 | Candidate | Reason |
@@ -150,4 +198,4 @@ client.
 | `zstd` (compression) | Not needed in Phase 3. A future candidate for compressing chunks; it would need a five-step record (and it binds a C library). |
 | `rmcp` 3.5.1 | Evaluated for Phase 4 (ADR-0004). (1) Exists: crates.io `rmcp`, published 2026-10-05; the repository `modelcontextprotocol/rust-sdk` is under the MCP organisation and its README calls it the official Rust SDK. (2) Maintained (published the day before the check). (3) Apache-2.0/MIT. Supports MCP 2026-07-28. **Not adopted** (the user's decision, 2026-10-06): it requires tokio, which would make the trusted backend async and add ~15 crates to the audit surface; the stateless 2026-07-28 server subset the Hub needs is small enough to own (`anchor-hub/src/mcp.rs`). |
 | third-party A2A crates (`a2a`, `a2a-rs-core`, ...) | No official Rust SDK found; A2A 1.0 (JSON-RPC binding) is implemented from the specification (ADR-0004). |
-| `tauri`, editor packages | Deferred: the dashboard ships as a web UI first (ADR-0025). Existence only recorded (ADRs 0002, 0008); five-step records come with their adoption. |
+| editor packages | Deferred (ADR-0008). `tauri` was adopted in Phase 9: see "Desktop shell". |

@@ -1,0 +1,81 @@
+# cargo-deny configuration for the desktop shell (ADR-0028), checked in CI
+# like the main one. It is the main policy plus named exceptions that Tauri's
+# tree needs, each recorded in docs/deps/dependency-records.md ("Desktop
+# shell"). None is a vulnerability. The shell holds no authority (no IPC, no
+# plugins): the backend it starts is the main workspace, under the main
+# policy.
+
+[graph]
+all-features = false
+
+[advisories]
+# RustSec advisory database (fetched over git). Any vulnerability or
+# unmaintained/unsound advisory fails the build.
+version = 2
+yanked = "deny"
+unmaintained = "all"
+ignore = [
+  # Unmaintained, no vulnerability. A proc macro (compile time only) under
+  # the GTK 3 bindings Tauri uses on Linux (glib-macros 0.18).
+  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: compile-time only, via gtk-rs 0.18 (Linux); no alternative within Tauri 2" },
+  # Unmaintained Unicode tables (rust-unic), via urlpattern in tauri-utils:
+  # static data for identifier matching, no vulnerability.
+  { id = "RUSTSEC-2025-0081", reason = "unic-char-property: static Unicode tables via urlpattern (tauri-utils)" },
+  { id = "RUSTSEC-2025-0075", reason = "unic-char-range: static Unicode tables via urlpattern (tauri-utils)" },
+  { id = "RUSTSEC-2025-0080", reason = "unic-common: static Unicode tables via urlpattern (tauri-utils)" },
+  { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident: static Unicode tables via urlpattern (tauri-utils)" },
+  { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version: static Unicode tables via urlpattern (tauri-utils)" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+# Permissive licenses compatible with an Apache-2.0 open core and a
+# commercial desktop shell. Each was read in full; see docs/deps/LICENSES.md.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "0BSD",
+  "Unlicense",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+]
+
+# MPL-2.0 is file-level copyleft: these crates are used unmodified, and
+# their source stays available from crates.io. Allowed for them only.
+[[licenses.exceptions]]
+crate = "cssparser"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "cssparser-macros"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "dtoa-short"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "selectors"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "option-ext"
+allow = ["MPL-2.0"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The runtime must not grow an async runtime or a second TLS stack silently.
+deny = [
+  { name = "openssl-sys", reason = "TLS is rustls only" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
