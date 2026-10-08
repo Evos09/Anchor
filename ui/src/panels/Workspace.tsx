@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ApiError, get, post, q } from "../api";
 import type { AppState, DirListing, Event, Overview, Pending, SnapshotsView } from "../types";
 import { Badge, Empty, ErrorLine, makeColors, time, usd } from "../util";
+import * as I from "../icons";
 import { Snapshots } from "./Snapshots";
 import { Audit } from "./Audit";
 import { Cost } from "./Cost";
+import { Settings, applyTheme, type Section } from "./Settings";
 
 const LABEL: Record<string, string> = {
   approve: "Approve",
@@ -14,22 +16,91 @@ const LABEL: Record<string, string> = {
   rollback: "Stop; roll back",
 };
 
-/** What the conversation shows (the rest is in the Audit tab). */
+/** What the conversation shows (the rest is in the Audit log). */
 function shown(e: Event): boolean {
   if (e.level === "trace") return false;
+  if (e.kind === "ui_action" && (e.data as { action?: string } | null)?.action === "open_project") return false;
   return !["usage", "approval_pending", "approval_resolved", "snapshot", "checkpoint_saved"].includes(e.kind);
 }
 
-/** The desktop app (ADR-0028): open a project, give the agent a task,
- * answer its approvals, undo its turns. */
+type Status = "running" | "done" | "failed" | "stopped";
+
+/** One task the user gave the agent, and everything logged until the next. */
+interface Task {
+  n: number;
+  start: Event;
+  text: string;
+  events: Event[];
+  status: Status;
+}
+
+/** The open project's tasks, oldest first, from its event feed (the audit
+ * log): each `start_task` action begins one, its `session_finished` says how
+ * it ended. */
+function tasksOf(events: Event[], running: boolean): Task[] {
+  const out: Task[] = [];
+  for (const e of events) {
+    const d = (e.data ?? {}) as { action?: string; args?: { text?: string } };
+    if (e.kind === "ui_action" && d.action === "start_task") {
+      out.push({ n: out.length, start: e, text: d.args?.text ?? "", events: [], status: "failed" });
+    } else {
+      out[out.length - 1]?.events.push(e);
+    }
+  }
+  out.forEach((t, i) => {
+    const fin = t.events.find((e) => e.kind === "session_finished");
+    const d = (fin?.data ?? {}) as { failed?: string | null; error?: string | null; done?: boolean };
+    if (!fin) t.status = running && i === out.length - 1 ? "running" : "failed";
+    else if (d.failed && /cancelled/.test(d.failed)) t.status = "stopped";
+    else if (d.failed || d.error) t.status = "failed";
+    else t.status = "done";
+  });
+  return out;
+}
+
+export function basename(p: string): string {
+  return p.split(/[\\/]+/).filter(Boolean).pop() ?? p;
+}
+
+function ago(ms: number): string {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return "now";
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  if (s < 86400 * 30) return `${Math.floor(s / 86400)}d`;
+  return `${Math.floor(s / (86400 * 30))}mo`;
+}
+
+const STATUS_TEXT: Record<Status, string> = {
+  running: "working",
+  done: "done",
+  failed: "failed",
+  stopped: "stopped",
+};
+
+type View =
+  | { kind: "home" }
+  | { kind: "task"; n: number | null } // null: the latest task
+  | { kind: "history" }
+  | { kind: "settings"; section: Section };
+
+type Tool = "" | "snapshots" | "audit" | "cost";
+
+/** The desktop app (ADR-0028): projects and their tasks on the left; give
+ * the agent a task, answer its approvals, undo its turns. */
 export function Workspace() {
   const [app, setApp] = useState<AppState | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [events, setEvents] = useState<Event[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [picker, setPicker] = useState(false);
-  const [side, setSide] = useState<"" | "snapshots" | "audit" | "cost">("");
+  const [tool, setTool] = useState<Tool>("");
+  const [view, setView] = useState<View>({ kind: "home" });
+  const [collapsed, setCollapsed] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const lastSeq = useRef(-1);
+
+  useEffect(() => applyTheme(), []);
 
   const refresh = useCallback(async () => {
     try {
@@ -54,6 +125,7 @@ export function Workspace() {
     let stop = false;
     lastSeq.current = -1;
     setEvents([]);
+    setView((v) => (v.kind === "settings" ? v : { kind: "home" }));
     (async () => {
       let wait: number | undefined = undefined;
       while (!stop) {
@@ -80,6 +152,9 @@ export function Workspace() {
     };
   }, [project, refresh]);
 
+  const running = app?.running ?? false;
+  const tasks = useMemo(() => tasksOf(events, running), [events, running]);
+
   if (error === "unauthorized") {
     return (
       <main className="gate">
@@ -88,105 +163,325 @@ export function Workspace() {
       </main>
     );
   }
-  const running = app?.running ?? false;
+
+  const openProject = async (path: string) => {
+    if (app?.missing.includes(path)) {
+      setNotice(`${path} does not exist any more (moved or deleted?).`);
+      return;
+    }
+    try {
+      await post("/api/app/open", { path });
+      setNotice(null);
+      setView({ kind: "home" });
+    } catch (e) {
+      setNotice(String(e));
+    }
+    await refresh();
+  };
+
+  if (view.kind === "settings" && app) {
+    return (
+      <div className="desk">
+        <Settings
+          app={app}
+          overview={overview}
+          section={view.section}
+          onSection={(section) => setView({ kind: "settings", section })}
+          onClose={() => setView({ kind: "home" })}
+          onChanged={refresh}
+          onOpen={openProject}
+        />
+      </div>
+    );
+  }
+
   const version = overview?.last_seq ?? -1;
+  const pending = overview?.pending ?? [];
+  const latest = tasks.length - 1;
+  const current = view.kind === "task" ? (view.n ?? latest) : null;
+  const shownTask = current !== null && current >= 0 ? tasks[current] : undefined;
+  const onLatest = shownTask !== undefined && shownTask.n === latest;
+  const waitingElsewhere = pending.length > 0 && !onLatest;
+
   return (
-    <div className="app">
-      <header className="top">
-        <div className="title">
-          <h1>Anchor</h1>
-          {project ? (
-            <span className="ws" title={project} data-testid="project">
-              {project}
-            </span>
-          ) : (
-            <span className="muted">no project open</span>
+    <div className={collapsed ? "desk desk-collapsed" : "desk"}>
+      {!collapsed && (
+        <Sidebar
+          app={app}
+          tasks={tasks}
+          current={shownTask?.n ?? null}
+          view={view}
+          running={running}
+          onCollapse={() => setCollapsed(true)}
+          onNew={() => setView({ kind: "home" })}
+          onHistory={() => setView({ kind: "history" })}
+          onTask={(n) => setView({ kind: "task", n })}
+          onOpen={openProject}
+          onPick={() => setPicker(true)}
+          onSettings={() => setView({ kind: "settings", section: "general" })}
+        />
+      )}
+      <div className="desk-main">
+        <header className="desk-top">
+          {collapsed && (
+            <button className="icon-btn" aria-label="Show the sidebar" onClick={() => setCollapsed(false)}>
+              <I.PanelLeft />
+            </button>
           )}
-          <button className="btn btn-small" onClick={() => setPicker(true)} disabled={running}>
-            Open folder…
-          </button>
-          {running && <span className="badge badge-live">working</span>}
-        </div>
-        {overview && (
-          <div className="stats" aria-label="summary">
-            <button className="stat" onClick={() => setSide(side === "cost" ? "" : "cost")}>
-              <b>{usd(overview.cost_total.spend_usd)}</b> spent
+          <div className="desk-crumb">
+            {project ? (
+              <span data-testid="project" title={project}>
+                <b>{basename(project)}</b> <span className="muted small">{project}</span>
+              </span>
+            ) : (
+              <b>Anchor</b>
+            )}
+            {running && <span className="badge badge-live">working</span>}
+          </div>
+          {waitingElsewhere && (
+            <button className="btn btn-small btn-attn" onClick={() => setView({ kind: "task", n: null })}>
+              The agent is waiting for your OK
             </button>
-            <button className="stat" onClick={() => setSide(side === "snapshots" ? "" : "snapshots")}>
-              Snapshots
-            </button>
-            <button
-              className={`stat ${overview.chain.error ? "stat-fail" : "stat-ok"}`}
-              onClick={() => setSide(side === "audit" ? "" : "audit")}
-              title="The audit log's hash chain, verified as it is read"
-            >
-              {overview.chain.error ? "audit chain BROKEN" : "audit log"}
-            </button>
+          )}
+          {overview && (
+            <div className="desk-tools" role="toolbar" aria-label="Tools">
+              <button
+                className={tool === "snapshots" ? "tool tool-on" : "tool"}
+                aria-pressed={tool === "snapshots"}
+                onClick={() => setTool(tool === "snapshots" ? "" : "snapshots")}
+              >
+                <I.Camera /> Snapshots
+              </button>
+              <button
+                className={`tool ${tool === "audit" ? "tool-on" : ""} ${overview.chain.error ? "tool-fail" : ""}`}
+                aria-pressed={tool === "audit"}
+                onClick={() => setTool(tool === "audit" ? "" : "audit")}
+                title="The audit log's hash chain, verified as it is read"
+              >
+                <I.Shield /> {overview.chain.error ? "Audit chain BROKEN" : "Audit log"}
+              </button>
+              <button
+                className={tool === "cost" ? "tool tool-on" : "tool"}
+                aria-pressed={tool === "cost"}
+                onClick={() => setTool(tool === "cost" ? "" : "cost")}
+              >
+                <I.Coins /> {usd(overview.cost_total.spend_usd, 2)}
+              </button>
+            </div>
+          )}
+        </header>
+        {error && (
+          <div className="notice notice-warn" role="status">
+            {error}
           </div>
         )}
-      </header>
-      {error && (
-        <div className="banner banner-warn" role="status">
-          {error}
+        <div className={tool && overview ? "desk-body desk-body-drawer" : "desk-body"}>
+          <main className="desk-content">
+            {notice && (
+              <Notice title="Missing folder" onClose={() => setNotice(null)}>
+                <I.Folder /> {notice}
+              </Notice>
+            )}
+            {!project ? (
+              <Welcome app={app} onPick={() => setPicker(true)} onOpen={openProject} />
+            ) : view.kind === "history" ? (
+              <HistoryList tasks={tasks} onTask={(n) => setView({ kind: "task", n })} />
+            ) : shownTask ? (
+              <>
+                <Conversation
+                  key={shownTask.n}
+                  events={[shownTask.start, ...shownTask.events]}
+                  pending={onLatest ? pending : []}
+                  version={version}
+                  running={running && onLatest}
+                  rollbackBlocked={overview?.rollback ?? null}
+                  onChanged={refresh}
+                />
+                <Composer
+                  app={app}
+                  running={running}
+                  onSent={() => setView({ kind: "task", n: null })}
+                  onChanged={refresh}
+                  onModels={() => setView({ kind: "settings", section: "models" })}
+                />
+              </>
+            ) : (
+              <Home
+                app={app}
+                project={project}
+                running={running}
+                onPick={() => setPicker(true)}
+                onSent={() => setView({ kind: "task", n: null })}
+                onChanged={refresh}
+                onModels={() => setView({ kind: "settings", section: "models" })}
+              />
+            )}
+          </main>
+          {tool && overview && (
+            <aside className="drawer" aria-label={tool}>
+              <div className="row drawer-head">
+                <h2>{tool === "snapshots" ? "Snapshot timeline" : tool === "audit" ? "Audit log" : "Cost meter"}</h2>
+                <button className="icon-btn" aria-label="Close" onClick={() => setTool("")}>
+                  <I.Close />
+                </button>
+              </div>
+              {tool === "snapshots" && <Snapshots version={version} colors={makeColors([])} />}
+              {tool === "audit" && <Audit events={events} overview={overview} />}
+              {tool === "cost" && <Cost version={version} colors={makeColors([])} />}
+            </aside>
+          )}
         </div>
-      )}
-      {app && <Models app={app} onChanged={refresh} />}
+      </div>
       {picker && app && (
         <Picker
           app={app}
           onClose={() => setPicker(false)}
           onOpened={async () => {
             setPicker(false);
+            setNotice(null);
+            setView({ kind: "home" });
             await refresh();
           }}
         />
       )}
-      <div className={side ? "app-layout app-layout-side" : "app-layout"}>
-        <main className="conversation">
-          {!project ? (
-            <Welcome app={app} onPick={() => setPicker(true)} onOpened={refresh} />
-          ) : (
-            <Conversation
-              events={events}
-              pending={overview?.pending ?? []}
-              version={version}
-              running={running}
-              rollbackBlocked={overview?.rollback ?? null}
-              onChanged={refresh}
-            />
-          )}
-          {project && <Composer running={running} onChanged={refresh} />}
-        </main>
-        {side && overview && (
-          <aside className="panel side-panel" aria-label={side}>
-            <div className="row">
-              <h2>{side === "snapshots" ? "Snapshot timeline" : side === "audit" ? "Audit log" : "Cost meter"}</h2>
-              <button className="btn btn-small" onClick={() => setSide("")}>
-                Close
-              </button>
-            </div>
-            {side === "snapshots" && <Snapshots version={version} colors={makeColors([])} />}
-            {side === "audit" && <Audit events={events} overview={overview} />}
-            {side === "cost" && <Cost version={version} colors={makeColors([])} />}
-          </aside>
-        )}
-      </div>
     </div>
   );
 }
 
-function Welcome({ app, onPick, onOpened }: { app: AppState | null; onPick: () => void; onOpened: () => void }) {
-  const [error, setError] = useState<string | null>(null);
-  const open = async (path: string) => {
-    try {
-      await post("/api/app/open", { path });
-      onOpened();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
+function Sidebar({
+  app,
+  tasks,
+  current,
+  view,
+  running,
+  onCollapse,
+  onNew,
+  onHistory,
+  onTask,
+  onOpen,
+  onPick,
+  onSettings,
+}: {
+  app: AppState | null;
+  tasks: Task[];
+  current: number | null;
+  view: View;
+  running: boolean;
+  onCollapse: () => void;
+  onNew: () => void;
+  onHistory: () => void;
+  onTask: (n: number) => void;
+  onOpen: (path: string) => void;
+  onPick: () => void;
+  onSettings: () => void;
+}) {
+  const project = app?.project ?? null;
+  const recent = app?.recent ?? [];
+  const newest = [...tasks].reverse();
+  const SHOWN = 12;
   return (
-    <section className="welcome">
+    <aside className="desk-side" aria-label="Projects">
+      <div className="side-brand">
+        <I.Logo />
+        <span>Anchor</span>
+        <button className="icon-btn" aria-label="Hide the sidebar" onClick={onCollapse}>
+          <I.PanelLeft />
+        </button>
+      </div>
+      <button className="side-new" onClick={onNew} disabled={!project}>
+        <I.Plus /> New task
+      </button>
+      <button
+        className={view.kind === "history" ? "side-item side-on" : "side-item"}
+        onClick={onHistory}
+        disabled={!project}
+      >
+        <I.History /> Task history
+      </button>
+      <div className="side-head">
+        <span>Projects</span>
+        <button className="icon-btn" aria-label="Open folder…" title="Open folder…" onClick={onPick} disabled={running}>
+          <I.FolderPlus />
+        </button>
+      </div>
+      <nav className="side-projects">
+        {!recent.length && <p className="side-empty">No projects yet.</p>}
+        {recent.map((r) => {
+          const open = r === project;
+          const gone = app?.missing.includes(r) ?? false;
+          return (
+            <div key={r} className="side-group">
+              <button
+                className={`side-project ${open ? "side-project-open" : ""} ${gone ? "side-gone" : ""}`}
+                title={gone ? `${r} (folder not found)` : r}
+                onClick={() => !open && onOpen(r)}
+                disabled={running && !open}
+              >
+                <I.Folder /> <span className="side-label">{basename(r)}</span>
+                {gone && <span className="side-age">not found</span>}
+              </button>
+              {open &&
+                newest.slice(0, SHOWN).map((t) => (
+                  <button
+                    key={t.n}
+                    className={current === t.n && view.kind === "task" ? "side-task side-on" : "side-task"}
+                    onClick={() => onTask(t.n)}
+                    title={t.text}
+                    data-testid="history-item"
+                  >
+                    <span className={`dot-status dot-${t.status}`} aria-label={STATUS_TEXT[t.status]} />
+                    <span className="side-label">{t.text.split("\n")[0]}</span>
+                    <span className="side-age">{ago(t.start.ts_ms)}</span>
+                  </button>
+                ))}
+              {open && newest.length > SHOWN && (
+                <button className="side-task side-more" onClick={onHistory}>
+                  Show all {newest.length}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </nav>
+      <button className="side-item side-settings" onClick={onSettings}>
+        <I.Gear /> Settings
+      </button>
+    </aside>
+  );
+}
+
+function Notice({
+  title,
+  kind = "",
+  children,
+  onClose,
+}: {
+  title: string;
+  kind?: string;
+  children: ReactNode;
+  onClose?: () => void;
+}) {
+  return (
+    <div className={`notice-card ${kind}`} role="status">
+      <div className="notice-head">
+        <span>{title}</span>
+        {onClose && (
+          <button className="icon-btn" aria-label="Dismiss" onClick={onClose}>
+            <I.Close />
+          </button>
+        )}
+      </div>
+      <div className="notice-body">{children}</div>
+    </div>
+  );
+}
+
+function Welcome({ app, onPick, onOpen }: { app: AppState | null; onPick: () => void; onOpen: (p: string) => void }) {
+  return (
+    <section className="center welcome">
+      <div className="welcome-mark">
+        <I.Logo size={40} />
+      </div>
       <h2>Open a project to start</h2>
       <p className="muted">
         Anchor works inside the folder you open. It asks you before it changes a file or runs a command, and every
@@ -195,76 +490,82 @@ function Welcome({ app, onPick, onOpened }: { app: AppState | null; onPick: () =
       <button className="btn btn-primary" onClick={onPick}>
         Open folder…
       </button>
-      <ErrorLine error={error} />
       {app && app.recent.length > 0 && (
-        <>
+        <div className="card-list">
           <h3>Recent</h3>
-          <ul className="recent">
-            {app.recent.map((r) => (
-              <li key={r}>
-                <button className="link" onClick={() => open(r)}>
-                  {r}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </>
+          {app.recent.map((r) => (
+            <button key={r} className="card-row" onClick={() => onOpen(r)} title={r}>
+              <I.Folder /> <b>{basename(r)}</b> <span className="muted small">{r}</span>
+              {app.missing.includes(r) && <span className="small fail">not found</span>}
+            </button>
+          ))}
+        </div>
       )}
     </section>
   );
 }
 
-/** The models file: which AI models the agent uses. */
-function Models({ app, onChanged }: { app: AppState; onChanged: () => void }) {
-  const [edit, setEdit] = useState(false);
-  const [path, setPath] = useState(app.models.path);
-  const [error, setError] = useState<string | null>(null);
-  if (app.models.ok && !edit) {
-    return (
-      <p className="models small muted">
-        Models: <code>{app.models.path}</code>{" "}
-        <button className="link" onClick={() => setEdit(true)}>
-          change
-        </button>
-      </p>
-    );
-  }
-  const save = async () => {
-    try {
-      await post("/api/app/models", { path });
-      setError(null);
-      setEdit(false);
-      onChanged();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
+/** A new task: the composer in the middle of the window. */
+function Home({
+  app,
+  project,
+  running,
+  onPick,
+  onSent,
+  onChanged,
+  onModels,
+}: {
+  app: AppState | null;
+  project: string;
+  running: boolean;
+  onPick: () => void;
+  onSent: () => void;
+  onChanged: () => void;
+  onModels: () => void;
+}) {
   return (
-    <div className={`banner ${app.models.ok ? "" : "banner-warn"} models`} role="status">
-      {!app.models.ok && (
-        <p>
-          The models file can't be used yet: {app.models.error}. Edit it, or point to another one. The default uses
-          two free local models through Ollama (see the README).
-        </p>
+    <section className="center home">
+      <h2 className="home-title">What should Anchor do in {basename(project)}?</h2>
+      {app && !app.models.ok && (
+        <Notice title="The models aren't ready" kind="notice-warn">
+          <p>{app.models.error}</p>
+          <p className="muted small">The default uses two free local models through Ollama.</p>
+          <div className="actions">
+            <button className="btn btn-primary" onClick={onModels}>
+              Fix in Settings
+            </button>
+          </div>
+        </Notice>
       )}
-      <div className="row">
-        <input
-          className="wide-input"
-          aria-label="Models file"
-          value={path}
-          onChange={(e) => setPath(e.target.value)}
-        />
-        <button className="btn" onClick={save}>
-          Use this file
-        </button>
-        {edit && (
-          <button className="btn" onClick={() => setEdit(false)}>
-            Cancel
+      <button className="chip-btn home-project" onClick={onPick} disabled={running} title={project}>
+        <I.Folder /> {basename(project)} <I.Chevron open />
+      </button>
+      <Composer app={app} running={running} big onSent={onSent} onChanged={onChanged} onModels={onModels} />
+      <p className="muted small home-hint">
+        Anchor asks before every change and command · every turn can be undone · Enter sends, Shift+Enter for a new
+        line
+      </p>
+    </section>
+  );
+}
+
+function HistoryList({ tasks, onTask }: { tasks: Task[]; onTask: (n: number) => void }) {
+  return (
+    <section className="history">
+      <h2>Task history</h2>
+      {!tasks.length && <Empty>No tasks in this project yet.</Empty>}
+      <div className="card-list">
+        {[...tasks].reverse().map((t) => (
+          <button key={t.n} className="card-row" onClick={() => onTask(t.n)}>
+            <span className={`dot-status dot-${t.status}`} aria-hidden="true" />
+            <span className="card-row-text">{t.text}</span>
+            <span className="muted small">
+              {STATUS_TEXT[t.status]} · {new Date(t.start.ts_ms).toLocaleString()}
+            </span>
           </button>
-        )}
+        ))}
       </div>
-      <ErrorLine error={error} />
-    </div>
+    </section>
   );
 }
 
@@ -302,85 +603,102 @@ function Picker({ app, onClose, onOpened }: { app: AppState; onClose: () => void
     }
   };
   return (
-    <div className="dialog picker" role="dialog" aria-label="Open a folder">
-      <div className="row">
-        <h3>Open a folder</h3>
-        <button className="btn btn-small" onClick={onClose}>
-          Close
-        </button>
-      </div>
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void browse(typed);
-        }}
-      >
-        <input
-          className="wide-input"
-          aria-label="Folder path"
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-          placeholder="a folder path"
-        />
-        <button className="btn" type="submit">
-          Go
-        </button>
-      </form>
-      <ErrorLine error={error} />
-      <div className="row">
-        <button className="btn btn-small" onClick={() => browse(undefined)}>
-          Start
-        </button>
-        {listing?.parent && (
-          <button className="btn btn-small" onClick={() => browse(listing.parent ?? undefined)}>
-            Up
+    <div className="modal">
+      <div className="dialog picker" role="dialog" aria-label="Open a folder">
+        <div className="row dialog-head">
+          <h3>Open a folder</h3>
+          <button className="icon-btn" aria-label="Close" onClick={onClose}>
+            <I.Close />
           </button>
-        )}
-        {listing?.path && (
-          <button className="btn btn-primary" onClick={() => open(listing.path!)} data-testid="open-here">
-            Open this folder
+        </div>
+        <form
+          className="row"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void browse(typed);
+          }}
+        >
+          <input
+            className="wide-input"
+            aria-label="Folder path"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            placeholder="a folder path"
+          />
+          <button className="btn" type="submit">
+            Go
           </button>
-        )}
-      </div>
-      <ul className="dirs">
-        {(listing?.dirs ?? []).map((d, i) => (
-          <li key={d}>
-            <button className="link" onClick={() => browse(d)}>
-              📁 {listing?.names?.[i] ?? d}
+        </form>
+        <ErrorLine error={error} />
+        <div className="row">
+          <button className="btn btn-small" onClick={() => browse(undefined)}>
+            Start
+          </button>
+          {listing?.parent && (
+            <button className="btn btn-small" onClick={() => browse(listing.parent ?? undefined)}>
+              Up
             </button>
-          </li>
-        ))}
-        {listing && !listing.dirs.length && <Empty>No folders here.</Empty>}
-      </ul>
-      {listing?.truncated && <p className="small muted">Only the first 2000 folders are shown.</p>}
-      {app.recent.length > 0 && (
-        <>
-          <h3>Recent</h3>
-          <ul className="recent">
-            {app.recent.map((r) => (
-              <li key={r}>
-                <button className="link" onClick={() => open(r)}>
-                  {r}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
+          )}
+          {listing?.path && (
+            <button className="btn btn-primary" onClick={() => open(listing.path!)} data-testid="open-here">
+              Open this folder
+            </button>
+          )}
+        </div>
+        <ul className="dirs">
+          {(listing?.dirs ?? []).map((d, i) => (
+            <li key={d}>
+              <button className="link" onClick={() => browse(d)}>
+                📁 {listing?.names?.[i] ?? d}
+              </button>
+            </li>
+          ))}
+          {listing && !listing.dirs.length && <Empty>No folders here.</Empty>}
+        </ul>
+        {listing?.truncated && <p className="small muted">Only the first 2000 folders are shown.</p>}
+        {app.recent.length > 0 && (
+          <>
+            <h3>Recent</h3>
+            <ul className="recent">
+              {app.recent.map((r) => (
+                <li key={r}>
+                  <button className="link" onClick={() => open(r)}>
+                    {r}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
     </div>
   );
 }
 
-function Composer({ running, onChanged }: { running: boolean; onChanged: () => void }) {
+function Composer({
+  app,
+  running,
+  big = false,
+  onSent,
+  onChanged,
+  onModels,
+}: {
+  app: AppState | null;
+  running: boolean;
+  big?: boolean;
+  onSent: () => void;
+  onChanged: () => void;
+  onModels: () => void;
+}) {
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const send = async () => {
-    if (!text.trim()) return;
+    if (!text.trim() || running) return;
     try {
       await post("/api/app/task", { text });
       setText("");
       setError(null);
+      onSent();
     } catch (e) {
       setError(String(e));
     }
@@ -395,31 +713,48 @@ function Composer({ running, onChanged }: { running: boolean; onChanged: () => v
     }
     onChanged();
   };
+  const roles = app?.models.roles;
   return (
-    <div className="composer">
-      <ErrorLine error={error} />
-      <div className="row">
+    <div className={big ? "composer composer-big" : "composer"}>
+      <div className="composer-card">
         <textarea
           aria-label="Task"
-          placeholder={running ? "The agent is working…" : "What should the agent do?"}
+          placeholder={running ? "The agent is working…" : "Ask Anchor to do something in this project…"}
           value={text}
           disabled={running}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void send();
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void send();
+            }
           }}
         />
-        {running ? (
-          <button className="btn btn-danger" onClick={stop}>
-            Stop
+        <div className="composer-bar">
+          <button
+            className={app?.models.ok ? "chip-btn" : "chip-btn chip-bad"}
+            onClick={onModels}
+            title={app ? `Models file: ${app.models.path}` : undefined}
+          >
+            <I.Cpu />
+            {app?.models.ok
+              ? `${roles?.executor ?? "executor"} · reviewed by ${roles?.reviewer ?? "reviewer"}`
+              : "Models not set up"}
+            <I.Chevron open />
           </button>
-        ) : (
-          <button className="btn btn-primary" onClick={send} disabled={!text.trim()}>
-            Send
-          </button>
-        )}
+          <span className="spacer" />
+          {running ? (
+            <button className="btn btn-danger btn-round-text" onClick={stop}>
+              <I.Stop /> Stop
+            </button>
+          ) : (
+            <button className="send-btn" aria-label="Send" title="Send" onClick={send} disabled={!text.trim()}>
+              <I.Send />
+            </button>
+          )}
+        </div>
       </div>
-      <p className="small muted">Ctrl+Enter sends.</p>
+      <ErrorLine error={error} />
     </div>
   );
 }
@@ -499,7 +834,6 @@ function Conversation({
   const items = events.filter(shown);
   return (
     <div className="thread" aria-live="polite">
-      {!items.length && !running && <Empty>Type a task below to begin.</Empty>}
       {items.map((e) => {
         const d = (e.data ?? {}) as Record<string, unknown>;
         if (e.kind === "ui_action" && d["action"] === "start_task") {
@@ -583,17 +917,19 @@ function Conversation({
         </p>
       )}
       {prepared && (
-        <div className="dialog" role="dialog" aria-label="Confirm undo">
-          <h3>Undo turn {prepared.turn} and everything after it?</h3>
-          <p>These {prepared.changes.length} path(s) go back to how they were (atomic, verified, audited):</p>
-          <pre className="pre">{prepared.changes.join("\n") || "(nothing to change)"}</pre>
-          <div className="actions">
-            <button className="btn btn-danger" onClick={confirm}>
-              Undo
-            </button>
-            <button className="btn" onClick={() => setPrepared(null)}>
-              Keep the changes
-            </button>
+        <div className="modal">
+          <div className="dialog dialog-danger" role="dialog" aria-label="Confirm undo">
+            <h3>Undo turn {prepared.turn} and everything after it?</h3>
+            <p>These {prepared.changes.length} path(s) go back to how they were (atomic, verified, audited):</p>
+            <pre className="pre">{prepared.changes.join("\n") || "(nothing to change)"}</pre>
+            <div className="actions">
+              <button className="btn btn-danger" onClick={confirm}>
+                Undo
+              </button>
+              <button className="btn" onClick={() => setPrepared(null)}>
+                Keep the changes
+              </button>
+            </div>
           </div>
         </div>
       )}

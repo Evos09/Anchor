@@ -184,10 +184,13 @@ impl App {
             "project": g.project.as_ref().map(|p| &p.root),
             "running": g.project.as_ref().is_some_and(Project::running),
             "recent": g.recent,
+            // Recent folders that have since gone (moved or deleted).
+            "missing": g.recent.iter().filter(|p| !p.is_dir()).collect::<Vec<_>>(),
             "models": {
                 "path": g.roles_path,
                 "ok": models.is_ok(),
                 "error": models.err(),
+                "roles": role_models(&g.roles_path),
             },
             "mock": self.cfg.mock_script.is_some(),
             "platform": std::env::consts::OS,
@@ -401,6 +404,23 @@ pub fn check_models(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The model each main role uses, for the page to show (`null` where the
+/// file does not say).
+fn role_models(path: &Path) -> Value {
+    let t: Option<toml::Table> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok());
+    let model = |role: &str| {
+        t.as_ref()
+            .and_then(|t| t.get("roles"))
+            .and_then(|r| r.get(role))
+            .and_then(|r| r.get("model_id"))
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+    };
+    json!({ "executor": model("executor"), "reviewer": model("reviewer") })
+}
+
 /// The folder picker: the directory names under `path` (absolute), or the
 /// starting points (home and the filesystem roots) without one.
 fn dirs(path: Option<&str>) -> Response {
@@ -486,6 +506,33 @@ mod tests {
         let ollama =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/local/roles.ollama.toml");
         assert_eq!(check_models(&ollama), Ok(()));
+        assert_eq!(
+            role_models(&ollama),
+            json!({ "executor": "qwen2.5-coder:7b", "reviewer": "llama3.1:8b" })
+        );
+        assert_eq!(
+            role_models(&d.path().join("absent.toml")),
+            json!({ "executor": null, "reviewer": null })
+        );
+    }
+
+    #[test]
+    fn the_state_names_recent_folders_that_are_gone() {
+        let d = tempfile::tempdir().unwrap();
+        let (here, gone) = (d.path().join("here"), d.path().join("gone"));
+        std::fs::create_dir(&here).unwrap();
+        let app = App::new(AppConfig {
+            state_base: d.path().join("state"),
+            roles_path: d.path().join("roles.toml"),
+            mock_script: None,
+            exec_read_only: vec![],
+            agent_bin: PathBuf::from("anchor-agent"),
+            policy: None,
+        });
+        app.lock().recent = vec![here.clone(), gone.clone()];
+        let v: Value = serde_json::from_slice(&app.state().body).unwrap();
+        assert_eq!(v["recent"], json!([here, gone]));
+        assert_eq!(v["missing"], json!([gone]));
     }
 
     #[test]

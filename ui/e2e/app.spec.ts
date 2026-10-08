@@ -1,6 +1,7 @@
 // Phase 9, end to end: the desktop app's page (`anchor app`, ADR-0028)
 // with a scripted model (examples/app): open the folder in the picker,
-// send a task, approve its two changes, see the answer, undo the turn.
+// send a task, approve its two changes, see the answer, undo the turn,
+// find the task in the sidebar's history, check the models in Settings.
 import { expect, test } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -29,6 +30,9 @@ async function waitFor<T>(f: () => T | undefined, ms: number): Promise<T> {
     await new Promise((r) => setTimeout(r, 100));
   }
 }
+
+// The window size of the user's screen.
+test.use({ viewport: { width: 1385, height: 880 } });
 
 test("open a folder, run a task, approve, undo", async ({ page }) => {
   dir = mkdtempSync(join(tmpdir(), "anchor-app-e2e-"));
@@ -78,6 +82,8 @@ test("open a folder, run a task, approve, undo", async ({ page }) => {
   await picker.getByRole("button", { name: /my-project/ }).click();
   await picker.getByTestId("open-here").click();
   await expect(page.getByTestId("project")).toContainText("my-project");
+  await expect(page.getByRole("heading", { name: "What should Anchor do in my-project?" })).toBeVisible();
+  await page.screenshot({ path: join(shots, "app-01b-new-task.png") });
 
   await page.getByLabel("Task").fill("Add a README and make the greeting mention anchor");
   await page.getByRole("button", { name: "Send" }).click();
@@ -100,6 +106,8 @@ test("open a folder, run a task, approve, undo", async ({ page }) => {
   await page.screenshot({ path: join(shots, "app-03-done.png"), fullPage: true });
 
   // Undo the turn that made the changes; the preview names both files.
+  await expect(page.getByTestId("history-item")).toHaveCount(1);
+  await expect(page.getByTestId("history-item")).toContainText("Add a README");
   await page.getByTestId("undo-2").click();
   const confirm = page.getByRole("dialog", { name: "Confirm undo" });
   await expect(confirm).toContainText("hello.py");
@@ -109,5 +117,25 @@ test("open a folder, run a task, approve, undo", async ({ page }) => {
   expect(readFileSync(join(ws, "hello.py"), "utf8")).toBe("print('hello')\n");
   expect(existsSync(join(ws, "README.md"))).toBe(false);
   await page.screenshot({ path: join(shots, "app-04-undone.png"), fullPage: true });
+
+  // New task, then back to the finished one from the sidebar.
+  await page.getByRole("button", { name: "New task" }).click();
+  await expect(page.getByLabel("Task")).toBeVisible();
+  await page.getByTestId("history-item").click();
+  await expect(page.getByTestId("result")).toBeVisible();
+
+  // Every tool is a click away: the snapshot timeline opens in a drawer.
+  await page.getByRole("button", { name: "Snapshots" }).click();
+  await expect(page.getByRole("heading", { name: "Snapshot timeline" })).toBeVisible();
+  await page.screenshot({ path: join(shots, "app-05-tools.png") });
+
+  // Settings: the safety rules (always on) and the models file.
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page.getByText("Always ask")).toBeVisible();
+  await page.screenshot({ path: join(shots, "app-06-settings.png") });
+  await page.getByRole("button", { name: "Models", exact: true }).click();
+  await expect(page.getByLabel("Models file")).toHaveValue(/roles\.mock\.toml$/);
+  await page.getByRole("button", { name: "Close settings" }).click();
+  await expect(page.getByTestId("project")).toContainText("my-project");
   expect(log).not.toMatch(/panicked/);
 });

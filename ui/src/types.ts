@@ -261,7 +261,14 @@ export interface AppState {
   project: string | null;
   running: boolean;
   recent: string[];
-  models: { path: string; ok: boolean; error: string | null };
+  /** Recent folders that no longer exist. */
+  missing: string[];
+  models: {
+    path: string;
+    ok: boolean;
+    error: string | null;
+    roles: { executor: string | null; reviewer: string | null };
+  };
   mock: boolean;
   platform: string;
   home: string | null;
