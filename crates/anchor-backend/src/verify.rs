@@ -1165,6 +1165,7 @@ impl ModelReviewer {
                 mock_script,
                 hub: None,
                 review: None,
+                extra_env: Default::default(),
             },
             view,
             executor_families,

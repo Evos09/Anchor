@@ -208,6 +208,32 @@ these rows cover what is new.
 | An unusable models file (a model reviewing its own family) | Checked before a task starts and when chosen | `models_files_are_checked`, `the_app_endpoints_are_gated` | ✅ Linux, macOS, Windows (CI 37709101248) |
 | The packaged app does not start | Each OS's installer build runs the packaged app's `--smoke` | CI desktop job | ✅ Linux, macOS, Windows (CI 37709101248) |
 
+## Update #1: inference paths, free-tier proxy (ADR-0029 to ADR-0038)
+
+New surfaces: API keys in the app, network calls from the backend (the
+Ollama probe, a key's verify call, the free-tier client), and a hosted
+proxy that sees request content. The five safety primitives, the process
+model, the verification pipeline, the Hub, the permission engine, path
+resolution and the snapshot engine are unchanged. Status "⏳ CI" means the
+test runs locally on Linux and its cross-platform result is the CI run
+for this change.
+
+| Threat / requirement | Mitigation | Test | Status |
+|---|---|---|---|
+| A BYOK key leaks (log, audit, `app.json`, error, page) | Keys only in the OS keychain; passed to the runtime as environment, redacted in `Debug`; never in the models file (it names a variable); audit records the provider only; errors never format the key or stored bytes | `secret_env_never_prints_values`, `the_roles_file_carries_no_secret_and_the_runtime_accepts_it`, `inference_settings_are_checked_saved_and_hold_no_secret`, `a_key_is_verified_with_its_own_provider_and_never_echoed` | ⏳ CI |
+| A key is not really removed | Removal deletes the keychain entry and reads it back | `the_memory_store_sets_gets_and_wipes`, `the_system_keychain_sets_gets_and_wipes` (real keychain on macOS and Windows CI) | ⏳ CI |
+| A key goes somewhere other than its provider | The verify call and the runtime both use the registry's `base_url` for that provider (https only, or loopback for local) | `a_key_is_verified_with_its_own_provider_and_never_echoed`; registry validation | ⏳ CI |
+| The reviewer shares the executor's family | Per-task plans pick a reviewer of another family, or prompt; the runtime and the verify gate still enforce the rule | `the_reviewer_is_always_another_family` | ⏳ CI |
+| A pinned (private) project leaks to a cloud path | A pin or a `/local` override confines the executor and the reviewer to that path | `the_reviewer_is_always_another_family`; router `a_project_pin_forces_one_path`, `a_slash_command_overrides_the_setting_for_one_task` | ⏳ CI |
+| A task fails obscurely when nothing can run it | The router returns a prompt with the three ways forward, never an error | `a_routed_task_with_no_model_gets_a_prompt`, `nothing_available_is_a_prompt_with_the_three_ways_forward`, e2e `app.spec.ts` | ⏳ CI |
+| The proxy stores or logs content | No store method takes content; the `log` table holds exactly the metadata fields; content is never formatted into errors | `the_log_table_has_exactly_the_metadata_columns`, `request_content_is_never_written_to_disk` (scans the proxy's files for the request's text) | ⏳ CI |
+| A user exceeds the caps (clock games, parallel requests, long outputs) | Server clock only; reservation before forwarding; stream cut at reservation + 20%; overrun charged to the next window | `what_the_client_says_about_time_changes_nothing`, `pre_flight_refuses_a_request_beyond_the_budget_without_forwarding`, `the_stream_is_cut_when_output_passes_the_reservation`, caps unit tests | ⏳ CI |
+| The pool is drained by a few users | Pool daily cap; fair share once 80% used | `the_pool_cap_holds_whatever_the_users_own_caps_say`, pool unit tests | ⏳ CI |
+| The pool breaks a provider's terms | One account per provider; an account needs a provider ADR with `Verdict: INCLUDE`; none passes today | `one_account_per_provider`, `every_provider_needs_a_terms_adr_that_clears_it`, `no_shipped_provider_adr_clears_the_gate_yet`, `the_proxy_refuses_to_start_without_terms_adrs_or_with_two_accounts` | ⏳ CI |
+| A free model's license forbids the use | Free-tier eligibility from license fields only, validated at load | `selection_is_by_license_not_by_name`, `no_name_pattern_matching_in_selection_code`, registry refusal tests | ⏳ CI |
+| A provider's refusal is lost | The runtime reads error bodies and shows the provider's message | `a_providers_error_message_reaches_the_user` | ⏳ CI |
+| Installers are tampered with or unsigned | Signing and notarization when the owner adds the secrets, then verified in CI (ADR-0033) | CI desktop job | ⏳ needs certificates |
+
 ## Phase 2 "verified by instrumentation"
 
 - *No filesystem mutation bypasses the permission engine*: mutations

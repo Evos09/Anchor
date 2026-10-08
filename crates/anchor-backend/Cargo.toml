@@ -31,6 +31,9 @@ regex.workspace = true
 globset.workspace = true
 ignore.workspace = true
 getrandom.workspace = true
+ureq = { workspace = true, features = ["json"] }
+anchor-inference.workspace = true
+keyring.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

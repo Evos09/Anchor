@@ -1,0 +1,31 @@
+[package]
+name = "anchor-proxy"
+description = "Anchor's free-tier proxy (Update #1 §4): server-side caps with reservations, a quota-aware pool of one key per provider, and metadata-only logging. Open source so its privacy claims can be checked."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "anchor-proxy"
+path = "src/main.rs"
+
+[dependencies]
+anchor-inference.workspace = true
+anchor-hub.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+rusqlite.workspace = true
+ureq = { workspace = true, features = ["json"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

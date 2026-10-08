@@ -3,7 +3,7 @@
 # webview toolkit; it has its own lockfile and `deny.toml`.
 [package]
 name = "anchor-desktop"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/evos09/anchor"

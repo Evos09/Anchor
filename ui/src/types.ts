@@ -269,9 +269,92 @@ export interface AppState {
     error: string | null;
     roles: { executor: string | null; reviewer: string | null };
   };
+  /** How tasks pick their models (Update #1). */
+  inference?: {
+    source: "routed" | "file";
+    preference: Preference;
+    pin: InfPath | null;
+    free_offered: boolean;
+  };
   mock: boolean;
   platform: string;
   home: string | null;
+}
+
+/** A: the free tier · B: your own key · C: local (Ollama). */
+export type InfPath = "A" | "B" | "C";
+export type Preference = "auto" | "prefer_local" | "prefer_byok" | "free_only";
+
+export interface Meter {
+  used: number;
+  budget: number;
+  resets_at_ms: number | null;
+}
+
+export interface InferenceStatus {
+  source: "routed" | "file";
+  preference: Preference;
+  order: InfPath[] | null;
+  pin: InfPath | null;
+  preferred: Partial<Record<InfPath, string>>;
+  models_file: string;
+  local: {
+    port: number;
+    running: boolean;
+    version: string | null;
+    error: string | null;
+    ready: {
+      model: string;
+      label: string;
+      family: string;
+      license: { id: string; commercial: boolean; gated: boolean; notes: string } | null;
+    }[];
+    needs_family: { model: string; hint: string; size: string }[];
+  };
+  byok: {
+    id: string;
+    name: string;
+    key_url: string;
+    has_key: boolean;
+    model: string | null;
+    ready: boolean;
+    problem: string | null;
+  }[];
+  free: {
+    offered: boolean;
+    started: boolean;
+    state: { state: "available" } | { state: "exhausted" | "unavailable"; reason: string };
+    usage: {
+      now_ms: number;
+      caps: { five_hour: Meter; weekly: Meter; monthly: Meter; blocked_by: string | null };
+      pool: { providers: number; saturated: boolean };
+    } | null;
+  };
+}
+
+export interface PromptOption {
+  path: InfPath;
+  title: string;
+  detail: string;
+  ready: boolean;
+}
+
+/** What the app asks when no model can run a task. */
+export interface TaskPrompt {
+  reason: { kind: "nothing_available" | "path_unavailable"; path?: InfPath; why?: string };
+  message: string;
+  options: PromptOption[];
+}
+
+export interface TaskReply {
+  ok: boolean;
+  session_id?: string;
+  prompt?: TaskPrompt;
+  route?: {
+    path: InfPath;
+    executor: { model: string; family: string; path: InfPath };
+    reviewer: { model: string; family: string; path: InfPath };
+  } | null;
 }
 
 export interface DirListing {

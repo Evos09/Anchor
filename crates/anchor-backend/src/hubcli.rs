@@ -588,6 +588,20 @@ const DEFAULT_APP_ROLES: &str = include_str!("../assets/roles.ollama.toml");
 /// loopback; the user opens projects and runs tasks from the page.
 pub fn cmd_app(a: &Args) -> Result<ExitCode, String> {
     let state_base = default_state_base();
+    let keys: std::sync::Arc<dyn anchor_backend::inference::keys::KeyStore> = match a.get("--keys")
+    {
+        None | Some("system") => std::sync::Arc::new(anchor_backend::inference::keys::Keychain),
+        // Demos and tests: keys live only as long as the app.
+        Some("memory") => {
+            std::sync::Arc::new(anchor_backend::inference::keys::MemoryKeys::default())
+        }
+        Some(other) => return Err(format!("--keys {other}: expected system or memory")),
+    };
+    let free_url = a
+        .get("--free-url")
+        .map(str::to_string)
+        .or_else(|| std::env::var("ANCHOR_FREE_URL").ok());
+    let inference = anchor_backend::inference::Inference::new(keys, free_url)?;
     let roles_path = match a.get("--roles") {
         Some(r) => std::fs::canonicalize(r).map_err(|e| format!("--roles {r}: {e}"))?,
         None => {
@@ -617,6 +631,8 @@ pub fn cmd_app(a: &Args) -> Result<ExitCode, String> {
             .map(PathBuf::from)
             .unwrap_or_else(session::default_agent_bin),
         policy: a.get("--policy").map(PathBuf::from),
+        roles_explicit: a.get("--roles").is_some(),
+        inference,
     });
     let ui =
         anchor_backend::ui::start_app(app.clone(), ui_port(a)?).map_err(|e| format!("app: {e}"))?;

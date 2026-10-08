@@ -40,6 +40,11 @@ pub enum ProviderError {
     MissingKey(String),
     #[error("mock script error: {0}")]
     Script(String),
+    /// The provider answered with an error status; `message` is the
+    /// error it gave (OpenAI's `error.message`), so the user sees why,
+    /// e.g. a free-tier cap and when it resets.
+    #[error("the provider refused the request ({status}): {message}")]
+    Refused { status: u16, message: String },
 }
 
 pub trait Provider: std::fmt::Debug {
@@ -104,6 +109,9 @@ impl OpenAiCompatible {
         };
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(cfg.timeout_secs)))
+            // Error statuses come back as responses, so their bodies
+            // (which say why) are not lost.
+            .http_status_as_error(false)
             .build()
             .into();
         Ok(OpenAiCompatible {
@@ -255,12 +263,49 @@ impl Provider for OpenAiCompatible {
         let resp = req
             .send_json(&body)
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let text = resp
+                .into_body()
+                .with_config()
+                .limit(64 * 1024)
+                .read_to_string()
+                .unwrap_or_default();
+            return Err(refusal(status, &text));
+        }
         let v: serde_json::Value = resp
             .into_body()
             .read_json()
             .map_err(|e| ProviderError::BadResponse(e.to_string()))?;
         parse_openai_response(&v)
     }
+}
+
+/// What an error response says: OpenAI's `{"error":{"message":..}}`, or
+/// the start of the body when it is not that shape.
+pub fn refusal(status: u16, body: &str) -> ProviderError {
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .or_else(|| v.get("message"))
+                .or_else(|| v.get("error").filter(|e| e.is_string()))
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| {
+            let t = body.trim();
+            let mut end = t.len().min(300);
+            while !t.is_char_boundary(end) {
+                end -= 1;
+            }
+            if t.is_empty() {
+                "no details given".to_string()
+            } else {
+                t[..end].to_string()
+            }
+        });
+    ProviderError::Refused { status, message }
 }
 
 // ---------------------------------------------------------------------------

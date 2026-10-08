@@ -63,9 +63,13 @@ USAGE:
   anchor ui --workspace DIR [--port N] [--ui-url-file FILE]
                              the dashboard for a workspace, outside a run
   anchor app [--roles FILE] [--ui-port N] [--ui-url-file FILE]
+                             (without --roles, models are chosen per task:
+                             local, your own key, or the free tier)
                              the desktop app in a browser: open a project,
                              run tasks, approve, undo (ADR-0028)
       --mock-script FILE     scripted responses for mock providers (demos)
+      --keys system|memory   where API keys live (default: the system keychain)
+      --free-url URL         the free tier (or ANCHOR_FREE_URL); none by default
       --exit-with-stdin      exit when stdin closes (the desktop shell)
 
   anchor eval run --corpus DIR [options]   seeded-bug harness (spec §8.5)
@@ -190,6 +194,7 @@ fn cmd_run(a: &Args) -> Result<ExitCode, String> {
         mock_script: a.get("--mock-script").map(read).transpose()?,
         hub: None,
         review: None,
+        extra_env: Default::default(),
     };
     eprintln!(
         "anchor: workspace {}",

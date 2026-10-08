@@ -1,12 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ApiError, get, post, q } from "../api";
-import type { AppState, DirListing, Event, Overview, Pending, SnapshotsView } from "../types";
+import type {
+  AppState,
+  DirListing,
+  Event,
+  Overview,
+  Pending,
+  Preference,
+  SnapshotsView,
+  TaskPrompt,
+  TaskReply,
+} from "../types";
 import { Badge, Empty, ErrorLine, makeColors, time, usd } from "../util";
 import * as I from "../icons";
 import { Snapshots } from "./Snapshots";
 import { Audit } from "./Audit";
 import { Cost } from "./Cost";
 import { Settings, applyTheme, type Section } from "./Settings";
+import {
+  FirstFailure,
+  GetStarted,
+  PATH_NAME,
+  PromptCard,
+  firstFailureSeen,
+  markFirstFailureSeen,
+  useInference,
+} from "./Inference";
 
 const LABEL: Record<string, string> = {
   approve: "Approve",
@@ -98,6 +117,7 @@ export function Workspace() {
   const [view, setView] = useState<View>({ kind: "home" });
   const [collapsed, setCollapsed] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [failureSeen, setFailureSeen] = useState(firstFailureSeen);
   const lastSeq = useRef(-1);
 
   useEffect(() => applyTheme(), []);
@@ -288,6 +308,14 @@ export function Workspace() {
               <HistoryList tasks={tasks} onTask={(n) => setView({ kind: "task", n })} />
             ) : shownTask ? (
               <>
+                {shownTask.status === "failed" && !failureSeen && (
+                  <FirstFailure
+                    onClose={() => {
+                      markFirstFailureSeen();
+                      setFailureSeen(true);
+                    }}
+                  />
+                )}
                 <Conversation
                   key={shownTask.n}
                   events={[shownTask.start, ...shownTask.events]}
@@ -526,7 +554,8 @@ function Home({
   return (
     <section className="center home">
       <h2 className="home-title">What should Anchor do in {basename(project)}?</h2>
-      {app && !app.models.ok && (
+      {app?.inference?.source === "routed" && <HomeStart onModels={onModels} />}
+      {app && app.inference?.source !== "routed" && !app.models.ok && (
         <Notice title="The models aren't ready" kind="notice-warn">
           <p>{app.models.error}</p>
           <p className="muted small">The default uses two free local models through Ollama.</p>
@@ -548,6 +577,18 @@ function Home({
     </section>
   );
 }
+
+function HomeStart({ onModels }: { onModels: () => void }) {
+  const [s] = useInference(20000);
+  return s ? <GetStarted s={s} onSetup={() => onModels()} /> : null;
+}
+
+const PREF_NAME: Record<Preference, string> = {
+  auto: "automatic",
+  prefer_local: "local first",
+  prefer_byok: "your key first",
+  free_only: "free tier only",
+};
 
 function HistoryList({ tasks, onTask }: { tasks: Task[]; onTask: (n: number) => void }) {
   return (
@@ -692,13 +733,20 @@ function Composer({
 }) {
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [prompt, setPrompt] = useState<TaskPrompt | null>(null);
   const send = async () => {
     if (!text.trim() || running) return;
     try {
-      await post("/api/app/task", { text });
-      setText("");
+      const r = await post<TaskReply>("/api/app/task", { text });
       setError(null);
-      onSent();
+      if (r.prompt) {
+        // Nothing can run it yet: ask, and keep the text.
+        setPrompt(r.prompt);
+      } else {
+        setPrompt(null);
+        setText("");
+        onSent();
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -714,8 +762,21 @@ function Composer({
     onChanged();
   };
   const roles = app?.models.roles;
+  const inf = app?.inference;
+  const routed = inf?.source === "routed";
+  const override = /^\/(local|byok|free)\b/.exec(text.trim())?.[1];
+  const chip = routed
+    ? override
+      ? `This task: ${override === "local" ? "local" : override === "byok" ? "your API key" : "free tier"}`
+      : inf?.pin
+        ? `Pinned: ${PATH_NAME[inf.pin]}`
+        : `Models: ${PREF_NAME[inf?.preference ?? "auto"]}`
+    : app?.models.ok
+      ? `${roles?.executor ?? "executor"} · reviewed by ${roles?.reviewer ?? "reviewer"}`
+      : "Models not set up";
   return (
     <div className={big ? "composer composer-big" : "composer"}>
+      {prompt && <PromptCard prompt={prompt} onSetup={() => onModels()} onClose={() => setPrompt(null)} />}
       <div className="composer-card">
         <textarea
           aria-label="Task"
@@ -732,14 +793,19 @@ function Composer({
         />
         <div className="composer-bar">
           <button
-            className={app?.models.ok ? "chip-btn" : "chip-btn chip-bad"}
+            className={routed || app?.models.ok ? "chip-btn" : "chip-btn chip-bad"}
             onClick={onModels}
-            title={app ? `Models file: ${app.models.path}` : undefined}
+            data-testid="path-chip"
+            title={
+              routed
+                ? "Start a task with /local, /byok or /free to choose for that task only"
+                : app
+                  ? `Models file: ${app.models.path}`
+                  : undefined
+            }
           >
             <I.Cpu />
-            {app?.models.ok
-              ? `${roles?.executor ?? "executor"} · reviewed by ${roles?.reviewer ?? "reviewer"}`
-              : "Models not set up"}
+            {chip}
             <I.Chevron open />
           </button>
           <span className="spacer" />

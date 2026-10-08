@@ -4,7 +4,8 @@
 // find the task in the sidebar's history, check the models in Settings.
 import { expect, test } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,11 +16,27 @@ const shots = join(repo, "ui/test-results/screens");
 
 let proc: ChildProcess | null = null;
 let dir = "";
+let proc2: ChildProcess | null = null;
+let dir2 = "";
 
 test.afterAll(() => {
   proc?.kill("SIGTERM");
+  proc2?.kill("SIGTERM");
   if (dir) rmSync(dir, { recursive: true, force: true });
+  if (dir2) rmSync(dir2, { recursive: true, force: true });
 });
+
+/** A port nothing listens on (so "Ollama" is surely not running there). */
+async function closedPort(): Promise<number> {
+  return new Promise((ok) => {
+    const srv = createServer();
+    srv.listen(0, "127.0.0.1", () => {
+      const a = srv.address();
+      const port = typeof a === "object" && a ? a.port : 1;
+      srv.close(() => ok(port));
+    });
+  });
+}
 
 async function waitFor<T>(f: () => T | undefined, ms: number): Promise<T> {
   const end = Date.now() + ms;
@@ -137,5 +154,59 @@ test("open a folder, run a task, approve, undo", async ({ page }) => {
   await expect(page.getByLabel("Models file")).toHaveValue(/roles\.mock\.toml$/);
   await page.getByRole("button", { name: "Close settings" }).click();
   await expect(page.getByTestId("project")).toContainText("my-project");
+  expect(log).not.toMatch(/panicked/);
+});
+
+// Update #1: without --roles, models are chosen per task. On a first run
+// with nothing set up, Anchor asks for no key or account: it offers local
+// first, and a task gets the ways forward instead of an error.
+test("first run: no model yet gives a prompt, not an error", async ({ page }) => {
+  dir2 = mkdtempSync(join(tmpdir(), "anchor-app-routed-"));
+  const ws = join(dir2, "fresh-project");
+  cpSync(join(repo, "examples/app/workspace"), ws, { recursive: true });
+  const state = join(dir2, "state");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(
+    join(state, "app.json"),
+    JSON.stringify({ recent: [ws], inference: { ollama_port: await closedPort() } }),
+  );
+  const urlFile = join(dir2, "url");
+  const env = { ...process.env, ANCHOR_STATE_DIR: state };
+  delete env["ANCHOR_FREE_URL"];
+  proc2 = spawn(bin, ["app", "--keys", "memory", "--ui-url-file", urlFile], { env, stdio: ["ignore", "pipe", "pipe"] });
+  let log = "";
+  proc2.stdout?.on("data", (d) => (log += d));
+  proc2.stderr?.on("data", (d) => (log += d));
+  const url = await waitFor(() => (existsSync(urlFile) ? readFileSync(urlFile, "utf8").trim() || undefined : undefined), 60_000);
+
+  await page.goto(url);
+  await page.getByRole("button", { name: /fresh-project/ }).first().click();
+  await expect(page.getByRole("heading", { name: "What should Anchor do in fresh-project?" })).toBeVisible();
+  const start = page.getByTestId("get-started");
+  await expect(start).toContainText("Run locally — nothing leaves your machine");
+  await expect(start).not.toContainText("Start free");
+  await expect(page.getByTestId("path-chip")).toContainText("Models: automatic");
+  await page.screenshot({ path: join(shots, "app-07-first-run.png") });
+
+  await page.getByLabel("Task").fill("/local add a docstring to hello.py");
+  await expect(page.getByTestId("path-chip")).toContainText("This task: local");
+  await page.getByLabel("Task").fill("add a docstring to hello.py");
+  await page.getByRole("button", { name: "Send" }).click();
+  const prompt = page.getByTestId("task-prompt");
+  await expect(prompt).toContainText("No model is ready to run this task yet.");
+  await expect(prompt).toContainText("Add your own API key");
+  await expect(page.getByLabel("Task")).toHaveValue("add a docstring to hello.py");
+  await page.screenshot({ path: join(shots, "app-08-prompt.png") });
+
+  await prompt.getByRole("button", { name: /Add your own API key/ }).click();
+  await expect(page.getByRole("heading", { name: "Models", exact: true })).toBeVisible();
+  await expect(page.getByText("Not offered yet")).toBeVisible();
+  await expect(page.getByText("Not running")).toBeVisible();
+  await expect(page.getByTestId("key-openai")).toBeVisible();
+  await page.getByLabel("Project pin").selectOption("C");
+  await expect(page.getByText("Saved.")).toBeVisible();
+  await page.screenshot({ path: join(shots, "app-09-models.png"), fullPage: true });
+  await page.getByRole("button", { name: "Close settings" }).click();
+  await expect(page.getByTestId("path-chip")).toContainText("Pinned: Local");
   expect(log).not.toMatch(/panicked/);
 });

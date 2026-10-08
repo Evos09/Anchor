@@ -104,11 +104,26 @@ the agent asks to make, and undo any turn, in one window (ADR-0028).
   info*, then *Run anyway*.
 - **macOS:** right-click the app, choose *Open*, then *Open* again.
 
-**Models.** The app starts with two free local models through
-[Ollama](https://ollama.com): install it, then run
-`ollama pull qwen2.5-coder:7b` and `ollama pull llama3.1:8b`. To use other
-models (a hosted API with your key), point the app at another models file;
-`config/roles.example.toml` shows the format.
+**Models.** The app asks for no account and no key. Each task runs one of
+three ways (ADR-0029), chosen in **Settings → Models**:
+
+- **Local — nothing leaves your machine.** Install
+  [Ollama](https://ollama.com) and pull two models of different families,
+  e.g. `ollama pull qwen2.5-coder:7b` and `ollama pull llama3.1:8b`. The app
+  finds Ollama by itself ("Local inference active").
+- **Your own API key** (OpenAI, Mistral, DeepSeek, Gemini). Paste it once;
+  Anchor checks it with that provider and keeps it in your system keychain.
+  Requests go straight from your computer to the provider.
+- **Free tier.** Not offered yet: Anchor only pools free capacity from
+  providers whose terms allow it, and none passes that check today
+  ([`docs/adr/providers/`](docs/adr/providers/README.md)).
+
+Start a task with `/local`, `/byok` or `/free` to choose for that task
+only, or pin a project to one way (e.g. a private repository to local). If
+nothing can run a task, the app says what to set up instead of failing.
+The executor and the reviewer are always different model families. A
+hand-written models file still works (Settings → Models → Advanced, or
+`anchor app --roles FILE`); `config/roles.example.toml` shows the format.
 
 **Build it yourself:** `desktop/` (see CONTRIBUTING.md). **Without
 installing:** `anchor app` serves the same app in your browser:
@@ -248,6 +263,18 @@ cargo deny check                             # advisories, licenses, bans, sourc
 every §11 threat to its test and its per-platform status.
 
 ## What is and isn't done
+
+**Update #1 (inference paths), in this push; CI results in
+[`docs/threat-model.md`](docs/threat-model.md):** the model registry with
+license gating (`config/models.toml`), the per-task router, BYOK keys in
+the OS keychain, Ollama detection, the free-tier proxy (`anchor-proxy`:
+caps, reservations, the pool manager, a metadata-only log) and the app's
+settings, prompts and meters. **Not done, and not doable from code alone:**
+no provider has passed the free tier's terms check, so the free tier is off
+and the proxy is not deployed; the Terms of Service and Privacy Policy in
+`docs/legal/` are drafts that need a lawyer (ADR-0034); the installers stay
+unsigned until signing certificates are bought and added as CI secrets
+(ADR-0033).
 
 **Done and verified in blocking CI on Linux, macOS and Windows**
 (per-platform detail in [`docs/threat-model.md`](docs/threat-model.md)):

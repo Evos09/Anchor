@@ -620,6 +620,7 @@ pub fn run(
             mock_script,
             hub: Some(hub_info(i)),
             review: None,
+            extra_env: Default::default(),
         };
         Ok::<_, String>(Prepared {
             idx: i,

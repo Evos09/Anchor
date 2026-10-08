@@ -12,6 +12,7 @@ use anchor_policy::{AuditLog, Engine};
 
 pub mod eval;
 pub mod gitguard;
+pub mod inference;
 pub mod interact;
 pub mod iso;
 pub mod mediator;

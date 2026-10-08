@@ -29,6 +29,10 @@ pub struct SessionConfig {
     /// Review sessions (Phase 5): what the reviewer judges. The runtime
     /// gets no workspace tools; any tool call ends the session.
     pub review: Option<anchor_protocol::verify::ReviewInput>,
+    /// Secrets for the runtime's environment (the app's BYOK keys or
+    /// free-tier token, named by the models file's `api_key_env`), on
+    /// top of what [`runtime_env`] passes through. Never logged.
+    pub extra_env: crate::inference::keys::SecretEnv,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -431,7 +435,8 @@ pub fn run_cancellable(
     cancel: Option<&Cancel>,
 ) -> Result<SessionReport, SessionError> {
     mediator.set_session(&cfg.session_id);
-    let env = runtime_env(&cfg.roles_toml);
+    let mut env = runtime_env(&cfg.roles_toml);
+    env.extend(cfg.extra_env.0.iter().cloned());
     // On Windows a loopback provider cannot be reached from an
     // AppContainer: that runtime runs unconfined, said and audited (AR-7).
     let loopback = if cfg!(windows) {

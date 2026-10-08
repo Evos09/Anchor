@@ -540,3 +540,43 @@ fn review_session_routes_to_reviewer_and_returns_verdicts() {
     let tools = crate::prompt::REVIEW_TOOLS_JSON.to_string();
     assert!(tools.contains("submit_verdicts") && !tools.contains("read_file"));
 }
+
+#[test]
+fn a_providers_error_message_reaches_the_user() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 65536];
+        let _ = s.read(&mut buf);
+        let body = r#"{"error":{"type":"anchor_cap","message":"5-hour limit reached; resets at 14:00 UTC"}}"#;
+        let _ = write!(
+            s,
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    });
+    let cfg: crate::config::ProviderConfig = toml::from_str(&format!(
+        "kind = \"openai_compatible\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\nfamily = \"x\"\n"
+    ))
+    .unwrap();
+    let mut p = crate::provider::OpenAiCompatible::new(&cfg).unwrap();
+    let e = crate::provider::Provider::complete(
+        &mut p,
+        "m",
+        &[],
+        &serde_json::json!([]),
+        &Default::default(),
+    )
+    .unwrap_err();
+    server.join().unwrap();
+    assert_eq!(
+        e.to_string(),
+        "the provider refused the request (429): 5-hour limit reached; resets at 14:00 UTC"
+    );
+    assert_eq!(
+        crate::provider::refusal(502, "<html>bad gateway</html>").to_string(),
+        "the provider refused the request (502): <html>bad gateway</html>"
+    );
+}

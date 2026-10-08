@@ -1434,3 +1434,92 @@ button {
     width: 140px;
   }
 }
+
+/* Update #1: the three inference paths. */
+.notice-info .notice-head {
+  color: var(--info);
+}
+.prompt-card {
+  margin: 0 auto 10px;
+}
+.prompt-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+  width: 100%;
+  margin-top: 6px;
+}
+.prompt-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raise);
+  color: var(--fg);
+  padding: 10px 12px;
+  cursor: pointer;
+  font: inherit;
+}
+.prompt-option:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.prompt-option:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.get-started {
+  margin-bottom: 12px;
+}
+.small-input {
+  width: 110px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 5px 8px;
+  margin-right: 6px;
+  font: inherit;
+}
+.plain-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+.plain-list li + li {
+  margin-top: 4px;
+}
+.meters {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+.meter-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.meter-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+  margin-top: 4px;
+}
+.meter-fill {
+  height: 100%;
+  border-radius: 3px;
+}
+.meter-ok {
+  background: var(--ok);
+}
+.meter-warn {
+  background: var(--warn);
+}
+.meter-fail {
+  background: var(--fail);
+}

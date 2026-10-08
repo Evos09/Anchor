@@ -211,6 +211,12 @@ struct Fx {
 }
 
 fn start() -> Fx {
+    start_with(true)
+}
+
+/// `explicit`: the mock models file was given with `--roles`; without
+/// it, tasks are routed (Update #1) and the file is ignored.
+fn start_with(explicit: bool) -> Fx {
     let dir = tempfile::tempdir().unwrap();
     let base = anchor_fs::normalize_verbatim(&std::fs::canonicalize(dir.path()).unwrap());
     let ws = base.join("project");
@@ -223,6 +229,12 @@ fn start() -> Fx {
         exec_read_only: anchor_backend::default_exec_read_only(),
         agent_bin: agent_bin(),
         policy: None,
+        roles_explicit: explicit,
+        inference: anchor_backend::inference::Inference::new(
+            Arc::new(anchor_backend::inference::keys::MemoryKeys::default()),
+            None,
+        )
+        .unwrap(),
     });
     let ui = ui::start_app(app, 0).unwrap();
     let c = Client {
@@ -446,4 +458,44 @@ fn the_app_exits_when_the_shell_goes_away() {
         assert!(Instant::now() < deadline, "the app outlived its shell");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Update #1 §2.5: with nothing to run on, a task gets a prompt with the
+/// ways forward, not an error, and no session starts.
+#[test]
+fn a_routed_task_with_no_model_gets_a_prompt() {
+    let fx = start_with(false);
+    let c = &fx.c;
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    assert_eq!(
+        c.post("/api/app/inference", &json!({ "ollama_port": closed }))
+            .0,
+        200
+    );
+    let (s, _) = c.post("/api/app/open", &json!({ "path": fx.ws }));
+    assert_eq!(s, 200);
+    let inf = c.get("/api/app/inference");
+    assert_eq!(inf["source"], "routed");
+    assert_eq!(inf["local"]["running"], false);
+    assert_eq!(inf["free"]["offered"], false);
+    let (s, v) = c.post(
+        "/api/app/task",
+        &json!({ "text": "/local add a docstring" }),
+    );
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["prompt"]["reason"]["kind"], "path_unavailable");
+    assert_eq!(v["prompt"]["reason"]["path"], "C");
+    let (s, v) = c.post("/api/app/task", &json!({ "text": "add a docstring" }));
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["prompt"]["reason"]["kind"], "nothing_available");
+    assert_eq!(c.get("/api/app/state")["running"], false);
+    // A pin is per project and saved.
+    assert_eq!(c.post("/api/app/pin", &json!({ "path": "C" })).0, 200);
+    assert_eq!(c.get("/api/app/state")["inference"]["pin"], "C");
+    assert_eq!(c.post("/api/app/pin", &json!({ "path": "D" })).0, 400);
 }

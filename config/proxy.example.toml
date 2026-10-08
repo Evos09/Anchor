@@ -1,0 +1,36 @@
+# anchor-proxy configuration (ADR-0032). Run: anchor-proxy --config proxy.toml
+#
+# The proxy listens on loopback; a TLS-terminating reverse proxy in front
+# of it serves `public_host`. Paths are relative to this file.
+#
+# No [[account]] is configured: as of 2026-10-08 no provider's terms
+# clear the gate (docs/adr/providers/README.md), so the free tier is off.
+# An account looks like this, and is refused unless its ADR says
+# `Verdict: INCLUDE` with a `Terms verified:` date, and unless it is the
+# only account for that provider:
+#
+#   [[account]]
+#   provider = "example"            # a provider id in the registry, serving path A
+#   key_env = "ANCHOR_POOL_KEY_EXAMPLE"
+#   adr = "../docs/adr/providers/example.md"
+#   limits = { rpm = 30, rpd = 1000, tpm = 12000, tpd = 100000 }
+
+port = 8787
+public_host = "free.example.invalid"
+registry = "models.toml"
+database = "proxy.db"
+
+[caps]                       # ADR-0031 (weighted tokens)
+window_budget = 50000        # rolling 5 hours
+weekly_budget = 250000
+monthly_budget = 1000000
+
+[ledger]
+max_output_ceiling = 8192
+wrap_up_min_tokens = 2048
+overrun_margin = 0.2
+
+[pool]                       # ADR-0038
+chain = []
+daily_cap = 1000000
+saturation = 0.8

@@ -1,0 +1,322 @@
+# Anchor's model registry (Update #1 §6, ADR-0030). Data, not code: the
+# app and the free-tier proxy load it, validate it, and refuse to start if
+# it is wrong. Selection reads the license fields, never a model's name.
+#
+# A model may be on the free tier (path A) only if its license permits
+# commercial use with no revenue or user-count gate. No provider has
+# cleared the terms gate (Update #1 §5.7, docs/adr/providers/), so no
+# model is offered on path A today.
+#
+# Licenses below were recorded on 2026-10-08 from the Ollama library and
+# the model cards as quoted in search results; Anchor could not open the
+# pages directly from its build environment. Before relying on one,
+# confirm it with `ollama show <tag> --license`. "verified_by" says how
+# each entry was checked.
+#
+# Path B providers list no models: after you add a key, Anchor reads the
+# provider's own model list and you pick from it. `family` is the family
+# of that provider's models, for the reviewer-is-another-family rule.
+
+# ---------------------------------------------------------------- providers
+
+[[provider]]
+id = "ollama"
+display_name = "Ollama (on this computer)"
+base_url = "http://127.0.0.1:11434/v1"
+paths = ["C"]
+key_url = ""
+terms_url = "https://ollama.com"
+
+[[provider]]
+id = "openai"
+display_name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+paths = ["B"]
+family = "openai"
+key_url = "https://platform.openai.com/api-keys"
+terms_url = "https://openai.com/policies/services-agreement"
+
+[[provider]]
+id = "mistral"
+display_name = "Mistral AI"
+base_url = "https://api.mistral.ai/v1"
+paths = ["B"]
+family = "mistral"
+key_url = "https://console.mistral.ai/api-keys"
+terms_url = "https://mistral.ai/terms"
+
+[[provider]]
+id = "deepseek"
+display_name = "DeepSeek"
+base_url = "https://api.deepseek.com/v1"
+paths = ["B"]
+family = "deepseek"
+key_url = "https://platform.deepseek.com/api_keys"
+terms_url = "https://platform.deepseek.com/downloads/DeepSeek%20Open%20Platform%20Terms%20of%20Service.html"
+
+[[provider]]
+id = "gemini"
+display_name = "Google Gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+paths = ["B"]
+family = "gemini"
+key_url = "https://aistudio.google.com/apikey"
+terms_url = "https://ai.google.dev/gemini-api/terms"
+
+# ------------------------------------------------------------ local models
+
+[[model]]
+id = "qwen2.5-coder-7b"
+display_name = "Qwen2.5 Coder 7B"
+provider = "ollama"
+provider_model_id = "qwen2.5-coder:7b"
+family = "qwen"
+context_window = 32768
+license_id = "Apache-2.0"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = ""
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "qwen2.5-coder-14b"
+display_name = "Qwen2.5 Coder 14B"
+provider = "ollama"
+provider_model_id = "qwen2.5-coder:14b"
+family = "qwen"
+context_window = 32768
+license_id = "Apache-2.0"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = ""
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "qwen2.5-coder-32b"
+display_name = "Qwen2.5 Coder 32B"
+provider = "ollama"
+provider_model_id = "qwen2.5-coder:32b"
+family = "qwen"
+context_window = 32768
+license_id = "Apache-2.0"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = ""
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "qwen2.5-coder-3b"
+display_name = "Qwen2.5 Coder 3B"
+provider = "ollama"
+provider_model_id = "qwen2.5-coder:3b"
+family = "qwen"
+context_window = 32768
+license_id = "Qwen-Research"
+license_commercial_ok = false
+license_revenue_gate = false
+license_notes = "The 3B size alone is under the Qwen Research license (non-commercial), unlike its siblings."
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "qwen3-8b"
+display_name = "Qwen3 8B"
+provider = "ollama"
+provider_model_id = "qwen3:8b"
+family = "qwen"
+context_window = 40960
+license_id = "Apache-2.0"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = ""
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "qwen3-14b"
+display_name = "Qwen3 14B"
+provider = "ollama"
+provider_model_id = "qwen3:14b"
+family = "qwen"
+context_window = 40960
+license_id = "Apache-2.0"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = ""
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "qwen3-coder-30b"
+display_name = "Qwen3 Coder 30B"
+provider = "ollama"
+provider_model_id = "qwen3-coder:30b"
+family = "qwen"
+context_window = 262144
+license_id = "Apache-2.0"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = ""
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "mistral-7b"
+display_name = "Mistral 7B"
+provider = "ollama"
+provider_model_id = "mistral:7b"
+family = "mistral"
+context_window = 32768
+license_id = "Apache-2.0"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = ""
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "devstral-24b"
+display_name = "Devstral 24B"
+provider = "ollama"
+provider_model_id = "devstral:24b"
+family = "mistral"
+context_window = 131072
+license_id = "Apache-2.0"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = ""
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "codestral-22b"
+display_name = "Codestral 22B"
+provider = "ollama"
+provider_model_id = "codestral:22b"
+family = "mistral"
+context_window = 32768
+license_id = "MNPL-0.1"
+license_commercial_ok = false
+license_revenue_gate = false
+license_notes = "Mistral Non-Production License: no commercial or production use."
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "gpt-oss-20b"
+display_name = "gpt-oss 20B"
+provider = "ollama"
+provider_model_id = "gpt-oss:20b"
+family = "openai"
+context_window = 131072
+license_id = "Apache-2.0"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = "Also subject to the gpt-oss usage policy."
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "granite-code-8b"
+display_name = "Granite Code 8B"
+provider = "ollama"
+provider_model_id = "granite-code:8b"
+family = "granite"
+context_window = 128000
+license_id = "Apache-2.0"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = ""
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "phi4-14b"
+display_name = "Phi-4 14B"
+provider = "ollama"
+provider_model_id = "phi4:14b"
+family = "phi"
+context_window = 16384
+license_id = "MIT"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = ""
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "deepseek-r1-14b"
+display_name = "DeepSeek-R1 Distill (Qwen) 14B"
+provider = "ollama"
+provider_model_id = "deepseek-r1:14b"
+family = "qwen"
+context_window = 131072
+license_id = "MIT"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = "A distillation onto Qwen2.5 weights: counted as the qwen family for the reviewer rule."
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "llama3.1-8b"
+display_name = "Llama 3.1 8B"
+provider = "ollama"
+provider_model_id = "llama3.1:8b"
+family = "llama"
+context_window = 131072
+license_id = "Llama-3.1-Community"
+license_commercial_ok = true
+license_revenue_gate = true
+license_notes = "Commercial use allowed below 700M monthly active users; acceptable-use policy and attribution required."
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"
+
+[[model]]
+id = "gemma3-12b"
+display_name = "Gemma 3 12B"
+provider = "ollama"
+provider_model_id = "gemma3:12b"
+family = "gemma"
+context_window = 131072
+license_id = "Gemma-Terms"
+license_commercial_ok = true
+license_revenue_gate = false
+license_notes = "Commercial use allowed; Gemma's prohibited-use policy must be passed on to users. Not on the free tier until a lawyer has read the flow-down terms."
+free_tier_eligible = false
+available_on_paths = ["C"]
+verified_at = "2026-10-08"
+verified_by = "search-result excerpt of the Ollama library page; confirm with ollama show --license"

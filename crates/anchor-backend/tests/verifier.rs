@@ -39,6 +39,7 @@ fn bundled_copies_match_the_published_files() {
             "assets/policy.default.toml",
             "../../config/policy.default.toml",
         ),
+        ("assets/models.toml", "../../config/models.toml"),
         (
             "assets/verifier-fixtures/passing.json",
             "../../docs/verifier/fixtures/passing.json",

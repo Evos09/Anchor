@@ -117,6 +117,7 @@ fn run(fx: &Fx, opened: &mut Opened, script: &str, threshold: f64, roles: &str) 
         mock_script: Some(script.into()),
         hub: None,
         review: None,
+        extra_env: Default::default(),
     };
     let _ = fx;
     session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap()
@@ -466,6 +467,7 @@ fn context_threshold_pauses_and_fresh_session_resumes() {
         mock_script: Some(r#"{"steps": [{"content": "resumed and finished"}]}"#.into()),
         hub: None,
         review: None,
+        extra_env: Default::default(),
     };
     let r2 = session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap();
     assert_eq!(r2.done.as_deref(), Some("resumed and finished"));
@@ -782,6 +784,7 @@ fn kill_mid_turn_leaves_valid_checkpoint_and_resumes() {
         mock_script: Some(r#"{"steps": [{"content": "recovered"}]}"#.into()),
         hub: None,
         review: None,
+        extra_env: Default::default(),
     };
     let r = session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap();
     assert_eq!(r.done.as_deref(), Some("recovered"));
@@ -866,6 +869,7 @@ fn runtime_cannot_reuse_turn_numbers() {
         mock_script: None,
         hub: None,
         review: None,
+        extra_env: Default::default(),
     };
     let e = session::run(&cfg, &mut opened.mediator, &opened.checkpoints).unwrap_err();
     assert!(e.to_string().contains("turn numbers must increase"), "{e}");

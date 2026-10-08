@@ -22,6 +22,7 @@ use anchor_hub::http::Response;
 use serde_json::{Value, json};
 
 use super::{Server, Sources, State, bad, broker::Broker, broker::UiInteraction, ok};
+use crate::inference::{ByokChoice, Inference, Routed, Settings, Source};
 use crate::session::{self, Cancel, SessionConfig};
 
 /// Most directory names one listing returns.
@@ -43,6 +44,10 @@ pub struct AppConfig {
     pub exec_read_only: Vec<PathBuf>,
     pub agent_bin: PathBuf,
     pub policy: Option<PathBuf>,
+    /// `--roles` was given: tasks use that file, not the router.
+    pub roles_explicit: bool,
+    /// The three inference paths (Update #1).
+    pub inference: Inference,
 }
 
 /// What `app.json` remembers between launches.
@@ -52,6 +57,8 @@ struct Saved {
     recent: Vec<PathBuf>,
     #[serde(default)]
     roles_path: Option<PathBuf>,
+    #[serde(default)]
+    inference: Settings,
 }
 
 struct Project {
@@ -71,6 +78,7 @@ impl Project {
 
 struct Inner {
     roles_path: PathBuf,
+    settings: Settings,
     recent: Vec<PathBuf>,
     project: Option<Project>,
 }
@@ -101,9 +109,14 @@ impl App {
             .roles_path
             .filter(|p| p.is_file())
             .unwrap_or_else(|| cfg.roles_path.clone());
+        let mut settings = saved.inference;
+        if cfg.roles_explicit {
+            settings.source = Source::File;
+        }
         Arc::new(App {
             inner: Mutex::new(Inner {
                 roles_path,
+                settings,
                 recent: saved.recent,
                 project: None,
             }),
@@ -120,6 +133,7 @@ impl App {
         let saved = Saved {
             recent: g.recent.clone(),
             roles_path: Some(g.roles_path.clone()),
+            inference: g.settings.clone(),
         };
         let path = self.cfg.state_base.join("app.json");
         let tmp = self.cfg.state_base.join(".app.json.tmp");
@@ -144,6 +158,14 @@ impl App {
         match api {
             "state" => self.state(),
             "dirs" => dirs(q.get("path").map(String::as_str)),
+            "inference" => self.inference_status(),
+            "key_models" => match q.get("provider") {
+                Some(p) => match self.cfg.inference.key_models(p) {
+                    Ok(models) => ok(json!({ "models": models })),
+                    Err(e) => conflict(&e),
+                },
+                None => bad("provider required"),
+            },
             _ => Response::error(404, "no such endpoint"),
         }
     }
@@ -173,6 +195,37 @@ impl App {
                 (true, Some(p)) => self.models(p),
                 _ => bad("path required (and nothing else)"),
             },
+            "inference" => self.set_inference(body),
+            "pin" => match (allowed(&["path"]), &body["path"]) {
+                (true, Value::Null) => self.pin(None),
+                (true, v) => match serde_json::from_value::<anchor_inference::Path>(v.clone()) {
+                    Ok(p) => self.pin(Some(p)),
+                    Err(_) => bad("path must be A, B, C or null"),
+                },
+                _ => bad("path required (and nothing else)"),
+            },
+            "key" => match (allowed(&["provider", "key"]), text("provider"), text("key")) {
+                (true, Some(p), Some(k)) => self.add_key(p, k),
+                _ => bad("provider and key required (and nothing else)"),
+            },
+            "key_model" => match (
+                allowed(&["provider", "model"]),
+                text("provider"),
+                text("model"),
+            ) {
+                (true, Some(p), Some(m)) => self.key_model(p, m),
+                _ => bad("provider and model required (and nothing else)"),
+            },
+            "key_remove" => match (allowed(&["provider"]), text("provider")) {
+                (true, Some(p)) => self.remove_key(p),
+                _ => bad("provider required (and nothing else)"),
+            },
+            "free_start" => {
+                if !allowed(&[]) {
+                    return bad("unexpected fields");
+                }
+                self.start_free()
+            }
             _ => Response::error(404, "no such action"),
         }
     }
@@ -191,6 +244,12 @@ impl App {
                 "ok": models.is_ok(),
                 "error": models.err(),
                 "roles": role_models(&g.roles_path),
+            },
+            "inference": {
+                "source": g.settings.source,
+                "preference": g.settings.preference,
+                "pin": g.project.as_ref().and_then(|p| g.settings.pins.get(&p.root)),
+                "free_offered": self.cfg.inference.free_url.is_some(),
             },
             "mock": self.cfg.mock_script.is_some(),
             "platform": std::env::consts::OS,
@@ -276,6 +335,34 @@ impl App {
         if text.len() > MAX_TASK {
             return bad("the task is too long");
         }
+        // Route outside the lock: it probes Ollama and the free tier.
+        let (settings, root) = {
+            let g = self.lock();
+            let Some(p) = g.project.as_ref() else {
+                return conflict("open a project first");
+            };
+            if p.running() {
+                return conflict("a task is already running");
+            }
+            (g.settings.clone(), p.root.clone())
+        };
+        let routed = (settings.source == Source::Routed)
+            .then(|| self.cfg.inference.route(&settings, &root, text));
+        let (text, plan, skipped) = match routed {
+            Some(Routed::Prompt(prompt)) => {
+                // Not an error: the page asks the user what to do.
+                return ok(json!({ "ok": false, "prompt": prompt }));
+            }
+            Some(Routed::Run {
+                plan,
+                skipped,
+                text,
+            }) => (text, Some(plan), skipped),
+            None => (text.to_string(), None, Vec::new()),
+        };
+        if text.is_empty() {
+            return bad("the task is empty");
+        }
         let mut g = self.lock();
         let roles_path = g.roles_path.clone();
         let Some(p) = g.project.as_mut() else {
@@ -284,14 +371,31 @@ impl App {
         if p.running() {
             return conflict("a task is already running");
         }
-        if let Err(e) = check_models(&roles_path) {
-            return conflict(&format!("the models file is not usable: {e}"));
-        }
-        let roles_toml = match std::fs::read_to_string(&roles_path) {
-            Ok(t) => t,
-            Err(e) => return conflict(&format!("{}: {e}", roles_path.display())),
+        let (roles_toml, extra_env) = match &plan {
+            Some(plan) => (plan.roles_toml.clone(), plan.env.clone()),
+            None => {
+                if let Err(e) = check_models(&roles_path) {
+                    return conflict(&format!("the models file is not usable: {e}"));
+                }
+                match std::fs::read_to_string(&roles_path) {
+                    Ok(t) => (t, Default::default()),
+                    Err(e) => return conflict(&format!("{}: {e}", roles_path.display())),
+                }
+            }
         };
-        if let Err(r) = self.audit(&p.state, "start_task", json!({ "text": text })) {
+        let route = plan.as_ref().map(|plan| {
+            json!({
+                "path": plan.path,
+                "executor": { "model": plan.executor.model_id, "family": plan.executor.family, "path": plan.executor.path },
+                "reviewer": { "model": plan.reviewer.model_id, "family": plan.reviewer.family, "path": plan.reviewer.path },
+                "skipped": skipped.iter().map(|(p, why)| json!({ "path": p, "why": why })).collect::<Vec<_>>(),
+            })
+        });
+        if let Err(r) = self.audit(
+            &p.state,
+            "start_task",
+            json!({ "text": text, "route": route }),
+        ) {
             return r;
         }
         let Some(mut mediator) = p
@@ -307,13 +411,14 @@ impl App {
         let cfg = SessionConfig {
             agent_bin: self.cfg.agent_bin.clone(),
             session_id: format!("{}-{n}", session::new_session_id()),
-            instruction: text.to_string(),
+            instruction: text.clone(),
             roles_toml,
             checkpoint_threshold: anchor_checkpoint::DEFAULT_THRESHOLD,
             resume_from: None,
             mock_script: self.cfg.mock_script.clone(),
             hub: None,
             review: None,
+            extra_env,
         };
         p.broker.resume();
         p.cancel.reset();
@@ -322,6 +427,9 @@ impl App {
         let checkpoints = p.checkpoints.clone();
         let cancel = p.cancel.clone();
         let session_id = cfg.session_id.clone();
+        if let Some(r) = &route {
+            let _ = mediator.log("notice", json!({ "kind": "route", "route": r }));
+        }
         let worker = std::thread::spawn(move || {
             if let Err(e) =
                 session::run_cancellable(&cfg, &mut mediator, &checkpoints, Some(&cancel))
@@ -337,7 +445,7 @@ impl App {
             state.running.store(false, Ordering::SeqCst);
         });
         p.worker = Some(worker);
-        ok(json!({ "ok": true, "session_id": session_id }))
+        ok(json!({ "ok": true, "session_id": session_id, "route": route }))
     }
 
     fn cancel(&self) -> Response {
@@ -374,6 +482,235 @@ impl App {
         self.save(&g);
         ok(json!({ "ok": true }))
     }
+}
+
+impl App {
+    fn inference_status(&self) -> Response {
+        let (settings, root) = {
+            let g = self.lock();
+            (
+                g.settings.clone(),
+                g.project.as_ref().map(|p| p.root.clone()),
+            )
+        };
+        let mut v = self.cfg.inference.status(&settings, root.as_deref());
+        v["models_file"] = json!(self.lock().roles_path);
+        ok(v)
+    }
+
+    /// Audited in the open project, if any. Never carries a key.
+    fn audit_open(&self, g: &Inner, action: &str, args: Value) -> Result<(), Response> {
+        match &g.project {
+            Some(p) => self.audit(&p.state, action, args),
+            None => Ok(()),
+        }
+    }
+
+    fn set_inference(&self, body: &Value) -> Response {
+        const KEYS: [&str; 6] = [
+            "source",
+            "preference",
+            "order",
+            "ollama_port",
+            "preferred",
+            "local_family",
+        ];
+        let Some(m) = body
+            .as_object()
+            .filter(|m| m.keys().all(|k| KEYS.contains(&k.as_str())))
+        else {
+            return bad(&format!("expected some of: {}", KEYS.join(", ")));
+        };
+        let mut g = self.lock();
+        let mut s = g.settings.clone();
+        let parse = |k: &str| m.get(k).cloned().map(serde_json::from_value::<Value>);
+        if let Some(Ok(v)) = parse("source") {
+            match serde_json::from_value(v) {
+                Ok(src) => s.source = src,
+                Err(_) => return bad("source must be routed or file"),
+            }
+        }
+        if let Some(Ok(v)) = parse("preference") {
+            match serde_json::from_value(v) {
+                Ok(p) => s.preference = p,
+                Err(_) => {
+                    return bad("preference must be auto, prefer_local, prefer_byok or free_only");
+                }
+            }
+        }
+        if let Some(Ok(v)) = parse("order") {
+            match serde_json::from_value::<Option<Vec<anchor_inference::Path>>>(v) {
+                Ok(Some(o)) if !o.is_empty() => {
+                    let mut seen = o.clone();
+                    seen.sort();
+                    seen.dedup();
+                    if seen.len() != o.len() {
+                        return bad("order lists a path twice");
+                    }
+                    s.order = Some(o);
+                }
+                Ok(_) => s.order = None,
+                Err(_) => return bad("order must be a list of A, B, C (or null)"),
+            }
+        }
+        if let Some(v) = m.get("ollama_port") {
+            match v
+                .as_u64()
+                .and_then(|p| u16::try_from(p).ok())
+                .filter(|p| *p > 0)
+            {
+                Some(p) => s.ollama_port = p,
+                None => return bad("ollama_port must be 1-65535"),
+            }
+        }
+        if let Some(v) = m.get("preferred") {
+            let path = v
+                .get("path")
+                .cloned()
+                .map(serde_json::from_value::<anchor_inference::Path>);
+            match (path, v.get("model")) {
+                (Some(Ok(p)), Some(Value::String(model))) if !model.is_empty() => {
+                    s.preferred.insert(p, model.clone());
+                }
+                (Some(Ok(p)), Some(Value::Null)) => {
+                    s.preferred.remove(&p);
+                }
+                _ => return bad("preferred must be {path, model}"),
+            }
+        }
+        if let Some(v) = m.get("local_family") {
+            match (v.get("model").and_then(Value::as_str), v.get("family")) {
+                (Some(model), Some(Value::String(f))) if valid_family(f) => {
+                    s.local_families
+                        .insert(model.to_string(), f.trim().to_ascii_lowercase());
+                }
+                (Some(model), Some(Value::Null)) => {
+                    s.local_families.remove(model);
+                }
+                _ => {
+                    return bad(
+                        "local_family must be {model, family}; a family is letters, digits, - or _",
+                    );
+                }
+            }
+        }
+        if let Err(r) = self.audit_open(&g, "set_inference", body.clone()) {
+            return r;
+        }
+        g.settings = s;
+        self.save(&g);
+        ok(json!({ "ok": true }))
+    }
+
+    fn pin(&self, path: Option<anchor_inference::Path>) -> Response {
+        let mut g = self.lock();
+        let Some(root) = g.project.as_ref().map(|p| p.root.clone()) else {
+            return conflict("open a project first");
+        };
+        if let Err(r) = self.audit_open(&g, "pin_path", json!({ "path": path })) {
+            return r;
+        }
+        match path {
+            Some(p) => g.settings.pins.insert(root, p),
+            None => g.settings.pins.remove(&root),
+        };
+        self.save(&g);
+        ok(json!({ "ok": true }))
+    }
+
+    fn add_key(&self, provider: &str, key: &str) -> Response {
+        // The verify call happens outside the lock.
+        let models = match self.cfg.inference.add_key(provider, key) {
+            Ok(m) => m,
+            Err(e) => return conflict(&e),
+        };
+        let mut g = self.lock();
+        if let Err(r) = self.audit_open(&g, "add_key", json!({ "provider": provider })) {
+            return r;
+        }
+        let keep = g
+            .settings
+            .byok
+            .get(provider)
+            .map(|c| c.model.clone())
+            .filter(|m| models.contains(m));
+        g.settings.byok.insert(
+            provider.to_string(),
+            ByokChoice {
+                model: keep.unwrap_or_default(),
+            },
+        );
+        self.save(&g);
+        ok(json!({ "ok": true, "models": models }))
+    }
+
+    fn key_model(&self, provider: &str, model: &str) -> Response {
+        let mut g = self.lock();
+        let Some(choice) = g.settings.byok.get_mut(provider) else {
+            return conflict("add a key for this provider first");
+        };
+        choice.model = model.to_string();
+        if let Err(r) = self.audit_open(
+            &g,
+            "set_key_model",
+            json!({ "provider": provider, "model": model }),
+        ) {
+            return r;
+        }
+        self.save(&g);
+        ok(json!({ "ok": true }))
+    }
+
+    fn remove_key(&self, provider: &str) -> Response {
+        if let Err(e) = self.cfg.inference.remove_key(provider) {
+            return conflict(&e);
+        }
+        let mut g = self.lock();
+        g.settings.byok.remove(provider);
+        let _ = self.audit_open(&g, "remove_key", json!({ "provider": provider }));
+        self.save(&g);
+        ok(json!({ "ok": true }))
+    }
+
+    fn start_free(&self) -> Response {
+        let device = {
+            let mut g = self.lock();
+            let d = match g.settings.free_device.clone() {
+                Some(d) => d,
+                None => match new_device_id() {
+                    Ok(d) => d,
+                    Err(e) => return conflict(&e),
+                },
+            };
+            g.settings.free_device = Some(d.clone());
+            self.save(&g);
+            d
+        };
+        match self.cfg.inference.start_free(&device) {
+            Ok(()) => {
+                let g = self.lock();
+                let _ = self.audit_open(&g, "start_free", json!({}));
+                ok(json!({ "ok": true }))
+            }
+            Err(e) => conflict(&e),
+        }
+    }
+}
+
+fn valid_family(f: &str) -> bool {
+    let f = f.trim();
+    !f.is_empty()
+        && f.len() <= 40
+        && f.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// A random install id for the free tier: 32 hex digits, nothing about
+/// the machine (ADR-0037).
+fn new_device_id() -> Result<String, String> {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).map_err(|e| format!("no randomness for a device id: {e}"))?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
 }
 
 /// Is `path` a models (roles) file Anchor can run with? A quick check for
@@ -516,6 +853,93 @@ mod tests {
         );
     }
 
+    fn test_inference() -> Inference {
+        Inference::new(
+            Arc::new(crate::inference::keys::MemoryKeys::default()),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn test_app(d: &Path, explicit: bool) -> Arc<App> {
+        App::new(AppConfig {
+            state_base: d.join("state"),
+            roles_path: d.join("roles.toml"),
+            mock_script: None,
+            exec_read_only: vec![],
+            agent_bin: PathBuf::from("anchor-agent"),
+            policy: None,
+            roles_explicit: explicit,
+            inference: test_inference(),
+        })
+    }
+
+    fn body(r: &Response) -> Value {
+        serde_json::from_slice(&r.body).unwrap()
+    }
+
+    #[test]
+    fn inference_settings_are_checked_saved_and_hold_no_secret() {
+        let d = tempfile::tempdir().unwrap();
+        let app = test_app(d.path(), false);
+        assert_eq!(app.lock().settings.source, Source::Routed);
+        let r = app.set_inference(
+            &json!({ "preference": "prefer_local", "order": ["C", "A"], "ollama_port": 11500 }),
+        );
+        assert_eq!(r.status, 200);
+        for bad_body in [
+            json!({ "preference": "cheapest" }),
+            json!({ "order": ["A", "A"] }),
+            json!({ "ollama_port": 0 }),
+            json!({ "local_family": { "model": "m", "family": "no spaces" } }),
+            json!({ "api_key": "sk-x" }),
+        ] {
+            assert_eq!(app.set_inference(&bad_body).status, 400, "{bad_body}");
+        }
+        assert_eq!(
+            app.set_inference(
+                &json!({ "local_family": { "model": "my-model:latest", "family": "Qwen" } })
+            )
+            .status,
+            200
+        );
+        // An unknown provider's key is refused before any network call.
+        assert_eq!(app.add_key("nobody", "sk-x").status, 409);
+        let saved = std::fs::read_to_string(d.path().join("state/app.json")).unwrap();
+        let v: Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(v["inference"]["preference"], "prefer_local");
+        assert_eq!(v["inference"]["order"], json!(["C", "A"]));
+        assert_eq!(v["inference"]["local_families"]["my-model:latest"], "qwen");
+        assert!(!saved.contains("sk-x"));
+        // Reloaded as saved; `--roles` switches to the file.
+        assert_eq!(
+            test_app(d.path(), false).lock().settings.preference,
+            anchor_inference::Preference::PreferLocal
+        );
+        assert_eq!(
+            test_app(d.path(), true).lock().settings.source,
+            Source::File
+        );
+    }
+
+    #[test]
+    fn a_pin_needs_an_open_project() {
+        let d = tempfile::tempdir().unwrap();
+        let app = test_app(d.path(), false);
+        assert_eq!(app.pin(Some(anchor_inference::Path::C)).status, 409);
+        let v = body(&app.state());
+        assert_eq!(v["inference"]["source"], "routed");
+        assert_eq!(v["inference"]["free_offered"], false);
+    }
+
+    #[test]
+    fn device_ids_are_random_hex() {
+        let (a, b) = (new_device_id().unwrap(), new_device_id().unwrap());
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
+
     #[test]
     fn the_state_names_recent_folders_that_are_gone() {
         let d = tempfile::tempdir().unwrap();
@@ -528,6 +952,8 @@ mod tests {
             exec_read_only: vec![],
             agent_bin: PathBuf::from("anchor-agent"),
             policy: None,
+            roles_explicit: false,
+            inference: test_inference(),
         });
         app.lock().recent = vec![here.clone(), gone.clone()];
         let v: Value = serde_json::from_slice(&app.state().body).unwrap();

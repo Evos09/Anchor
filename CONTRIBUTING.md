@@ -209,6 +209,25 @@ On Windows, add `.exe` to the four binary names. `desktop/deny.toml` holds
 the shell's dependency policy: the main one plus named exceptions, each
 recorded in `docs/deps/dependency-records.md`.
 
+## Inference paths and the free-tier proxy (Update #1)
+
+- `crates/anchor-inference`: the model registry (`config/models.toml`,
+  bundled as `crates/anchor-backend/assets/models.toml`; keep them
+  identical), the router and the token estimator. Selection reads license
+  fields only; a test fails if name matching creeps into the selection code.
+- `crates/anchor-backend/src/inference/`: keychain keys, the Ollama probe,
+  key verification, the free-tier client, and the per-task models file.
+  Never put a key in a log, an audit entry, an error or `app.json`.
+- `crates/anchor-proxy`: the free-tier proxy (`anchor-proxy --config
+  config/proxy.example.toml`). Its database must never hold request or
+  response content; `request_content_is_never_written_to_disk` checks.
+- **Adding a free-tier provider** needs a provider ADR in
+  `docs/adr/providers/` with `Verdict: INCLUDE` and a `Terms verified:`
+  date, from reading the provider's current terms (ADR-0032). Ambiguous
+  terms mean exclude. One account per provider, never more.
+- **The keychain test** uses the real keychain only with
+  `ANCHOR_TEST_KEYCHAIN=1` (set on the macOS and Windows CI runners).
+
 ## Writing a verifier plugin
 
 You do not need to change Anchor to add a review check. A verifier plugin

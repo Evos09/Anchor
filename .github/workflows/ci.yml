@@ -124,6 +124,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
+        # The BYOK keychain test uses the real Keychain / Credential
+        # Manager here (Update #1, ADR-0029).
+        env:
+          ANCHOR_TEST_KEYCHAIN: "1"
         run: cargo test --workspace --no-fail-fast
       - name: Sandbox validation report (spec §14 Phase 7)
         if: always()
@@ -155,6 +159,11 @@ jobs:
             bundles: msi,nsis
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    # Code signing (ADR-0033) runs only when the owner has added the
+    # secrets; without them the installers are built unsigned, as before.
+    env:
+      SIGN_MACOS: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_API_KEY != '' }}
+      SIGN_WINDOWS: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_SIGNING_ENDPOINT != '' }}
     steps:
       - uses: actions/checkout@v5
       - name: Toolchain
@@ -187,9 +196,61 @@ jobs:
           cargo fmt -- --check
           cargo clippy --all-targets -- -D warnings
           cargo test
-      - name: Bundle the installers
+      - name: Bundle the installers (unsigned)
+        if: ${{ !((runner.os == 'macOS' && env.SIGN_MACOS == 'true') || (runner.os == 'Windows' && env.SIGN_WINDOWS == 'true')) }}
         working-directory: desktop
         run: cargo tauri build --bundles ${{ matrix.bundles }}
+      - name: Bundle the installers (signed and notarized, macOS)
+        if: ${{ runner.os == 'macOS' && env.SIGN_MACOS == 'true' }}
+        working-directory: desktop
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$APPLE_API_KEY_P8" > "$APPLE_API_KEY_PATH"
+          cargo tauri build --bundles ${{ matrix.bundles }}
+          rm -f "$APPLE_API_KEY_PATH"
+      - name: Bundle the installers (signed, Windows)
+        if: ${{ runner.os == 'Windows' && env.SIGN_WINDOWS == 'true' }}
+        working-directory: desktop
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          SIGN_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          SIGN_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          SIGN_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+        run: |
+          # Vetted and pinned: docs/deps/dependency-records.md.
+          cargo install artifact-signing-cli --version =0.11.0 --locked
+          CMD="artifact-signing-cli -e $SIGN_ENDPOINT -a $SIGN_ACCOUNT -c $SIGN_PROFILE -d Anchor %1"
+          cargo tauri build --bundles ${{ matrix.bundles }} \
+            --config "{\"bundle\":{\"windows\":{\"signCommand\":\"$CMD\"}}}"
+      - name: Verify the signatures (macOS)
+        if: ${{ runner.os == 'macOS' && env.SIGN_MACOS == 'true' }}
+        run: |
+          APP=desktop/target/release/bundle/macos/Anchor.app
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          spctl --assess --type execute -vv "$APP"
+          xcrun stapler validate "$APP"
+      - name: Verify the signatures (Windows)
+        if: ${{ runner.os == 'Windows' && env.SIGN_WINDOWS == 'true' }}
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem desktop/target/release/bundle/msi/*.msi, desktop/target/release/bundle/nsis/*.exe
+          foreach ($f in $files) {
+            $s = Get-AuthenticodeSignature $f.FullName
+            Write-Output "$($f.Name): $($s.Status)"
+            if ($s.Status -ne 'Valid') { exit 1 }
+          }
       - name: Smoke test the packaged app
         shell: bash
         env:

@@ -186,6 +186,53 @@ releases and verifies them against hashes compiled into `tauri-bundler`
 2.9.4 (WiX: SHA-256; NSIS: SHA-1 only, a weaker check, recorded here). The
 macOS bundler uses the runner's own tools.
 
+## Update #1: inference paths (2026-10-08)
+
+New direct dependency: **`keyring = "=4.2.0"`** (the OS keychain for BYOK
+keys and the free-tier token, ADR-0029). Pinned exactly. New workspace
+crates `anchor-inference` and `anchor-proxy` use only already-vetted
+crates (serde, serde_json, toml, thiserror, sha2, getrandom, rusqlite,
+ureq); `anchor-backend` now also uses `ureq` (vetted) for the Ollama
+probe, the key-verify call and the free-tier client.
+
+| Crate | Version | Released (crates.io) | Releases in last 90 days | License (Cargo.toml) | Used for |
+|---|---|---|---|---|---|
+| keyring | 4.2.0 | 2026-08-29 | 4 (4.1.4 … 4.2.0) | MIT OR Apache-2.0 | `Entry::new/set_password/get_password/delete_credential` (default `v1` feature) |
+| keyring-core | 1.0.0 | 2026-04-21 | 0 (stable 1.0 API) | MIT OR Apache-2.0 | keyring's store interface |
+| apple-native-keyring-store | 1.0.2 | 2026-08-06 | 2 | MIT OR Apache-2.0 | macOS Keychain (via `security-framework` 3.7.0, MIT OR Apache-2.0) |
+| windows-native-keyring-store | 1.1.0 | 2026-05-24 | 0 (last 2026-05-24, 137 days) | MIT OR Apache-2.0 | Windows Credential Manager (via the vetted `windows-sys`) |
+| zbus-secret-service-keyring-store | 1.0.1 | 2026-08-15 | 1 | MIT OR Apache-2.0 | Linux Secret Service over D-Bus |
+| secret-service | 5.2.0 | 2026-08-29 | 1 | MIT OR Apache-2.0 | Secret Service protocol (pure-Rust crypto: `aes`, `cbc`, `hkdf`, `num-bigint`; no OpenSSL) |
+| zbus | 5.19.0 | 2026-08-09 | 3 | MIT | D-Bus (pure Rust, no libdbus); brings the `async-*` / `futures-*` / `zvariant` family as transitive crates |
+
+- **Existence / typosquatting:** `keyring` is the crate of the
+  `open-source-cooperative/keyring-rs` repository (crates.io `repository`
+  field); the store crates are published by the same project and named in
+  keyring's own manifest.
+- **Maintenance:** `windows-native-keyring-store`'s last release is 137 days
+  old, over the 90-day bar; it is part of the same actively released
+  project (keyring 4.2.0 on 2026-08-29) and depends on the vetted
+  `windows-sys`. Accepted with that note; re-check before v1.0.
+- **Security:** `cargo deny check` (advisories, bans, licenses, sources)
+  passes for the whole resolved tree on 2026-10-08, including every new
+  transitive crate. Repository activity was not checked (GitHub not
+  reachable from the build environment), as for earlier records.
+- **Fitness:** `inference::keys::tests` (memory store; the real keychain
+  round trip with `ANCHOR_TEST_KEYCHAIN=1` on the macOS and Windows CI
+  runners; a clear error where no keychain exists, as on headless Linux);
+  `secret_env_never_prints_values`.
+- **Linux note:** a running Secret Service (GNOME Keyring, KWallet) is
+  required to store keys; without one the app says so and BYOK is
+  unavailable, local and free paths still work.
+- **CI-only tool, `artifact-signing-cli =0.11.0`** (MIT; crates.io, repository
+  `levminer/trusted-signing-cli`, the tool Tauri's Windows signing guide
+  names; released 2026-05-17, 144 days before the check, over the 90-day
+  bar). Installed only in the Windows desktop job, and only when the Azure
+  signing secrets exist (ADR-0033); it never ships in Anchor. Its
+  maintenance must be re-checked before the secrets are added.
+- **Not adopted:** `tauri-plugin-updater` (no auto-update yet; ADR-0033
+  records the ≥ 2.12.0 / `requireSignedVersion` requirement if added).
+
 ## Rejected or not adopted
 
 | Candidate | Reason |
