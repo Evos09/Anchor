@@ -198,15 +198,15 @@ these rows cover what is new.
 
 | Threat / requirement | Mitigation | Test | Status |
 |---|---|---|---|
-| The page reaches native power through the shell | No Tauri commands, plugins or capabilities; `withGlobalTauri` off; Tauri refuses IPC from remote origins no capability names | `the_shell_grants_the_page_nothing` | 🟡 CI pending (Linux local) |
-| The window is steered to another site | Only `http://127.0.0.1:<port>/#t=<64 hex>` from the backend is opened; navigation is pinned to that origin; new windows are refused | `only_the_loopback_app_url_is_accepted`, `navigation_stays_on_the_backend_origin` | 🟡 CI pending (Linux local) |
-| A backend outlives the app | Stopped on exit; if the shell dies, its stdin pipe closes and the backend exits | `the_app_exits_when_the_shell_goes_away`; by hand, SIGKILL of the installed shell | 🟡 CI pending (Linux local) |
-| The folder picker discloses the disk | Directory names only, never file names or contents; absolute paths only; behind the token like every endpoint | `the_picker_lists_directory_names_only`, `the_app_endpoints_are_gated` | 🟡 CI pending (Linux local) |
-| The new endpoints are driven cross-site or without the token | The same gates as the dashboard: token, exact Host, same Origin; strict input checks | `the_app_endpoints_are_gated` | 🟡 CI pending (Linux local) |
-| Two tasks race on one workspace; a stopped task keeps acting | One task at a time (409); opening another project is refused while one runs; Stop kills the runtime and refuses its pending approval, and nothing it asked for is written | `a_task_runs_from_the_app_with_approvals_and_undo`, `stop_refuses_the_pending_approval_and_ends_the_task` | 🟡 CI pending (Linux local) |
-| Undo is unreliable | Undo is the dashboard's two-step rollback (preview, one-time nonce), allowed only between tasks | `a_task_runs_from_the_app_with_approvals_and_undo`; e2e `app.spec.ts` | 🟡 CI pending (Linux local) |
-| An unusable models file (a model reviewing its own family) | Checked before a task starts and when chosen | `models_files_are_checked`, `the_app_endpoints_are_gated` | 🟡 CI pending (Linux local) |
-| The packaged app does not start | Each OS's installer build runs the packaged app's `--smoke` | CI desktop job | 🟡 CI pending (Linux: installed .deb, local) |
+| The page reaches native power through the shell | No Tauri commands, plugins or capabilities; `withGlobalTauri` off; Tauri refuses IPC from remote origins no capability names | `the_shell_grants_the_page_nothing` | ✅ Linux, macOS, Windows (CI 37709101248) |
+| The window is steered to another site | Only `http://127.0.0.1:<port>/#t=<64 hex>` from the backend is opened; navigation is pinned to that origin; new windows are refused | `only_the_loopback_app_url_is_accepted`, `navigation_stays_on_the_backend_origin` | ✅ Linux, macOS, Windows (CI 37709101248) |
+| A backend outlives the app | Stopped on exit; if the shell dies, its stdin pipe closes and the backend exits | `the_app_exits_when_the_shell_goes_away`; by hand, SIGKILL of the installed shell | ✅ Linux, macOS, Windows (CI 37709101248) |
+| The folder picker discloses the disk | Directory names only, never file names or contents; absolute paths only; behind the token like every endpoint | `the_picker_lists_directory_names_only`, `the_app_endpoints_are_gated` | ✅ Linux, macOS, Windows (CI 37709101248) |
+| The new endpoints are driven cross-site or without the token | The same gates as the dashboard: token, exact Host, same Origin; strict input checks | `the_app_endpoints_are_gated` | ✅ Linux, macOS, Windows (CI 37709101248) |
+| Two tasks race on one workspace; a stopped task keeps acting | One task at a time (409); opening another project is refused while one runs; Stop kills the runtime and refuses its pending approval, and nothing it asked for is written | `a_task_runs_from_the_app_with_approvals_and_undo`, `stop_refuses_the_pending_approval_and_ends_the_task` | ✅ Linux, macOS, Windows (CI 37709101248) |
+| Undo is unreliable | Undo is the dashboard's two-step rollback (preview, one-time nonce), allowed only between tasks | `a_task_runs_from_the_app_with_approvals_and_undo`; e2e `app.spec.ts` | ✅ Linux, macOS, Windows (CI 37709101248) |
+| An unusable models file (a model reviewing its own family) | Checked before a task starts and when chosen | `models_files_are_checked`, `the_app_endpoints_are_gated` | ✅ Linux, macOS, Windows (CI 37709101248) |
+| The packaged app does not start | Each OS's installer build runs the packaged app's `--smoke` | CI desktop job | ✅ Linux, macOS, Windows (CI 37709101248) |
 
 ## Phase 2 "verified by instrumentation"
 
