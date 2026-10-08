@@ -185,6 +185,30 @@ dependency.
 - Contributions are licensed under Apache-2.0 (see `LICENSE`), the
   project's license.
 
+## The desktop app
+
+The app's logic is `anchor app` (`crates/anchor-backend/src/ui/app.rs`) and
+the page (`ui/src/panels/Workspace.tsx`); both are covered by the normal
+build and tests, in a browser. The Tauri window is `desktop/`, a separate
+Cargo workspace (ADR-0028), which you only need to touch to change the
+window itself:
+
+```sh
+# Linux needs WebKitGTK: sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev
+cargo install tauri-cli --version =2.11.5 --locked
+(cd ui && npm ci --ignore-scripts && npm run build)
+cargo build --release -p anchor-backend --bin anchor -p anchor-runtime --bin anchor-agent
+# the bundled backend, named for your platform (Tauri's externalBin):
+T=$(rustc -vV | sed -n 's/host: //p'); mkdir -p desktop/binaries
+cp target/release/anchor desktop/binaries/anchor-$T
+cp target/release/anchor-agent desktop/binaries/anchor-agent-$T
+cd desktop && cargo test && cargo tauri build
+```
+
+On Windows, add `.exe` to the four binary names. `desktop/deny.toml` holds
+the shell's dependency policy: the main one plus named exceptions, each
+recorded in `docs/deps/dependency-records.md`.
+
 ## Writing a verifier plugin
 
 You do not need to change Anchor to add a review check. A verifier plugin

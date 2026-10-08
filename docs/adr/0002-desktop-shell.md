@@ -1,6 +1,6 @@
 # ADR-0002: Desktop shell — Tauri vs Electron (§17 Q2)
 
-- Status: Proposed — pending evaluation
+- Status: Accepted (Tauri 2), as amended by ADR-0028 (2026-10-08)
 - Date: 2026-10-06
 
 ## Context
@@ -43,6 +43,15 @@ shell will load the same bundle, with the backend linked in, instead of
 going over HTTP. The evaluation above still gates Tauri's adoption.
 `tauri` cannot be built in the development container (webkit2gtk is
 missing), so it is still not a dependency.
+
+## Update (Phase 9, 2026-10-08)
+
+Tauri 2 (2.11.6) is adopted for the desktop app, but **not** with the
+backend linked in: the shell is a window over the loopback app that the
+bundled `anchor` backend serves, with no IPC at all. ADR-0028 records why
+and how each gate above was settled; the editor and terminal gates move to
+ADR-0008. WebKitGTK could be installed in the development container after
+all, and the window was run there under Xvfb.
 
 ## Alternatives
 

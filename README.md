@@ -3,12 +3,14 @@
 A trust-first desktop coding agent: one developers can trust not to lose
 their work, leak their credentials, or ship unverified changes.
 
-> **Status: Phases 1–7 are implemented, and Phase 8 (open-source
-> release) is under way, with these limits:**
+> **Status: Phases 1–8 are implemented, and Phase 9 (the desktop app) is
+> built, with these limits:**
 >
 > - **External audit:** pending; it needs a third party. No release is
 >   cut before it (ADR-0021).
-> - **Interface:** a loopback web dashboard, with no desktop shell yet. Read
+> - **Interface:** the [desktop app](#the-desktop-app-phase-9) (chat-style
+>   tasks; no editor or terminal yet), the CLI, and the team dashboard.
+>   Installers are unsigned CI builds. Read
 > [What is and isn't done](#what-is-and-isnt-done) before relying on
 > anything here.
 
@@ -88,6 +90,37 @@ changes and asks before applying them. The restore is all-or-nothing:
 Policy, audit log, checkpoints and snapshots live outside the workspace, so
 agent commands can't reach them (ADR-0022). `anchor state-dir --workspace
 DIR` prints the location; set `ANCHOR_STATE_DIR` to move it.
+
+### The desktop app (Phase 9)
+
+Open a project folder, type what you want done, approve or deny each change
+the agent asks to make, and undo any turn, in one window (ADR-0028).
+
+**Install.** Every CI run builds installers: open the run on GitHub
+(Actions → CI → the latest run on this branch) and download
+`anchor-desktop-Windows` (`.msi`, or the `-setup.exe`), `anchor-desktop-macOS`
+(`.dmg`) or `anchor-desktop-Linux` (`.deb`, `.rpm`). They are **unsigned**:
+- **Windows:** SmartScreen says "Windows protected your PC": choose *More
+  info*, then *Run anyway*.
+- **macOS:** right-click the app, choose *Open*, then *Open* again.
+
+**Models.** The app starts with two free local models through
+[Ollama](https://ollama.com): install it, then run
+`ollama pull qwen2.5-coder:7b` and `ollama pull llama3.1:8b`. To use other
+models (a hosted API with your key), point the app at another models file;
+`config/roles.example.toml` shows the format.
+
+**Build it yourself:** `desktop/` (see CONTRIBUTING.md). **Without
+installing:** `anchor app` serves the same app in your browser:
+
+```sh
+cargo build
+./target/debug/anchor app            # prints the URL to open
+# a scripted demo, no models needed:
+./target/debug/anchor app --roles examples/app/roles.mock.toml --mock-script examples/app/script.json
+```
+
+On Windows (PowerShell): `.\target\debug\anchor.exe app`.
 
 ### With real models, free and local
 
@@ -343,6 +376,16 @@ every §11 threat to its test and its per-platform status.
   - **Release:** the repository is Apache-2.0. Making it public is the
     owner's call, and releases wait for the external audit.
 
+- Phase 9, the desktop app (ADR-0028).
+  - **The app:** `anchor app` serves it on loopback; a Tauri window
+    (`desktop/`) shows it, with no IPC at all. Open a folder, run a task,
+    answer approvals in the conversation, Stop, and undo any turn.
+  - **Tests:** `crates/anchor-backend/tests/app.rs` (the loop over HTTP,
+    Stop, the gates, the shell going away), `ui/e2e/app.spec.ts` (Chromium),
+    the shell's own tests, and the packaged app's `--smoke` on each OS.
+  - **Installers:** unsigned `.msi`/`.exe`, `.dmg`, `.deb`/`.rpm` from CI.
+    No release (ADR-0021).
+
 **Known platform gaps:**
 
 - **Windows runtime:** the agent runtime runs in an AppContainer, but
@@ -379,10 +422,9 @@ every §11 threat to its test and its per-platform status.
 
 **Phase 6 limits:**
 
-- **No desktop shell, editor or terminal yet.** The dashboard is a web
-  page; the Tauri shell (ADR-0002) and the editor and terminal (§12.1,
-  ADR-0008) are deferred. `/plan`, `/implement` and `/review` print the
-  CLI command to run.
+- **No editor or terminal yet** (§12.1, ADR-0008). The desktop app
+  (Phase 9) runs tasks, but the team dashboard's `/plan`, `/implement` and
+  `/review` still print the CLI command to run.
 - **Agent turn snapshots** are visible only while the agent's isolated
   workspace exists. After a run, the merge snapshots and the narrated
   story say which agent changed what.

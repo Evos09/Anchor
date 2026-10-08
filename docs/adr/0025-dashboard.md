@@ -165,6 +165,15 @@ the CLI:
 - **Without Node.** `cargo build` still works; the binary embeds a
   "frontend not built" page instead.
 
+## Update (Phase 9, 2026-10-08)
+
+"Tauri later" is done (ADR-0028), differently from what this ADR expected:
+the desktop app loads the same bundle **over this loopback HTTP surface**,
+not over IPC. The server gained an app mode (`anchor app`): its project is
+swappable, and `/api/app/*` adds opening projects, running and stopping
+tasks, and the folder picker. In app mode the page renders the app view
+(`ui/src/panels/Workspace.tsx`).
+
 ## Consequences and limits
 
 - **Agent turn snapshots** live only as long as the agent's isolated

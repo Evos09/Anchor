@@ -43,6 +43,10 @@ the record of the internal review that preceded it.
    - the verification gate;
    - the dashboard's API.
 
+Added after this package was prepared (Phase 9, ADR-0028), and to be
+included: the desktop app's endpoints (`crates/anchor-backend/src/ui/app.rs`)
+and the Tauri shell (`desktop/src/main.rs`, which holds no authority).
+
 Out of scope: the model providers, the user's own git, and the OS
 kernel.
 
