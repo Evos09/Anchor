@@ -273,19 +273,26 @@ function Picker({ app, onClose, onOpened }: { app: AppState; onClose: () => void
   const [listing, setListing] = useState<DirListing | null>(null);
   const [typed, setTyped] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Only the latest browse is shown: a slow earlier reply (the first listing,
+  // say) must not replace the folder the user has since gone to.
+  const latest = useRef(0);
   const browse = useCallback(async (path?: string) => {
+    const n = ++latest.current;
     try {
       const l = await get<DirListing>(`/api/app/dirs${q({ path })}`);
+      if (n !== latest.current) return;
       setListing(l);
       if (l.path) setTyped(l.path);
       setError(null);
     } catch (e) {
-      setError(String(e));
+      if (n === latest.current) setError(String(e));
     }
   }, []);
+  // Where the dialog starts, read once when it opens.
+  const start = useRef(app.project ?? app.home ?? undefined);
   useEffect(() => {
-    void browse(app.project ?? app.home ?? undefined);
-  }, [browse, app.project, app.home]);
+    void browse(start.current);
+  }, [browse]);
   const open = async (path: string) => {
     try {
       await post("/api/app/open", { path });

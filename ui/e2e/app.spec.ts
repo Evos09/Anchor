@@ -51,11 +51,30 @@ test("open a folder, run a task, approve, undo", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Open a project to start" })).toBeVisible();
   await page.screenshot({ path: join(shots, "app-01-welcome.png"), fullPage: true });
 
-  // The folder picker: type the parent, then pick the project by name.
+  // The folder picker: type the parent, then pick the project by name. The
+  // dialog's first listing (home) is held back until after the typed path's
+  // listing, as on a slow machine (CI run 37705645400): the late reply must
+  // not overwrite it.
+  const typed = (url: string) => new URL(url).searchParams.get("path")?.startsWith(dir) ?? false;
+  let release = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/app/dirs*", async (route) => {
+    if (typed(route.request().url())) {
+      await route.continue();
+      release();
+    } else {
+      await held;
+      await route.continue();
+    }
+  });
+  const late = page.waitForResponse((r) => r.url().includes("/api/app/dirs") && !typed(r.url()));
   await page.getByRole("button", { name: "Open folder…" }).first().click();
   const picker = page.getByRole("dialog", { name: "Open a folder" });
   await picker.getByLabel("Folder path").fill(dir);
   await picker.getByRole("button", { name: "Go", exact: true }).click();
+  await late;
+  await page.waitForTimeout(300); // let the page apply the late reply
+  await expect(picker.getByLabel("Folder path")).toHaveValue(dir);
   await picker.getByRole("button", { name: /my-project/ }).click();
   await picker.getByTestId("open-here").click();
   await expect(page.getByTestId("project")).toContainText("my-project");
