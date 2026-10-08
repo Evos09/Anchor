@@ -143,11 +143,17 @@ impl Client {
             if !self.running() {
                 return n;
             }
-            assert!(Instant::now() < deadline, "the task did not finish");
+            assert!(
+                Instant::now() < deadline,
+                "the task did not finish; the log so far:\n{}",
+                self.story()
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }
 
+    /// Wait for the running task to ask for an approval. Fails at once,
+    /// with the log, if the task ends without asking.
     fn wait_pending(&self) -> Vec<Value> {
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
@@ -155,9 +161,30 @@ impl Client {
             if !p.is_empty() {
                 return p;
             }
-            assert!(Instant::now() < deadline, "no approval was asked");
+            if !self.running() && self.pending().is_empty() {
+                panic!(
+                    "the task ended without asking for an approval; the log:\n{}",
+                    self.story()
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no approval was asked (running: {}); the log so far:\n{}",
+                self.running(),
+                self.story()
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// The last events, one line each, for a failure message.
+    fn story(&self) -> String {
+        let ev = self.events();
+        ev[ev.len().saturating_sub(40)..]
+            .iter()
+            .map(|e| format!("  [{}] {} {}", e["level"], e["kind"], e["text"]))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn events(&self) -> Vec<Value> {
