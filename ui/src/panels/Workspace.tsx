@@ -1060,7 +1060,7 @@ function Conversation({
         );
       })}
       {pending.map((p) => (
-        <article key={p.id} className="approval card" data-testid={`approval-${p.kind}`}>
+        <article key={p.id} className="approval card" data-testid={`approval-${p.kind}`} data-id={p.id}>
           <div className="row">
             <Badge kind="warn">needs your OK</Badge>
             <span className="summary">{p.summary}</span>

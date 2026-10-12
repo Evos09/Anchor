@@ -686,8 +686,10 @@ fn the_reviewer_sends_the_builder_back_until_it_approves() {
 fn the_reviewer_never_runs_on_the_builders_family() {
     let dir = tempfile::tempdir().unwrap();
     let roles = dir.path().join("same-family.toml");
+    // Line endings as checked out (CRLF on Windows) do not matter here.
     let text = std::fs::read_to_string(example().join("roles.mock.toml"))
         .unwrap()
+        .replace("\r\n", "\n")
         .replace(
             "[roles.reviewer]\nprovider = \"mock_b\"",
             "[roles.reviewer]\nprovider = \"mock_a\"",

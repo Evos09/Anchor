@@ -264,8 +264,10 @@ test("builder + checker: the reviewer sends the change back, then accepts", asyn
   for (const target of ["hello.py", "README.md", "README.md"]) {
     const card = page.getByTestId("approval-tool");
     await expect(card).toContainText(target, { timeout: 60_000 });
+    // The next round's card can replace this one at once: wait for this one.
+    const id = await card.getAttribute("data-id");
     await card.getByRole("button", { name: "Approve" }).click();
-    await expect(card).toHaveCount(0, { timeout: 30_000 });
+    await expect(page.locator(`[data-testid="approval-tool"][data-id="${id}"]`)).toHaveCount(0, { timeout: 30_000 });
   }
   const reviews = page.getByTestId("review");
   await expect(reviews).toHaveCount(2, { timeout: 60_000 });

@@ -548,14 +548,41 @@ fn a_providers_error_message_reaches_the_user() {
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
         let (mut s, _) = listener.accept().unwrap();
+        // Read the whole request first: closing a socket with unread data
+        // resets the connection (on Windows the client then sees os error
+        // 10054 instead of the answer).
+        let mut req = Vec::new();
         let mut buf = [0u8; 65536];
-        let _ = s.read(&mut buf);
+        loop {
+            let n = s.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&req);
+            if let Some(end) = text.find("\r\n\r\n") {
+                let len = text[..end]
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if req.len() >= end + 4 + len {
+                    break;
+                }
+            }
+        }
         let body = r#"{"error":{"type":"anchor_cap","message":"5-hour limit reached; resets at 14:00 UTC"}}"#;
         let _ = write!(
             s,
             "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
+        let _ = s.flush();
+        let _ = s.shutdown(std::net::Shutdown::Write);
     });
     let cfg: crate::config::ProviderConfig = toml::from_str(&format!(
         "kind = \"openai_compatible\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\nfamily = \"x\"\n"

@@ -128,7 +128,12 @@ fn a_hanging_plugin_times_out_and_fails_closed() {
     // Untimed warm-up: the first sandboxed run on a fresh Windows runner
     // pays a one-time ACL grant over the PATH trees (CI run 37694430534),
     // which the time bound below is not about.
-    runner().describe(&plugin, 1).unwrap();
+    // Its own timeout too: a cold runner can take longer than the 2 s.
+    let warm = Plugin {
+        timeout: Duration::from_secs(120),
+        ..plugin.clone()
+    };
+    runner().describe(&warm, 1).unwrap();
     let mut r = PluginVerifier::new(plugin, runner());
     let t = Instant::now();
     let vs = r.review(&input).unwrap();
