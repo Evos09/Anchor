@@ -1,0 +1,11 @@
+{"steps": [
+  {"content": "", "tool_calls": [
+     {"tool": "submit_verdicts", "args": {"verdicts": [
+       {"claim_id": "task", "verdict": "supported", "reason_code": "evidence_matches",
+        "evidence_refs": ["diff:README.md", "diff:hello.py"],
+        "note": "The greeting and the README match the task."}
+     ]}}
+   ],
+   "prompt_tokens": 1600, "completion_tokens": 50},
+  {"content": "done", "prompt_tokens": 1600, "completion_tokens": 5}
+]}

@@ -1,0 +1,11 @@
+{"steps": [
+  {"content": "", "tool_calls": [
+     {"tool": "submit_verdicts", "args": {"verdicts": [
+       {"claim_id": "task", "verdict": "refuted", "reason_code": "incomplete_change",
+        "evidence_refs": ["diff:README.md"],
+        "note": "The README says how to run the program but not that it needs Python 3."}
+     ]}}
+   ],
+   "prompt_tokens": 1500, "completion_tokens": 60},
+  {"content": "done", "prompt_tokens": 1500, "completion_tokens": 5}
+]}

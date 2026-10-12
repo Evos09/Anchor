@@ -1090,6 +1090,35 @@ impl Mediator {
         ))
     }
 
+    /// Snapshot the workspace now under this root's ref `ns/leaf`, which
+    /// keeps it from gc until [`Mediator::drop_ref`] (the app's builder +
+    /// checker loop diffs each round against the task's start).
+    pub fn snapshot_ref(&self, ns: &str, leaf: &str, label: &str) -> Result<Id, String> {
+        let store = lock_store(&self.snapshots);
+        let name = self.snap_opts.root.ref_name(ns, leaf);
+        let r = anchor_snapshot::take_snapshot(&store, &self.ws, &self.snap_opts, &name, label)
+            .map_err(|e| e.to_string())?;
+        self.audit_snapshot(label, &r);
+        Ok(r.id())
+    }
+
+    /// Forget the ref [`Mediator::snapshot_ref`] made.
+    pub fn drop_ref(&self, ns: &str, leaf: &str) {
+        let store = lock_store(&self.snapshots);
+        let _ = store.delete_ref(&self.snap_opts.root.ref_name(ns, leaf));
+    }
+
+    /// The files changed since snapshot `since`, with their line diffs.
+    pub fn changes_since(
+        &self,
+        since: &Id,
+    ) -> Result<Vec<anchor_protocol::verify::ChangedFile>, String> {
+        let store = lock_store(&self.snapshots);
+        let now = anchor_snapshot::snapshot(&store, &self.ws, &self.snap_opts, "review")
+            .map_err(|e| e.to_string())?;
+        crate::verify::changed_files(&store, since, &now.id(), &globset::GlobSet::empty())
+    }
+
     /// What restoring `target` would change.
     pub fn preview_restore(&mut self, target: &Id) -> Result<Vec<Change>, String> {
         let store = lock_store(&self.snapshots);

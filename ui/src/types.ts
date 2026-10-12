@@ -275,6 +275,8 @@ export interface AppState {
     preference: Preference;
     pin: InfPath | null;
     free_offered: boolean;
+    collab?: Collab;
+    pair_rounds?: number;
   };
   mock: boolean;
   platform: string;
@@ -346,8 +348,12 @@ export interface TaskPrompt {
   options: PromptOption[];
 }
 
+/** How many AIs work on a task (ADR-0039). */
+export type Collab = "single" | "pair" | "team";
+
 export interface TaskReply {
   ok: boolean;
+  collab?: Collab;
   session_id?: string;
   prompt?: TaskPrompt;
   route?: {

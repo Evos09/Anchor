@@ -705,6 +705,7 @@ fn team_with(reviewer: String) -> Team {
             mock_script: None,
             repair_mock_scripts: Vec::new(),
             messages_need_approval: false,
+            extra_env: Default::default(),
         }],
     }
 }
@@ -798,6 +799,7 @@ fn verify_team(first: &str, repairs: &[&str], spec: VerifySpec) -> Team {
             mock_script: Some(executor_script(first)),
             repair_mock_scripts: repairs.iter().map(|c| executor_script(c)).collect(),
             messages_need_approval: false,
+            extra_env: Default::default(),
         }],
     }
 }
@@ -815,6 +817,7 @@ fn run_verified(
         auto_merge,
         checkpoint_threshold: 0.8,
         gate: Box::new(anchor_backend::queue::NoGate),
+        cancel: None,
     };
     team::run(opened, team, opts, team::Shared::wrap(interact)).unwrap()
 }
@@ -1006,6 +1009,7 @@ fn reviewer_falling_back_into_executor_family_is_refused() {
         auto_merge: true,
         checkpoint_threshold: 0.8,
         gate: Box::new(anchor_backend::queue::NoGate),
+        cancel: None,
     };
     let interact = team::Shared::wrap(Box::new(Scripted::new(true, ResumeChoice::FreshSession)));
     let e = team::run(&mut opened, &team, opts, interact).unwrap_err();

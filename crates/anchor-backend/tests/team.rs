@@ -118,6 +118,7 @@ fn agent(name: &str, roles: String, within: &[&str], script: Value) -> TeamAgent
         mock_script: Some(script.to_string()),
         repair_mock_scripts: Vec::new(),
         messages_need_approval: false,
+        extra_env: Default::default(),
     }
 }
 
@@ -140,6 +141,7 @@ fn run_team(fx: &Fx, opened: &mut Opened, team: &Team) -> TeamReport {
         auto_merge: true,
         checkpoint_threshold: 0.8,
         gate: Box::new(NoGate),
+        cancel: None,
     };
     let interact = team::Shared::wrap(Box::new(Scripted::new(true, ResumeChoice::FreshSession)));
     team::run(opened, team, opts, interact).unwrap()

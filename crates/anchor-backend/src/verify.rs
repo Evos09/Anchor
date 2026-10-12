@@ -679,7 +679,7 @@ fn read_untrusted(path: &Path, cap: u64) -> std::io::Result<String> {
 }
 
 /// The changed files between `pre` and `cand`, with their line diffs.
-fn changed_files(
+pub(crate) fn changed_files(
     store: &Store,
     pre: &Id,
     cand: &Id,
@@ -729,7 +729,7 @@ fn changed_files(
 
 /// Cut the review input down to its size limit, largest diffs first; a
 /// reviewer cannot support claims over an input marked truncated.
-fn fit(input: &mut ReviewInput) {
+pub(crate) fn fit(input: &mut ReviewInput) {
     while serde_json::to_vec(input).map_or(usize::MAX, |v| v.len()) > MAX_REVIEW_BYTES {
         input.truncated = true;
         let biggest = input
@@ -1126,6 +1126,7 @@ pub struct ModelReviewer {
     executor_families: Vec<String>,
     sessions: u64,
     pub usage: Arc<Mutex<ReviewUsage>>,
+    cancel: Option<Arc<session::Cancel>>,
 }
 
 impl std::fmt::Debug for ModelReviewer {
@@ -1171,8 +1172,57 @@ impl ModelReviewer {
             executor_families,
             sessions: 0,
             usage: Arc::new(Mutex::new(ReviewUsage::default())),
+            cancel: None,
         })
     }
+
+    /// Secrets for the review session's environment (the app's keys).
+    pub fn with_env(mut self, env: crate::inference::keys::SecretEnv) -> ModelReviewer {
+        self.cfg.extra_env = env;
+        self
+    }
+
+    /// The scripted model for the next review (demos and tests).
+    pub fn set_mock_script(&mut self, script: Option<String>) {
+        self.cfg.mock_script = script;
+    }
+
+    /// Stop review sessions through `cancel` (the app's Stop button).
+    pub fn with_cancel(mut self, cancel: Arc<session::Cancel>) -> ModelReviewer {
+        self.cancel = Some(cancel);
+        self
+    }
+}
+
+/// A mediator and checkpoint store for review sessions. They get no
+/// tools, so the mediator is a formality, over an empty private directory
+/// of the workspace's isolation base; it shares the workspace's audit log
+/// (as agent `reviewer`) and snapshot store (as root `reviewer`).
+pub fn reviewer_mediator(
+    main: &Mediator,
+    state_base: &Path,
+    paths: &crate::StatePaths,
+) -> Result<(Mediator, CheckpointStore), String> {
+    let ws_root = main.workspace().root().to_path_buf();
+    let dir = crate::iso::iso_base(state_base, &ws_root).join("reviewer");
+    crate::create_private_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let ws = anchor_fs::Workspace::open(&dir).map_err(|e| e.to_string())?;
+    let guard = anchor_guard::Guard::load(&paths.workspace_config).map_err(|e| e.to_string())?;
+    let mut snap = main.snapshot_options().clone();
+    snap.root = anchor_snapshot::Root::named("reviewer").unwrap_or_default();
+    let mediator = main.isolated(
+        ws,
+        snap,
+        main.engine().for_agent("reviewer"),
+        guard,
+        Box::new(crate::interact::Scripted::new(
+            false,
+            anchor_protocol::ResumeChoice::FreshSession,
+        )),
+    );
+    let checkpoints =
+        CheckpointStore::open(&paths.checkpoints.join("reviewer")).map_err(|e| e.to_string())?;
+    Ok((mediator, checkpoints))
 }
 
 /// Providers a session's notices say it ran on.
@@ -1236,8 +1286,13 @@ impl Reviewer for ModelReviewer {
         let mut cfg = self.cfg.clone();
         cfg.review = Some(input.clone());
         cfg.session_id = format!("{}-review{}", session::new_session_id(), self.sessions);
-        let rep = session::run(&cfg, &mut self.mediator, &self.checkpoints)
-            .map_err(|e| format!("review session: {e}"))?;
+        let rep = session::run_cancellable(
+            &cfg,
+            &mut self.mediator,
+            &self.checkpoints,
+            self.cancel.as_deref(),
+        )
+        .map_err(|e| format!("review session: {e}"))?;
         {
             let mut u = self.usage.lock().unwrap_or_else(|p| p.into_inner());
             u.sessions += 1;

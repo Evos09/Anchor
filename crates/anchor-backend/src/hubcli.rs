@@ -98,6 +98,7 @@ pub fn cmd_team(a: &Args) -> Result<ExitCode, String> {
         auto_merge: a.has("--auto-merge"),
         checkpoint_threshold: threshold,
         gate: Box::new(NoGate),
+        cancel: None,
     };
     eprintln!(
         "anchor: team of {} on {} ({:?})",
@@ -618,12 +619,24 @@ pub fn cmd_app(a: &Args) -> Result<ExitCode, String> {
     };
     let mut ro = default_exec_read_only();
     ro.extend(a.all("--exec-read-only").into_iter().map(PathBuf::from));
+    let read_all = |a: &Args, flag: &str| -> Result<Vec<String>, String> {
+        a.all(flag)
+            .into_iter()
+            .map(|f| std::fs::read_to_string(f).map_err(|e| format!("{flag} {f}: {e}")))
+            .collect()
+    };
     let app = anchor_backend::ui::app::App::new(anchor_backend::ui::app::AppConfig {
         state_base,
         roles_path,
         mock_script: a
             .get("--mock-script")
             .map(|f| std::fs::read_to_string(f).map_err(|e| format!("--mock-script {f}: {e}")))
+            .transpose()?,
+        review_mock_scripts: read_all(a, "--review-mock-script")?,
+        repair_mock_scripts: read_all(a, "--repair-mock-script")?,
+        team_mock_script: a
+            .get("--team-mock-script")
+            .map(|f| std::fs::read_to_string(f).map_err(|e| format!("--team-mock-script {f}: {e}")))
             .transpose()?,
         exec_read_only: ro,
         agent_bin: a

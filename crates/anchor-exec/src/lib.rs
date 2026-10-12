@@ -1386,6 +1386,31 @@ mod windows;
 #[cfg(windows)]
 pub use windows::{IsolatedChild, IsolatedSpec, spawn_isolated};
 
+/// The variables the operating system itself needs in a child process
+/// started with a cleared environment. On Windows: `SystemRoot` (without
+/// it Winsock fails to initialise, error 10106, and DLL loading breaks)
+/// and the profile and temp folders. Paths, not secrets. Empty elsewhere.
+pub fn os_env() -> Vec<(String, String)> {
+    #[cfg(windows)]
+    {
+        windows::os_env()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// `env` plus every [`os_env`] variable it does not set itself.
+pub fn with_os_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
+    for (k, v) in os_env() {
+        if !env.iter().any(|(e, _)| e.eq_ignore_ascii_case(&k)) {
+            env.push((k, v));
+        }
+    }
+    env
+}
+
 #[cfg(test)]
 mod tests;
 

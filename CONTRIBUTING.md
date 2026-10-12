@@ -189,7 +189,11 @@ dependency.
 
 The app's logic is `anchor app` (`crates/anchor-backend/src/ui/app.rs`) and
 the page (`ui/src/panels/Workspace.tsx`); both are covered by the normal
-build and tests, in a browser. The Tauri window is `desktop/`, a separate
+build and tests, in a browser. The two-AI modes (ADR-0039) are
+`crates/anchor-backend/src/ui/pair.rs` (builder + checker) and
+`App::start_team` (two builders, on `team::run`); their tests are in
+`crates/anchor-backend/tests/app.rs` and use the scripted models in
+`examples/app/` (`review-*.json`, `repair.json`, `builder-b.json`). The Tauri window is `desktop/`, a separate
 Cargo workspace (ADR-0028), which you only need to touch to change the
 window itself:
 

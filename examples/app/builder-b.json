@@ -1,0 +1,8 @@
+{"steps": [
+  {"content": "I will take the notes file; builder A has the greeting.",
+   "tool_calls": [
+     {"tool": "write_file", "args": {"path": "NOTES.md", "content": "# Notes\n\nThe greeting lives in hello.py.\n"}}
+   ],
+   "prompt_tokens": 1200, "completion_tokens": 70},
+  {"content": "Added NOTES.md.", "prompt_tokens": 1400, "completion_tokens": 10}
+]}

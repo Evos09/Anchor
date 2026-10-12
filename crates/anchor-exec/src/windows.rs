@@ -515,15 +515,16 @@ const REQUIRED_ENV: [&str; 9] = [
     "ProgramData",
 ];
 
+/// The [`REQUIRED_ENV`] variables set in this process's environment.
+pub(crate) fn os_env() -> Vec<(String, String)> {
+    REQUIRED_ENV
+        .iter()
+        .filter_map(|name| std::env::var(name).ok().map(|v| (name.to_string(), v)))
+        .collect()
+}
+
 fn env_block(env: &[(String, String)]) -> Vec<u16> {
-    let mut vars: Vec<(String, String)> = env.to_vec();
-    for name in REQUIRED_ENV {
-        if !vars.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
-            && let Ok(v) = std::env::var(name)
-        {
-            vars.push((name.into(), v));
-        }
-    }
+    let mut vars = crate::with_os_env(env.to_vec());
     vars.sort_by_key(|(k, _)| k.to_uppercase());
     let mut block = Vec::new();
     for (k, v) in vars {

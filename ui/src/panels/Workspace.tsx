@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { ApiError, get, post, q } from "../api";
 import type {
   AppState,
+  Collab,
   DirListing,
   Event,
   Overview,
@@ -38,6 +39,8 @@ const LABEL: Record<string, string> = {
 /** What the conversation shows (the rest is in the Audit log). */
 function shown(e: Event): boolean {
   if (e.level === "trace") return false;
+  // The reviewer's own session shows as its verdicts (pair_review).
+  if (e.agent === "reviewer") return false;
   if (e.kind === "ui_action" && (e.data as { action?: string } | null)?.action === "open_project") return false;
   return !["usage", "approval_pending", "approval_resolved", "snapshot", "checkpoint_saved"].includes(e.kind);
 }
@@ -67,7 +70,12 @@ function tasksOf(events: Event[], running: boolean): Task[] {
     }
   }
   out.forEach((t, i) => {
-    const fin = t.events.find((e) => e.kind === "session_finished");
+    // The builder's last session says how it ended (builder + checker runs
+    // one per round; the reviewer's sessions are its own).
+    const fins = t.events.filter((e) => e.kind === "session_finished" && e.agent !== "reviewer");
+    const team = t.events.some((e) => e.kind === "team_started");
+    const teamDone = t.events.some((e) => e.kind === "team_finished");
+    const fin = team && !teamDone && running && i === out.length - 1 ? undefined : fins[fins.length - 1];
     const d = (fin?.data ?? {}) as { failed?: string | null; error?: string | null; done?: boolean };
     if (!fin) t.status = running && i === out.length - 1 ? "running" : "failed";
     else if (d.failed && /cancelled/.test(d.failed)) t.status = "stopped";
@@ -716,6 +724,20 @@ function Picker({ app, onClose, onOpened }: { app: AppState; onClose: () => void
   );
 }
 
+const COLLABS: [Collab, string, string][] = [
+  ["single", "One AI", "One model does the task."],
+  [
+    "pair",
+    "Builder + checker",
+    "One model makes the change; a second model, from another family, reviews it and sends it back until it accepts.",
+  ],
+  [
+    "team",
+    "Two builders",
+    "Two models work at once in separate copies, splitting the work; you confirm each merge. Or start a task with /team.",
+  ],
+];
+
 function Composer({
   app,
   running,
@@ -763,6 +785,16 @@ function Composer({
   };
   const roles = app?.models.roles;
   const inf = app?.inference;
+  const collab: Collab = /^\/team\b/.test(text.trim()) ? "team" : (inf?.collab ?? "pair");
+  const setCollab = async (c: Collab) => {
+    try {
+      await post("/api/app/inference", { collab: c });
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+    onChanged();
+  };
   const routed = inf?.source === "routed";
   const override = /^\/(local|byok|free)\b/.exec(text.trim())?.[1];
   const chip = routed
@@ -772,7 +804,9 @@ function Composer({
         ? `Pinned: ${PATH_NAME[inf.pin]}`
         : `Models: ${PREF_NAME[inf?.preference ?? "auto"]}`
     : app?.models.ok
-      ? `${roles?.executor ?? "executor"} · reviewed by ${roles?.reviewer ?? "reviewer"}`
+      ? collab === "pair"
+        ? `${roles?.executor ?? "executor"} · reviewed by ${roles?.reviewer ?? "reviewer"}`
+        : (roles?.executor ?? "executor")
       : "Models not set up";
   return (
     <div className={big ? "composer composer-big" : "composer"}>
@@ -808,6 +842,21 @@ function Composer({
             {chip}
             <I.Chevron open />
           </button>
+          <div className="seg" role="radiogroup" aria-label="How many AIs" data-testid="collab">
+            {COLLABS.map(([c, label, hint]) => (
+              <button
+                key={c}
+                role="radio"
+                aria-checked={collab === c}
+                className={collab === c ? "seg-btn seg-on" : "seg-btn"}
+                title={hint}
+                disabled={running}
+                onClick={() => setCollab(c)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <span className="spacer" />
           {running ? (
             <button className="btn btn-danger btn-round-text" onClick={stop}>
@@ -821,6 +870,61 @@ function Composer({
         </div>
       </div>
       <ErrorLine error={error} />
+    </div>
+  );
+}
+
+/** "Builder A" for a two-builder task's agent (`builder-a-<stamp>`). */
+function builderName(agent: string | null): string | null {
+  const m = /^builder-([ab])-/.exec(agent ?? "");
+  return m ? `Builder ${m[1]!.toUpperCase()}` : null;
+}
+
+interface Verdict {
+  claim_id: string;
+  verdict: "supported" | "refuted" | "unverifiable";
+  reason_code: string;
+  note?: string;
+}
+
+const VERDICT: Record<Verdict["verdict"], string> = {
+  supported: "accepted",
+  refuted: "not accepted",
+  unverifiable: "could not check",
+};
+
+/** The checker's answer (builder + checker): a second speaker, claim by claim. */
+function ReviewBubble({ e }: { e: Event }) {
+  const d = (e.data ?? {}) as {
+    round?: number;
+    reviewer?: { model?: string; family?: string } | null;
+    claims?: { id: string; text: string }[];
+    verdicts?: Verdict[];
+    approved?: boolean;
+    final?: boolean;
+  };
+  const text = (id: string) => d.claims?.find((c) => c.id === id)?.text ?? id;
+  return (
+    <div className={`bubble bubble-reviewer ${d.approved ? "bubble-ok" : "bubble-warn"}`} data-testid="review">
+      <div className="bubble-who">
+        Reviewer · {d.reviewer?.model ?? "another model"}
+        {d.reviewer?.family ? ` (${d.reviewer.family})` : ""} · round {d.round}
+      </div>
+      <p>
+        {d.approved
+          ? "I checked the change and accept it."
+          : d.final
+            ? "I still have objections; the rounds are used up. Look over the change before you keep it."
+            : "I checked the change and do not accept it yet:"}
+      </p>
+      <ul className="plain-list">
+        {(d.verdicts ?? []).map((v) => (
+          <li key={v.claim_id}>
+            <b>{VERDICT[v.verdict] ?? v.verdict}:</b> {text(v.claim_id)}
+            {v.note ? <span className="muted"> — {v.note}</span> : null}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -924,12 +1028,24 @@ function Conversation({
             </div>
           );
         }
+        if (e.kind === "pair_review") {
+          return <ReviewBubble key={e.seq} e={e} />;
+        }
+        if (e.kind === "pair_reply") {
+          return (
+            <div key={e.seq} className="turn-sep round-sep" data-testid="round">
+              <span>Round {String(d["round"])}: the builder answers the review</span>
+            </div>
+          );
+        }
         if (e.kind === "session_finished") {
           const result = typeof d["result"] === "string" ? d["result"] : null;
+          const who = builderName(e.agent);
           return (
             <div key={e.seq}>
               {result && (
                 <div className="bubble bubble-agent" data-testid="result">
+                  {who && <div className="bubble-who">{who}</div>}
                   {result}
                 </div>
               )}

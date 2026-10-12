@@ -615,6 +615,89 @@ impl Model {
                     )
                 }
             }
+            "pair_review" => {
+                let reviewer = format!(
+                    "the reviewer ({})",
+                    d["reviewer"]["model"].as_str().unwrap_or("another model")
+                );
+                let problems: Vec<String> = d["verdicts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|v| v["verdict"] != "supported")
+                    .map(
+                        |v| match v["note"].as_str().filter(|n| !n.trim().is_empty()) {
+                            Some(_) => short(&v["note"], 200),
+                            None => short(&v["reason_code"], 60),
+                        },
+                    )
+                    .collect();
+                if d["approved"] == true {
+                    (
+                        "review",
+                        Ok,
+                        format!("{reviewer} approved the change (round {})", d["round"]),
+                    )
+                } else if d["final"] == true {
+                    (
+                        "review",
+                        Fail,
+                        format!(
+                            "{reviewer} still has objections after {} round(s): {}",
+                            d["round"],
+                            problems.join("; ")
+                        ),
+                    )
+                } else {
+                    (
+                        "review",
+                        Warn,
+                        format!(
+                            "{reviewer} found {} problem(s): {}",
+                            problems.len().max(1),
+                            problems.join("; ")
+                        ),
+                    )
+                }
+            }
+            "pair_reply" => (
+                "review",
+                Info,
+                format!("Round {}: the builder answers the review", d["round"]),
+            ),
+            "pair_error" => (
+                "review",
+                Fail,
+                format!("the review stopped: {}", short(&d["detail"], 300)),
+            ),
+            "pair_skipped" => (
+                "review",
+                Info,
+                format!("no review: {}", short(&d["reason"], 200)),
+            ),
+            "team_finished" => {
+                let parts: Vec<String> = d["agents"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|a| {
+                        format!(
+                            "{} {}",
+                            a["name"].as_str().unwrap_or("?"),
+                            if a["merged"] == true {
+                                "merged"
+                            } else {
+                                "not merged"
+                            }
+                        )
+                    })
+                    .collect();
+                (
+                    "team",
+                    Info,
+                    format!("the builders are done: {}", parts.join(", ")),
+                )
+            }
             "turn_started" => (
                 "session",
                 Info,

@@ -18,12 +18,16 @@ let proc: ChildProcess | null = null;
 let dir = "";
 let proc2: ChildProcess | null = null;
 let dir2 = "";
+let proc3: ChildProcess | null = null;
+let dir3 = "";
 
 test.afterAll(() => {
   proc?.kill("SIGTERM");
   proc2?.kill("SIGTERM");
+  proc3?.kill("SIGTERM");
   if (dir) rmSync(dir, { recursive: true, force: true });
   if (dir2) rmSync(dir2, { recursive: true, force: true });
+  if (dir3) rmSync(dir3, { recursive: true, force: true });
 });
 
 /** A port nothing listens on (so "Ollama" is surely not running there). */
@@ -208,5 +212,75 @@ test("first run: no model yet gives a prompt, not an error", async ({ page }) =>
   await page.screenshot({ path: join(shots, "app-09-models.png"), fullPage: true });
   await page.getByRole("button", { name: "Close settings" }).click();
   await expect(page.getByTestId("path-chip")).toContainText("Pinned: Local");
+  expect(log).not.toMatch(/panicked/);
+});
+
+// ADR-0039: builder + checker. A scripted reviewer (another family) does
+// not accept the first change; its note goes back to the builder, which
+// fixes it, and the reviewer accepts. The composer offers the three modes.
+test("builder + checker: the reviewer sends the change back, then accepts", async ({ page }) => {
+  dir3 = mkdtempSync(join(tmpdir(), "anchor-app-pair-"));
+  const ws = join(dir3, "pair-project");
+  cpSync(join(repo, "examples/app/workspace"), ws, { recursive: true });
+  const state = join(dir3, "state");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, "app.json"), JSON.stringify({ recent: [ws] }));
+  const urlFile = join(dir3, "url");
+  const app = join(repo, "examples/app");
+  proc3 = spawn(
+    bin,
+    [
+      "app",
+      "--roles",
+      join(app, "roles.mock.toml"),
+      "--mock-script",
+      join(app, "script.json"),
+      "--review-mock-script",
+      join(app, "review-refute.json"),
+      "--review-mock-script",
+      join(app, "review-approve.json"),
+      "--repair-mock-script",
+      join(app, "repair.json"),
+      "--ui-url-file",
+      urlFile,
+    ],
+    { env: { ...process.env, ANCHOR_STATE_DIR: state }, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let log = "";
+  proc3.stdout?.on("data", (d) => (log += d));
+  proc3.stderr?.on("data", (d) => (log += d));
+  const url = await waitFor(() => (existsSync(urlFile) ? readFileSync(urlFile, "utf8").trim() || undefined : undefined), 60_000);
+
+  await page.goto(url);
+  await page.getByRole("button", { name: /pair-project/ }).first().click();
+  const modes = page.getByTestId("collab");
+  await expect(modes.getByRole("radio", { name: "Builder + checker" })).toHaveAttribute("aria-checked", "true");
+  await expect(modes.getByRole("radio", { name: "Two builders" })).toBeVisible();
+  await expect(modes.getByRole("radio", { name: "One AI" })).toBeVisible();
+  await page.getByLabel("Task").fill("Add a README and make the greeting mention anchor");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  // Round 1: two changes; round 2: the fix.
+  for (const target of ["hello.py", "README.md", "README.md"]) {
+    const card = page.getByTestId("approval-tool");
+    await expect(card).toContainText(target, { timeout: 60_000 });
+    await card.getByRole("button", { name: "Approve" }).click();
+    await expect(card).toHaveCount(0, { timeout: 30_000 });
+  }
+  const reviews = page.getByTestId("review");
+  await expect(reviews).toHaveCount(2, { timeout: 60_000 });
+  await expect(reviews.first()).toContainText("Reviewer · demo-reviewer");
+  await expect(reviews.first()).toContainText("not that it needs Python 3");
+  await expect(reviews.first()).toContainText("not accepted");
+  await expect(page.getByTestId("round")).toContainText("Round 2: the builder answers the review");
+  await expect(reviews.last()).toContainText("I checked the change and accept it.");
+  await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+  expect(readFileSync(join(ws, "README.md"), "utf8")).toContain("needs Python 3");
+  await page.screenshot({ path: join(shots, "app-10-pair.png"), fullPage: true });
+
+  // The mode is a setting: "Two builders" is remembered.
+  await modes.getByRole("radio", { name: "Two builders" }).click();
+  await expect(modes.getByRole("radio", { name: "Two builders" })).toHaveAttribute("aria-checked", "true");
+  expect(JSON.parse(readFileSync(join(state, "app.json"), "utf8")).inference.collab).toBe("team");
   expect(log).not.toMatch(/panicked/);
 });

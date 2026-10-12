@@ -83,6 +83,24 @@ pub struct Settings {
     pub local_families: BTreeMap<String, String>,
     /// This install's random free-tier device id (not a secret; ADR-0037).
     pub free_device: Option<String>,
+    /// How the AIs work on a task (ADR-0039).
+    pub collab: Collab,
+    /// Reviews per builder + checker task (1-5).
+    pub pair_rounds: u32,
+}
+
+/// How many AIs work on a task, and how (ADR-0039).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Collab {
+    /// One AI does the task.
+    Single,
+    /// Builder + checker: one AI changes the project, a second (another
+    /// model family) reviews it and sends it back until it accepts.
+    #[default]
+    Pair,
+    /// Two builders work at once, splitting the work through the Hub.
+    Team,
 }
 
 impl Default for Settings {
@@ -97,6 +115,8 @@ impl Default for Settings {
             preferred: BTreeMap::new(),
             local_families: BTreeMap::new(),
             free_device: None,
+            collab: Collab::Pair,
+            pair_rounds: 2,
         }
     }
 }

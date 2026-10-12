@@ -210,6 +210,7 @@ fn unittest_passes(python: &str, dir: &Path, args: &[&str]) -> Result<bool, Stri
         .args(args)
         .current_dir(dir)
         .env_clear()
+        .envs(anchor_exec::os_env())
         .env("PATH", path)
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .output()

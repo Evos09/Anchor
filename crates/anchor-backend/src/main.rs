@@ -68,6 +68,9 @@ USAGE:
                              the desktop app in a browser: open a project,
                              run tasks, approve, undo (ADR-0028)
       --mock-script FILE     scripted responses for mock providers (demos)
+      --review-mock-script FILE   scripted reviewer, one per review (repeatable)
+      --repair-mock-script FILE   scripted builder for rounds 2, 3, … (repeatable)
+      --team-mock-script FILE     scripted second builder (two-builder tasks)
       --keys system|memory   where API keys live (default: the system keychain)
       --free-url URL         the free tier (or ANCHOR_FREE_URL); none by default
       --exit-with-stdin      exit when stdin closes (the desktop shell)

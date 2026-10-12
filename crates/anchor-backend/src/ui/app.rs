@@ -21,9 +21,12 @@ use anchor_checkpoint::CheckpointStore;
 use anchor_hub::http::Response;
 use serde_json::{Value, json};
 
+use super::pair::{self, PairSpec};
 use super::{Server, Sources, State, bad, broker::Broker, broker::UiInteraction, ok};
-use crate::inference::{ByokChoice, Inference, Routed, Settings, Source};
+use crate::inference::keys::SecretEnv;
+use crate::inference::{ByokChoice, Collab, Inference, Routed, Settings, Source};
 use crate::session::{self, Cancel, SessionConfig};
+use crate::team;
 
 /// Most directory names one listing returns.
 const MAX_DIRS: usize = 2000;
@@ -41,6 +44,14 @@ pub struct AppConfig {
     pub roles_path: PathBuf,
     /// Scripted responses for `kind = "mock"` providers (demos, tests).
     pub mock_script: Option<String>,
+    /// Scripted reviewer models, one per review (the last repeats). With
+    /// `mock_script` and none of these, builder + checker reviews nothing.
+    pub review_mock_scripts: Vec<String>,
+    /// Scripted builder models for review rounds 2, 3, … (last repeats).
+    pub repair_mock_scripts: Vec<String>,
+    /// Scripted model of the second builder (two-builder tasks; the first
+    /// uses `mock_script`).
+    pub team_mock_script: Option<String>,
     pub exec_read_only: Vec<PathBuf>,
     pub agent_bin: PathBuf,
     pub policy: Option<PathBuf>,
@@ -66,6 +77,7 @@ struct Project {
     state: Arc<State>,
     broker: Arc<Broker>,
     checkpoints: Arc<CheckpointStore>,
+    paths: crate::StatePaths,
     cancel: Arc<Cancel>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -181,9 +193,15 @@ impl App {
                 (true, Some(p)) => self.open(srv, p),
                 _ => bad("path required (and nothing else)"),
             },
-            "task" => match (allowed(&["text"]), text("text")) {
-                (true, Some(t)) => self.task(t),
-                _ => bad("text required (and nothing else)"),
+            "task" => match (allowed(&["text", "mode"]), text("text")) {
+                (true, Some(t)) => match &body["mode"] {
+                    Value::Null => self.task(t, None),
+                    m => match serde_json::from_value::<Collab>(m.clone()) {
+                        Ok(m) => self.task(t, Some(m)),
+                        Err(_) => bad("mode must be single, pair or team"),
+                    },
+                },
+                _ => bad("text required (and mode, nothing else)"),
             },
             "cancel" => {
                 if !allowed(&[]) {
@@ -248,6 +266,8 @@ impl App {
             "inference": {
                 "source": g.settings.source,
                 "preference": g.settings.preference,
+                "collab": g.settings.collab,
+                "pair_rounds": g.settings.pair_rounds,
                 "pin": g.project.as_ref().and_then(|p| g.settings.pins.get(&p.root)),
                 "free_offered": self.cfg.inference.free_url.is_some(),
             },
@@ -320,6 +340,7 @@ impl App {
             state,
             broker,
             checkpoints: Arc::new(opened.checkpoints),
+            paths: opened.paths.clone(),
             cancel: Cancel::new(),
             worker: None,
         });
@@ -327,8 +348,14 @@ impl App {
         ok(json!({ "project": root, "recovered": opened.recovered.is_some() }))
     }
 
-    fn task(&self, text: &str) -> Response {
-        let text = text.trim();
+    fn task(&self, text: &str, mode: Option<Collab>) -> Response {
+        let mut text = text.trim();
+        let mut mode = mode;
+        if let Some(rest) = text.strip_prefix("/team ") {
+            // `/team <task>`: two builders, for this task only.
+            text = rest.trim();
+            mode = Some(Collab::Team);
+        }
         if text.is_empty() {
             return bad("the task is empty");
         }
@@ -346,6 +373,7 @@ impl App {
             }
             (g.settings.clone(), p.root.clone())
         };
+        let collab = mode.unwrap_or(settings.collab);
         let routed = (settings.source == Source::Routed)
             .then(|| self.cfg.inference.route(&settings, &root, text));
         let (text, plan, skipped) = match routed {
@@ -391,10 +419,24 @@ impl App {
                 "skipped": skipped.iter().map(|(p, why)| json!({ "path": p, "why": why })).collect::<Vec<_>>(),
             })
         });
+        if collab == Collab::Team {
+            return self.start_team(p, text, plan.as_deref(), roles_toml, extra_env, route);
+        }
+        // Builder + checker reviews nothing in a scripted demo that has
+        // no scripted reviewer.
+        let scripted_without_reviewer =
+            self.cfg.mock_script.is_some() && self.cfg.review_mock_scripts.is_empty();
+        let rounds = match collab {
+            Collab::Pair if !scripted_without_reviewer => {
+                settings.pair_rounds.min(pair::MAX_ROUNDS)
+            }
+            _ => 0,
+        };
+        let collab = if rounds == 0 { Collab::Single } else { collab };
         if let Err(r) = self.audit(
             &p.state,
             "start_task",
-            json!({ "text": text, "route": route }),
+            json!({ "text": text, "route": route, "collab": collab, "rounds": rounds }),
         ) {
             return r;
         }
@@ -408,6 +450,14 @@ impl App {
             return conflict("the workspace is busy");
         };
         let n = self.tasks.fetch_add(1, Ordering::SeqCst) + 1;
+        let spec = PairSpec {
+            rounds,
+            state_base: self.cfg.state_base.clone(),
+            paths: p.paths.clone(),
+            env: extra_env.clone(),
+            review_mock_scripts: self.cfg.review_mock_scripts.clone(),
+            repair_mock_scripts: self.cfg.repair_mock_scripts.clone(),
+        };
         let cfg = SessionConfig {
             agent_bin: self.cfg.agent_bin.clone(),
             session_id: format!("{}-{n}", session::new_session_id()),
@@ -431,9 +481,7 @@ impl App {
             let _ = mediator.log("notice", json!({ "kind": "route", "route": r }));
         }
         let worker = std::thread::spawn(move || {
-            if let Err(e) =
-                session::run_cancellable(&cfg, &mut mediator, &checkpoints, Some(&cancel))
-            {
+            if let Err(e) = pair::run(&cfg, &mut mediator, &checkpoints, &cancel, &spec) {
                 // session_finished already carries the error; this says
                 // the session never started.
                 let _ = mediator.log(
@@ -445,7 +493,163 @@ impl App {
             state.running.store(false, Ordering::SeqCst);
         });
         p.worker = Some(worker);
-        ok(json!({ "ok": true, "session_id": session_id, "route": route }))
+        ok(json!({ "ok": true, "session_id": session_id, "route": route, "collab": collab }))
+    }
+
+    /// Two builders at once (ADR-0039): a parallel team of two agents in
+    /// isolated copies of the project, coordinating through the Hub; every
+    /// merge into the project is confirmed by the user.
+    fn start_team(
+        &self,
+        p: &mut Project,
+        text: String,
+        plan: Option<&crate::inference::plan::Plan>,
+        roles_a: String,
+        env_a: SecretEnv,
+        route: Option<Value>,
+    ) -> Response {
+        // Routed: builder B runs the plan's second model (another family).
+        let (roles_b, env_b) = match plan {
+            Some(plan) => {
+                let b = crate::inference::plan::roles(plan.path, &plan.reviewer, &plan.executor);
+                (b.roles_toml, b.env)
+            }
+            None => (roles_a.clone(), env_a.clone()),
+        };
+        let model = |roles: &str| {
+            team::roles_identity(roles)
+                .map(|(_, model, _)| model)
+                .unwrap_or_else(|_| "another model".into())
+        };
+        // Hub names stay taken after a run (agents are retired, not
+        // deleted): each two-builder task gets its own.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() % 10_000_000_000)
+            .unwrap_or(0);
+        let names = [format!("builder-a-{stamp}"), format!("builder-b-{stamp}")];
+        let models = [model(&roles_a), model(&roles_b)];
+        let instruction = |me: usize| {
+            let other = 1 - me;
+            format!(
+                "{text}\n\nYou are {}, one of two builders working on this project at the same \
+                 time; your partner is {} ({}). Split the work: first claim the files you will \
+                 change (hub_request_claim), message your partner about who does what \
+                 (hub_send_message), and do not touch files your partner claimed. When your part \
+                 is done, finish with a short summary of what you changed.",
+                names[me], names[other], models[other]
+            )
+        };
+        let agent =
+            |i: usize, roles: String, env: SecretEnv, script: Option<String>| team::TeamAgent {
+                name: names[i].clone(),
+                roles_toml: roles,
+                instruction: instruction(i),
+                claim_within: vec![".".into()],
+                mock_script: script,
+                repair_mock_scripts: Vec::new(),
+                messages_need_approval: false,
+                extra_env: env,
+            };
+        let squad = team::Team {
+            schedule: team::Schedule::Parallel,
+            agents: vec![
+                agent(0, roles_a, env_a, self.cfg.mock_script.clone()),
+                agent(
+                    1,
+                    roles_b,
+                    env_b,
+                    self.cfg
+                        .team_mock_script
+                        .clone()
+                        .or_else(|| self.cfg.mock_script.clone()),
+                ),
+            ],
+            verify: None,
+        };
+        if let Err(e) = squad.validate() {
+            return conflict(&format!("two builders cannot start: {e}"));
+        }
+        let checkpoints = match CheckpointStore::open(&p.paths.checkpoints) {
+            Ok(c) => c,
+            Err(e) => return conflict(&format!("checkpoints: {e}")),
+        };
+        if let Err(r) = self.audit(
+            &p.state,
+            "start_task",
+            json!({ "text": text, "route": route, "collab": Collab::Team, "builders": names.iter().zip(&models).map(|(n, m)| json!({ "name": n, "model": m })).collect::<Vec<_>>() }),
+        ) {
+            return r;
+        }
+        let Some(mediator) = p
+            .state
+            .workspace
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        else {
+            return conflict("the workspace is busy");
+        };
+        if let Some(r) = &route {
+            let _ = mediator.log("notice", json!({ "kind": "route", "route": r }));
+        }
+        p.broker.resume();
+        p.cancel.reset();
+        p.state.running.store(true, Ordering::SeqCst);
+        let state = p.state.clone();
+        let cancel = p.cancel.clone();
+        let broker = p.broker.clone();
+        let opts = team::TeamOptions {
+            agent_bin: self.cfg.agent_bin.clone(),
+            state_base: self.cfg.state_base.clone(),
+            auto_merge: false,
+            checkpoint_threshold: anchor_checkpoint::DEFAULT_THRESHOLD,
+            gate: Box::new(crate::queue::NoGate),
+            cancel: Some(cancel),
+        };
+        let mut opened = crate::Opened {
+            paths: p.paths.clone(),
+            mediator,
+            checkpoints,
+            recovered: None,
+        };
+        let worker = std::thread::spawn(move || {
+            let interact = team::Shared::wrap(Box::new(UiInteraction::new(broker)));
+            match team::run(&mut opened, &squad, opts, interact) {
+                Ok(rep) => {
+                    let agents: Vec<Value> = rep
+                        .agents
+                        .iter()
+                        .map(|a| {
+                            json!({
+                                "name": a.name,
+                                "model": a.model_id,
+                                "family": a.family,
+                                "merged": a.merge.as_ref().is_some_and(crate::queue::Outcome::is_merged),
+                                "done": a.session.as_ref().ok().and_then(|r| r.done.clone()),
+                                "failed": match &a.session {
+                                    Ok(r) => r.failed.clone(),
+                                    Err(e) => Some(e.clone()),
+                                },
+                            })
+                        })
+                        .collect();
+                    let _ = opened
+                        .mediator
+                        .log("team_finished", json!({ "agents": agents }));
+                }
+                Err(e) => {
+                    let _ = opened.mediator.log(
+                        "notice",
+                        json!({ "kind": "task_error", "detail": format!("the builders could not run: {e}") }),
+                    );
+                }
+            }
+            *state.workspace.lock().unwrap_or_else(|p| p.into_inner()) = Some(opened.mediator);
+            state.running.store(false, Ordering::SeqCst);
+        });
+        p.worker = Some(worker);
+        ok(json!({ "ok": true, "collab": Collab::Team, "route": route, "builders": names }))
     }
 
     fn cancel(&self) -> Response {
@@ -507,7 +711,9 @@ impl App {
     }
 
     fn set_inference(&self, body: &Value) -> Response {
-        const KEYS: [&str; 6] = [
+        const KEYS: [&str; 8] = [
+            "collab",
+            "pair_rounds",
             "source",
             "preference",
             "order",
@@ -592,6 +798,21 @@ impl App {
                         "local_family must be {model, family}; a family is letters, digits, - or _",
                     );
                 }
+            }
+        }
+        if let Some(v) = m.get("collab") {
+            match serde_json::from_value(v.clone()) {
+                Ok(c) => s.collab = c,
+                Err(_) => return bad("collab must be single, pair or team"),
+            }
+        }
+        if let Some(v) = m.get("pair_rounds") {
+            match v
+                .as_u64()
+                .filter(|n| (1..=u64::from(pair::MAX_ROUNDS)).contains(n))
+            {
+                Some(n) => s.pair_rounds = n as u32,
+                None => return bad("pair_rounds must be 1-5"),
             }
         }
         if let Err(r) = self.audit_open(&g, "set_inference", body.clone()) {
@@ -866,6 +1087,9 @@ mod tests {
             state_base: d.join("state"),
             roles_path: d.join("roles.toml"),
             mock_script: None,
+            review_mock_scripts: vec![],
+            repair_mock_scripts: vec![],
+            team_mock_script: None,
             exec_read_only: vec![],
             agent_bin: PathBuf::from("anchor-agent"),
             policy: None,
@@ -949,6 +1173,9 @@ mod tests {
             state_base: d.path().join("state"),
             roles_path: d.path().join("roles.toml"),
             mock_script: None,
+            review_mock_scripts: vec![],
+            repair_mock_scripts: vec![],
+            team_mock_script: None,
             exec_read_only: vec![],
             agent_bin: PathBuf::from("anchor-agent"),
             policy: None,

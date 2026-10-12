@@ -125,6 +125,24 @@ The executor and the reviewer are always different model families. A
 hand-written models file still works (Settings → Models → Advanced, or
 `anchor app --roles FILE`); `config/roles.example.toml` shows the format.
 
+**Two AIs.** By default two models work on each task together
+(ADR-0039), chosen with the switch under the task box or in **Settings →
+Models → Two AIs**:
+
+- **Builder + checker** (the default): one model makes the change; a second
+  model, from another family, reads it and answers claim by claim. If it
+  does not accept the change, its notes go back to the builder, which fixes
+  them, for up to 2 rounds (1-5 in Settings). The checker gets no tools: it
+  can only judge.
+- **Two builders:** both models work at once, each in its own copy of the
+  project, splitting the work through messages and file claims. Nothing
+  reaches your project until you confirm each merge. Start a single task
+  this way with `/team`.
+- **One AI:** a single model, as before.
+
+Every change either AI makes still asks for your OK, and every turn can be
+undone.
+
 **Build it yourself:** `desktop/` (see CONTRIBUTING.md). **Without
 installing:** `anchor app` serves the same app in your browser:
 
@@ -133,6 +151,10 @@ cargo build
 ./target/debug/anchor app            # prints the URL to open
 # a scripted demo, no models needed:
 ./target/debug/anchor app --roles examples/app/roles.mock.toml --mock-script examples/app/script.json
+# the same, with a scripted checker that sends the change back once:
+./target/debug/anchor app --roles examples/app/roles.mock.toml --mock-script examples/app/script.json \
+  --review-mock-script examples/app/review-refute.json --review-mock-script examples/app/review-approve.json \
+  --repair-mock-script examples/app/repair.json
 ```
 
 On Windows (PowerShell): `.\target\debug\anchor.exe app`.

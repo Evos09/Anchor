@@ -217,6 +217,33 @@ fn start() -> Fx {
 /// `explicit`: the mock models file was given with `--roles`; without
 /// it, tasks are routed (Update #1) and the file is ignored.
 fn start_with(explicit: bool) -> Fx {
+    start_cfg(
+        explicit,
+        example().join("roles.mock.toml"),
+        Some(std::fs::read_to_string(example().join("script.json")).unwrap()),
+    )
+}
+
+fn start_cfg(explicit: bool, roles_path: PathBuf, mock_script: Option<String>) -> Fx {
+    start_full(
+        explicit,
+        roles_path,
+        mock_script,
+        Vec::new(),
+        Vec::new(),
+        None,
+    )
+}
+
+/// With scripted reviewers (one per review) and builders for rounds 2+.
+fn start_full(
+    explicit: bool,
+    roles_path: PathBuf,
+    mock_script: Option<String>,
+    review: Vec<String>,
+    repair: Vec<String>,
+    team: Option<String>,
+) -> Fx {
     let dir = tempfile::tempdir().unwrap();
     let base = anchor_fs::normalize_verbatim(&std::fs::canonicalize(dir.path()).unwrap());
     let ws = base.join("project");
@@ -224,8 +251,11 @@ fn start_with(explicit: bool) -> Fx {
     std::fs::copy(example().join("workspace/hello.py"), ws.join("hello.py")).unwrap();
     let app: Arc<App> = App::new(AppConfig {
         state_base: base.join("state"),
-        roles_path: example().join("roles.mock.toml"),
-        mock_script: Some(std::fs::read_to_string(example().join("script.json")).unwrap()),
+        roles_path,
+        mock_script,
+        review_mock_scripts: review,
+        repair_mock_scripts: repair,
+        team_mock_script: team,
         exec_read_only: anchor_backend::default_exec_read_only(),
         agent_bin: agent_bin(),
         policy: None,
@@ -498,4 +528,307 @@ fn a_routed_task_with_no_model_gets_a_prompt() {
     assert_eq!(c.post("/api/app/pin", &json!({ "path": "C" })).0, 200);
     assert_eq!(c.get("/api/app/state")["inference"]["pin"], "C");
     assert_eq!(c.post("/api/app/pin", &json!({ "path": "D" })).0, 400);
+}
+
+/// A model server on the loopback interface (Ollama's case). On Windows
+/// such a runtime runs outside its AppContainer, with a cleared
+/// environment: without SystemRoot it could not even open a socket
+/// ("os error 10106", reported from a user's machine with Ollama).
+#[test]
+fn a_loopback_model_server_runs_a_task() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = served.clone();
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { continue };
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut len = 0usize;
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).unwrap_or(0) == 0 || h.trim().is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = h.split_once(':')
+                    && k.eq_ignore_ascii_case("content-length")
+                {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; len];
+            let _ = r.read_exact(&mut body);
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let out = json!({
+                "choices": [{ "index": 0, "finish_reason": "stop",
+                              "message": { "role": "assistant", "content": "Nothing to change." } }],
+                "usage": { "prompt_tokens": 10, "completion_tokens": 3 },
+            })
+            .to_string();
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}",
+                out.len()
+            );
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let roles = dir.path().join("roles.toml");
+    let mut t = String::new();
+    for (name, family) in [("local_a", "fam-a"), ("local_b", "fam-b")] {
+        t.push_str(&format!(
+            "[providers.{name}]\nkind = \"openai_compatible\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\nfamily = \"{family}\"\n\n"
+        ));
+    }
+    for (role, provider) in [
+        ("planner", "local_a"),
+        ("executor", "local_a"),
+        ("tester", "local_a"),
+        ("reviewer", "local_b"),
+    ] {
+        t.push_str(&format!(
+            "[roles.{role}]\nprovider = \"{provider}\"\nmodel_id = \"m-{provider}\"\ncontext_window = 32000\n\n"
+        ));
+    }
+    std::fs::write(&roles, t).unwrap();
+    let fx = start_cfg(true, roles, None);
+    let c = &fx.c;
+    c.ok("/api/app/open", &json!({ "path": fx.ws }));
+    c.ok(
+        "/api/app/task",
+        &json!({ "text": "Is anything to change?" }),
+    );
+    c.answer_all("deny");
+    let fin = c.finished();
+    assert_eq!(fin.len(), 1, "{}", c.story());
+    assert!(fin[0]["data"]["failed"].is_null(), "{}", c.story());
+    assert_eq!(
+        fin[0]["data"]["result"],
+        "Nothing to change.",
+        "{}",
+        c.story()
+    );
+    assert!(served.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+}
+
+fn script(name: &str) -> String {
+    std::fs::read_to_string(example().join(name)).unwrap()
+}
+
+/// Builder + checker with scripted models: the builder, a reviewer that
+/// refutes, the builder again, a reviewer that approves.
+fn start_pair(roles: &str) -> Fx {
+    start_full(
+        true,
+        example().join(roles),
+        Some(script("script.json")),
+        vec![script("review-refute.json"), script("review-approve.json")],
+        vec![script("repair.json")],
+        None,
+    )
+}
+
+fn of_kind(c: &Client, kind: &str) -> Vec<Value> {
+    c.events()
+        .into_iter()
+        .filter(|e| e["kind"] == kind)
+        .collect()
+}
+
+/// ADR-0039: the reviewer (another family) refutes the first change, its
+/// note goes back to the builder, the builder fixes it, and the reviewer
+/// approves. Every change still went through the user's approvals.
+#[test]
+fn the_reviewer_sends_the_builder_back_until_it_approves() {
+    let fx = start_pair("roles.mock.toml");
+    let c = &fx.c;
+    c.ok("/api/app/open", &json!({ "path": fx.ws }));
+    let r = c.ok(
+        "/api/app/task",
+        &json!({ "text": "Add a README and greet anchor" }),
+    );
+    assert_eq!(r["collab"], "pair", "{r}");
+    // Two writes in round 1, one in round 2.
+    assert_eq!(c.answer_all("approve"), 3, "{}", c.story());
+
+    let reviews = of_kind(c, "pair_review");
+    assert_eq!(reviews.len(), 2, "{}", c.story());
+    let (first, second) = (&reviews[0]["data"], &reviews[1]["data"]);
+    assert_eq!(first["round"], 1);
+    assert_eq!(first["approved"], false);
+    assert_eq!(first["reviewer"]["family"], "demo-family-b");
+    assert!(
+        first["verdicts"][0]["note"]
+            .as_str()
+            .unwrap()
+            .contains("Python 3")
+    );
+    assert_eq!(second["round"], 2);
+    assert_eq!(second["approved"], true);
+    assert_eq!(second["final"], true);
+    assert_eq!(of_kind(c, "pair_reply").len(), 1);
+    assert!(read(&fx.ws.join("README.md")).contains("needs Python 3"));
+    assert_eq!(read(&fx.ws.join("hello.py")), "print('hello, anchor')\n");
+    // The reviewer ran as its own agent, with no workspace tools.
+    let reviewer_sessions = c
+        .events()
+        .into_iter()
+        .filter(|e| e["kind"] == "session_started" && e["agent"] == "reviewer")
+        .count();
+    assert_eq!(reviewer_sessions, 2, "{}", c.story());
+}
+
+/// The family rule (spec §8.2(a)): a models file whose reviewer shares
+/// the builder's family is refused before anything runs (and the pair
+/// loop's reviewer re-checks the families it actually ran on).
+#[test]
+fn the_reviewer_never_runs_on_the_builders_family() {
+    let dir = tempfile::tempdir().unwrap();
+    let roles = dir.path().join("same-family.toml");
+    let text = std::fs::read_to_string(example().join("roles.mock.toml"))
+        .unwrap()
+        .replace(
+            "[roles.reviewer]\nprovider = \"mock_b\"",
+            "[roles.reviewer]\nprovider = \"mock_a\"",
+        );
+    assert!(text.contains("[roles.reviewer]\nprovider = \"mock_a\""));
+    std::fs::write(&roles, text).unwrap();
+    let fx = start_full(
+        true,
+        roles,
+        Some(script("script.json")),
+        vec![script("review-approve.json")],
+        vec![],
+        None,
+    );
+    let c = &fx.c;
+    c.ok("/api/app/open", &json!({ "path": fx.ws }));
+    let (st, r) = c.post("/api/app/task", &json!({ "text": "Add a README" }));
+    assert_eq!(st, 409, "{r}");
+    assert!(r["error"].as_str().unwrap().contains("family"), "{r}");
+    assert!(!c.running());
+    assert!(!fx.ws.join("README.md").exists());
+    assert!(
+        !c.events()
+            .iter()
+            .any(|e| e["kind"] == "session_started" && e["agent"] == "reviewer")
+    );
+}
+
+/// "One AI" in the settings (or `mode` on the task) runs no reviewer.
+#[test]
+fn one_ai_mode_skips_review() {
+    let fx = start_pair("roles.mock.toml");
+    let c = &fx.c;
+    c.ok("/api/app/open", &json!({ "path": fx.ws }));
+    c.ok("/api/app/inference", &json!({ "collab": "single" }));
+    assert_eq!(c.get("/api/app/state")["inference"]["collab"], "single");
+    let r = c.ok("/api/app/task", &json!({ "text": "Add a README" }));
+    assert_eq!(r["collab"], "single");
+    assert_eq!(c.answer_all("approve"), 2);
+    assert!(of_kind(c, "pair_review").is_empty());
+    assert_eq!(c.finished().len(), 1);
+    // The settings refuse out-of-range rounds and unknown modes.
+    assert_eq!(
+        c.post("/api/app/inference", &json!({ "pair_rounds": 0 })).0,
+        400
+    );
+    assert_eq!(
+        c.post("/api/app/inference", &json!({ "pair_rounds": 6 })).0,
+        400
+    );
+    assert_eq!(
+        c.post("/api/app/inference", &json!({ "collab": "trio" })).0,
+        400
+    );
+    assert_eq!(
+        c.post("/api/app/task", &json!({ "text": "x", "mode": "trio" }))
+            .0,
+        400
+    );
+}
+
+/// Two builders (ADR-0039): both work at once in isolated copies, and
+/// nothing reaches the project until the user confirms each merge.
+#[test]
+fn two_builders_run_in_the_app_and_merges_need_the_user() {
+    // Builder A replays script.json, builder B builder-b.json.
+    let fx = start_full(
+        true,
+        example().join("roles.mock.toml"),
+        Some(script("script.json")),
+        vec![],
+        vec![],
+        Some(script("builder-b.json")),
+    );
+    let c = &fx.c;
+    c.ok("/api/app/open", &json!({ "path": fx.ws }));
+    let r = c.ok(
+        "/api/app/task",
+        &json!({ "text": "/team Add a README and notes" }),
+    );
+    assert_eq!(r["collab"], "team", "{r}");
+    let mut merges = 0;
+    let mut answered = 0;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        for p in c.pending() {
+            if p["kind"] == "merge" {
+                merges += 1;
+                // Before the user confirms, the project is untouched.
+                if merges == 1 {
+                    assert_eq!(read(&fx.ws.join("hello.py")), "print('hello')\n");
+                    assert!(!fx.ws.join("NOTES.md").exists());
+                }
+            }
+            if c.post(
+                "/api/approvals/answer",
+                &json!({ "id": p["id"], "choice": "approve" }),
+            )
+            .0 == 200
+            {
+                answered += 1;
+            }
+        }
+        if !c.running() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{}", c.story());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(merges, 2, "{}", c.story());
+    assert!(answered >= 5, "3 writes and 2 merges: {answered}");
+    assert_eq!(read(&fx.ws.join("hello.py")), "print('hello, anchor')\n");
+    assert!(fx.ws.join("README.md").is_file());
+    assert!(fx.ws.join("NOTES.md").is_file());
+    let done = of_kind(c, "team_finished");
+    assert_eq!(done.len(), 1, "{}", c.story());
+    let agents = done[0]["data"]["agents"].as_array().unwrap();
+    assert!(agents.iter().all(|a| a["merged"] == true), "{}", done[0]);
+    // A second two-builder task can start (Hub names are per task).
+    c.ok(
+        "/api/app/task",
+        &json!({ "text": "Tidy up", "mode": "team" }),
+    );
+    c.answer_all("deny");
+}
+
+/// Stop ends a builder + checker task while the reviewer is pending
+/// behind an approval, and nothing is written.
+#[test]
+fn stop_ends_a_pair_task() {
+    let fx = start_pair("roles.mock.toml");
+    let c = &fx.c;
+    c.ok("/api/app/open", &json!({ "path": fx.ws }));
+    c.ok("/api/app/task", &json!({ "text": "Add a README" }));
+    c.wait_pending();
+    c.ok("/api/app/cancel", &json!({}));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while c.running() {
+        assert!(Instant::now() < deadline, "the task did not stop");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!fx.ws.join("README.md").exists());
+    assert!(of_kind(c, "pair_review").is_empty(), "{}", c.story());
 }

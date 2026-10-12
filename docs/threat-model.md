@@ -234,6 +234,23 @@ for this change.
 | A provider's refusal is lost | The runtime reads error bodies and shows the provider's message | `a_providers_error_message_reaches_the_user` | ⏳ CI |
 | Installers are tampered with or unsigned | Signing and notarization when the owner adds the secrets, then verified in CI (ADR-0033) | CI desktop job | ⏳ needs certificates |
 
+## Two AIs in the app (ADR-0039)
+
+New behaviour: in the app, a second model reviews the first one's change
+and sends it back (builder + checker), or two models build at once (two
+builders, the Phase 4 team runner). No new authority is granted: the
+builders act through the same mediator, policy and approvals; the checker
+gets no tools.
+
+| Threat / requirement | Mitigation | Test | Status |
+|---|---|---|---|
+| The checker changes the project or runs commands | The checker is a review session: the runtime offers it no workspace tools and any tool call ends the session (ADR-0009); its mediator is over an empty private directory | `the_reviewer_sends_the_builder_back_until_it_approves` (the reviewer's sessions run as agent `reviewer`); review-session tests | ⏳ CI |
+| A model reviews its own family's work | The models file and per-task plans are checked before a task starts; the pair loop's reviewer refuses a review route sharing a builder's family, and re-checks the providers it actually ran on | `the_reviewer_never_runs_on_the_builders_family`, `the_reviewer_is_always_another_family` | ⏳ CI |
+| The checker's notes smuggle instructions to the builder | The notes are model output going to another model, as in the Phase 5 repair loop; every change the builder then makes still needs the user's approval and can be undone | `the_reviewer_sends_the_builder_back_until_it_approves` (3 approvals for 2 rounds) | ⏳ CI |
+| Two builders write over each other or the project directly | Each builder works in its own isolated copy; work reaches the project only through the merge queue, and each merge is confirmed by the user (`auto_merge` off) | `two_builders_run_in_the_app_and_merges_need_the_user` | ⏳ CI |
+| Stop leaves a builder or the checker running | Cancel tracks every runtime it started; the pair loop and the team runner use cancellable sessions | `stop_ends_a_pair_task`, `stop_refuses_the_pending_approval_and_ends_the_task` | ⏳ CI |
+| A local model (Ollama) cannot be reached on Windows (os error 10106) | The unconfined runtime (loopback, AR-7) gets the OS variables Winsock needs (`SystemRoot`, …): paths, not secrets, as the AppContainer path already passed | `a_loopback_model_server_runs_a_task` (Windows CI runs the unconfined path) | ⏳ CI |
+
 ## Phase 2 "verified by instrumentation"
 
 - *No filesystem mutation bypasses the permission engine*: mutations

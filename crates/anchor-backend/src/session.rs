@@ -259,7 +259,10 @@ pub fn spawn_runtime(
     let mut c = cmd
         .args(args)
         .env_clear()
-        .envs(env)
+        // Windows needs SystemRoot and friends even to open a socket
+        // (os error 10106 without them; the AppContainer path adds the
+        // same variables).
+        .envs(anchor_exec::with_os_env(env))
         // The runtime never needs the workspace as its cwd.
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
@@ -354,7 +357,8 @@ pub struct Cancel {
 #[derive(Debug, Default)]
 struct CancelState {
     cancelled: bool,
-    child: Option<Arc<std::sync::Mutex<RuntimeProcess>>>,
+    /// Every runtime started under this cancel (two builders run at once).
+    children: Vec<Arc<std::sync::Mutex<RuntimeProcess>>>,
 }
 
 /// How a cancelled session's failure reads.
@@ -371,12 +375,13 @@ impl Cancel {
 
     /// Stop the session: kill its runtime now, or as soon as it starts.
     pub fn cancel(&self) {
-        let child = {
+        let children = {
             let mut st = self.lock();
             st.cancelled = true;
-            st.child.clone()
+            st.children.clone()
         };
-        if let Some(c) = child {
+        // Killing a runtime that already exited is a no-op.
+        for c in children {
             c.lock().unwrap_or_else(|p| p.into_inner()).kill();
         }
     }
@@ -389,13 +394,13 @@ impl Cancel {
     pub fn reset(&self) {
         let mut st = self.lock();
         st.cancelled = false;
-        st.child = None;
+        st.children.clear();
     }
 
     fn register(&self, c: &Arc<std::sync::Mutex<RuntimeProcess>>) {
         let cancelled = {
             let mut st = self.lock();
-            st.child = Some(c.clone());
+            st.children.push(c.clone());
             st.cancelled
         };
         if cancelled {

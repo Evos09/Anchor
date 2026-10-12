@@ -404,6 +404,7 @@ fn two_model_collaboration_through_the_dashboard() {
                 auto_merge: false,
                 checkpoint_threshold: 0.8,
                 gate: Box::new(anchor_backend::queue::NoGate),
+                cancel: None,
             },
             interact.clone(),
         );

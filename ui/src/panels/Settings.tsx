@@ -209,6 +209,38 @@ function Models({ app, onChanged }: { app: AppState; onChanged: () => void }) {
           {note && !error && <span className="ok">{note}</span>}
         </div>
       )}
+      <Group title="Two AIs">
+        <Row
+          title="How the AIs work"
+          desc="Builder + checker: one model makes the change, a second model from another family reviews it and sends it back with notes until it accepts. Two builders: both work at once in separate copies, split the work through messages, and you confirm each merge."
+        >
+          <select
+            aria-label="How the AIs work"
+            value={app.inference?.collab ?? "pair"}
+            onChange={(e) => act("/api/app/inference", { collab: e.target.value }, "Saved.")}
+          >
+            <option value="single">One AI</option>
+            <option value="pair">Builder + checker</option>
+            <option value="team">Two builders</option>
+          </select>
+        </Row>
+        <Row
+          title="Review rounds"
+          desc="How many times the checker may send the change back (Builder + checker). Every round's changes still need your OK."
+        >
+          <select
+            aria-label="Review rounds"
+            value={String(app.inference?.pair_rounds ?? 2)}
+            onChange={(e) => act("/api/app/inference", { pair_rounds: Number(e.target.value) }, "Saved.")}
+          >
+            {[1, 2, 3, 4, 5].map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </Row>
+      </Group>
       <Group title="How tasks choose">
         <Row
           title="Preference"

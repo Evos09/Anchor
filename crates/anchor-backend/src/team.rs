@@ -104,6 +104,8 @@ pub struct TeamAgent {
     /// Scripted models for repair attempts 2, 3, … (the last repeats).
     pub repair_mock_scripts: Vec<String>,
     pub messages_need_approval: bool,
+    /// Secrets for this agent's runtime (the app's keys). Never logged.
+    pub extra_env: crate::inference::keys::SecretEnv,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +150,7 @@ impl Team {
                 instruction: a.instruction,
                 claim_within: a.claim_within,
                 messages_need_approval: a.messages_need_approval,
+                extra_env: Default::default(),
             });
         }
         let team = Team {
@@ -318,6 +321,9 @@ pub struct TeamOptions {
     pub auto_merge: bool,
     pub checkpoint_threshold: f64,
     pub gate: Box<dyn MergeGate>,
+    /// Stops every session of the run (the app's Stop button); agents not
+    /// yet started are skipped.
+    pub cancel: Option<Arc<session::Cancel>>,
 }
 
 impl std::fmt::Debug for TeamOptions {
@@ -385,6 +391,13 @@ struct Prepared {
     cfg: SessionConfig,
 }
 
+fn run_one(
+    p: &mut Prepared,
+    cancel: Option<&session::Cancel>,
+) -> Result<SessionReport, session::SessionError> {
+    session::run_cancellable(&p.cfg, &mut p.mediator, &p.checkpoints, cancel)
+}
+
 fn finished_ok(r: &Result<SessionReport, String>) -> bool {
     matches!(r, Ok(rep) if rep.done.is_some() && rep.failed.is_none())
 }
@@ -403,26 +416,8 @@ fn verify_gate(
     let reviewer: crate::verify::BoxedReviewer = match spec.reviewer {
         ReviewerKind::Rule => crate::verify::rule_reviewer(),
         ReviewerKind::Model => {
-            // Review sessions get no tools; their mediator is a formality,
-            // over an empty private directory.
-            let dir = iso::iso_base(&opts.state_base, &ws_root).join("reviewer");
-            crate::create_private_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            let ws = anchor_fs::Workspace::open(&dir).map_err(|e| e.to_string())?;
-            let guard = Guard::load(&opened.paths.workspace_config).map_err(|e| e.to_string())?;
-            let mut snap = main.snapshot_options().clone();
-            snap.root = anchor_snapshot::Root::named("reviewer").unwrap_or_default();
-            let mediator = main.isolated(
-                ws,
-                snap,
-                main.engine().for_agent("reviewer"),
-                guard,
-                Box::new(crate::interact::Scripted::new(
-                    false,
-                    ResumeChoice::FreshSession,
-                )),
-            );
-            let checkpoints = CheckpointStore::open(&opened.paths.checkpoints.join("reviewer"))
-                .map_err(|e| e.to_string())?;
+            let (mediator, checkpoints) =
+                crate::verify::reviewer_mediator(main, &opts.state_base, &opened.paths)?;
             Box::new(ModelReviewer::new(
                 mediator,
                 checkpoints,
@@ -551,6 +546,7 @@ pub fn run(
         None => std::mem::replace(&mut opts.gate, Box::new(crate::queue::NoGate)),
     };
     let paths = opened.paths.clone();
+    let cancel = opts.cancel.as_deref();
     let mut queue = MergeQueue::new(hub.clone(), &mut opened.mediator, gate, opts.auto_merge);
     let mut report = TeamReport::default();
     for seq in queue.recover()? {
@@ -620,7 +616,7 @@ pub fn run(
             mock_script,
             hub: Some(hub_info(i)),
             review: None,
-            extra_env: Default::default(),
+            extra_env: a.extra_env.clone(),
         };
         Ok::<_, String>(Prepared {
             idx: i,
@@ -714,8 +710,7 @@ pub fn run(
             // directory, which `prepare` removes for the next attempt.
             drop(p);
             p = prepare(queue, i, attempt, &cand, &pre, instruction)?;
-            session =
-                session::run(&p.cfg, &mut p.mediator, &p.checkpoints).map_err(|e| e.to_string());
+            session = run_one(&mut p, cancel).map_err(|e| e.to_string());
             submitted = submit(&p);
         }
         // The agent's work is settled: free its claims for the others.
@@ -753,8 +748,7 @@ pub fn run(
                 let base = base_now(&mut queue)?;
                 let instruction = team.agents[i].instruction.clone();
                 let mut p = prepare(&mut queue, i, 1, &base, &base, instruction)?;
-                let session = session::run(&p.cfg, &mut p.mediator, &p.checkpoints)
-                    .map_err(|e| e.to_string());
+                let session = run_one(&mut p, cancel).map_err(|e| e.to_string());
                 let sub = submit(&p);
                 finish(&mut queue, p, session, sub)?;
             }
@@ -771,8 +765,7 @@ pub fn run(
                 for mut p in prepared {
                     let tx = tx.clone();
                     s.spawn(move || {
-                        let session = session::run(&p.cfg, &mut p.mediator, &p.checkpoints)
-                            .map_err(|e| e.to_string());
+                        let session = run_one(&mut p, cancel).map_err(|e| e.to_string());
                         let sub = submit(&p);
                         let _ = tx.send((p, session, sub));
                     });
