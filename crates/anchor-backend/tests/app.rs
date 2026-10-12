@@ -18,6 +18,16 @@ use anchor_backend::ui::app::{App, AppConfig};
 use anchor_backend::ui::{self, Ui};
 use serde_json::{Value, json};
 
+/// How long a scripted task may take. Generous: on Windows CI every
+/// sandboxed process (runtime, test run) starts slowly.
+const TASK_DEADLINE: Duration = Duration::from_secs(300);
+
+/// The app tests run one at a time: each starts runtimes, reviewers,
+/// sandboxed test runs or two builders, and side by side on a small
+/// Windows runner they starve each other past any deadline (CI run
+/// 38315367279).
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn example() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/app")
 }
@@ -128,7 +138,7 @@ impl Client {
     /// Answer every approval with `choice` until the task ends; returns
     /// how many were answered.
     fn answer_all(&self, choice: &str) -> usize {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + TASK_DEADLINE;
         let mut n = 0;
         loop {
             for p in self.pending() {
@@ -155,7 +165,7 @@ impl Client {
     /// Wait for the running task to ask for an approval. Fails at once,
     /// with the log, if the task ends without asking.
     fn wait_pending(&self) -> Vec<Value> {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + TASK_DEADLINE;
         loop {
             let p = self.pending();
             if !p.is_empty() {
@@ -208,6 +218,9 @@ struct Fx {
     ws: PathBuf,
     _ui: Ui,
     c: Client,
+    // Dropped last (fields drop in order): the app and its folder are
+    // gone before the next test starts.
+    _turn: std::sync::MutexGuard<'static, ()>,
 }
 
 fn start() -> Fx {
@@ -264,6 +277,8 @@ fn start_custom(
     team: Option<String>,
     tweak: impl FnOnce(&mut AppConfig),
 ) -> Fx {
+    // A test that failed (poisoned the lock) does not fail the others.
+    let turn = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let base = anchor_fs::normalize_verbatim(&std::fs::canonicalize(dir.path()).unwrap());
     let ws = base.join("project");
@@ -301,6 +316,7 @@ fn start_custom(
         ws,
         _ui: ui,
         c,
+        _turn: turn,
     }
 }
 
@@ -797,7 +813,7 @@ fn two_builders_run_in_the_app_and_merges_need_the_user() {
     assert_eq!(r["collab"], "team", "{r}");
     let mut merges = 0;
     let mut answered = 0;
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + TASK_DEADLINE;
     loop {
         for p in c.pending() {
             if p["kind"] == "merge" {
