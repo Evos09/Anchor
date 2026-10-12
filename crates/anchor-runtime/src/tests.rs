@@ -288,6 +288,7 @@ fn task(script: &str) -> Task {
         mock_script: Some(script.into()),
         hub: None,
         review: None,
+        continue_with: None,
     }
 }
 
@@ -415,6 +416,45 @@ fn fresh_session_seeded_from_checkpoint_resumes() {
     // History is carried over in full, plus the resume marker and new turn.
     assert!(c2.messages.len() > cp.messages.len());
     assert_eq!(&c2.messages[..cp.messages.len()], &cp.messages[..]);
+}
+
+/// 0.12.0: a follow-up resumes the conversation with the user's message
+/// as the next turn, not the plain "continue" note.
+#[test]
+fn a_follow_up_message_continues_the_resumed_conversation() {
+    let mut first = FakeBackend::new(task(SCRIPT), ResumeChoice::ContinueWithCompaction);
+    run_session(&mut first, &*default_factory()).unwrap();
+    let cp = first
+        .sent
+        .iter()
+        .filter_map(|m| match m {
+            Message::Checkpoint(c) => Some(c.clone()),
+            _ => None,
+        })
+        .next_back()
+        .unwrap();
+    let mut t = task(r#"{"steps":[{"content":"also done"}]}"#);
+    t.resume_from = Some(cp.clone());
+    t.continue_with = Some("Now also add a docstring.".into());
+    let mut second = FakeBackend::new(t, ResumeChoice::ContinueWithCompaction);
+    run_session(&mut second, &*default_factory()).unwrap();
+    let Message::Checkpoint(c2) = second
+        .sent
+        .iter()
+        .find(|m| matches!(m, Message::Checkpoint(_)))
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    let next = &c2.messages[cp.messages.len()];
+    assert_eq!(next.role, ChatRole::User);
+    assert_eq!(next.content, "Now also add a docstring.");
+    assert!(
+        !c2.messages
+            .iter()
+            .any(|m| m.content.contains("Session resumed")),
+        "no resume marker for a follow-up"
+    );
 }
 
 #[test]

@@ -113,6 +113,9 @@ impl Backend {
         let mut cmd = Command::new(&bin);
         // Its stdin is a pipe only this process holds: if the shell dies
         // without stopping it, the pipe closes and the backend exits.
+        // The backend compares this with the latest release (Settings →
+        // General → Check for updates).
+        cmd.env("ANCHOR_APP_VERSION", env!("CARGO_PKG_VERSION"));
         cmd.arg("app")
             .arg("--exit-with-stdin")
             .arg("--ui-url-file")

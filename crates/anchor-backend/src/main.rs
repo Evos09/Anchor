@@ -197,6 +197,7 @@ fn cmd_run(a: &Args) -> Result<ExitCode, String> {
         mock_script: a.get("--mock-script").map(read).transpose()?,
         hub: None,
         review: None,
+        continue_with: None,
         extra_env: Default::default(),
     };
     eprintln!(

@@ -6,6 +6,7 @@ import { expect, test } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { createServer as createHttpServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,14 +21,20 @@ let proc2: ChildProcess | null = null;
 let dir2 = "";
 let proc3: ChildProcess | null = null;
 let dir3 = "";
+let proc4: ChildProcess | null = null;
+let dir4 = "";
+let fake: Server | null = null;
 
 test.afterAll(() => {
   proc?.kill("SIGTERM");
   proc2?.kill("SIGTERM");
   proc3?.kill("SIGTERM");
+  proc4?.kill("SIGTERM");
+  fake?.close();
   if (dir) rmSync(dir, { recursive: true, force: true });
   if (dir2) rmSync(dir2, { recursive: true, force: true });
   if (dir3) rmSync(dir3, { recursive: true, force: true });
+  if (dir4) rmSync(dir4, { recursive: true, force: true });
 });
 
 /** A port nothing listens on (so "Ollama" is surely not running there). */
@@ -284,5 +291,90 @@ test("builder + checker: the reviewer sends the change back, then accepts", asyn
   await modes.getByRole("radio", { name: "Two builders" }).click();
   await expect(modes.getByRole("radio", { name: "Two builders" })).toHaveAttribute("aria-checked", "true");
   expect(JSON.parse(readFileSync(join(state, "app.json"), "utf8")).inference.collab).toBe("team");
+  expect(log).not.toMatch(/panicked/);
+});
+
+// 0.12.0: a reply continues the task (same thread, one history entry);
+// a newer release shows a banner; without Ollama, Settings offers it.
+test("reply to a task, see an update, get Ollama", async ({ page }) => {
+  dir4 = mkdtempSync(join(tmpdir(), "anchor-app-reply-"));
+  const ws = join(dir4, "reply-project");
+  cpSync(join(repo, "examples/app/workspace"), ws, { recursive: true });
+  const state = join(dir4, "state");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(
+    join(state, "app.json"),
+    JSON.stringify({ recent: [ws], inference: { collab: "single", ollama_port: await closedPort() } }),
+  );
+  const script = join(dir4, "answer.json");
+  writeFileSync(script, JSON.stringify({ steps: [{ content: "It prints hello.", prompt_tokens: 100, completion_tokens: 5 }] }));
+  // GitHub's releases API, faked.
+  fake = createHttpServer((req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        tag_name: "v9.0.0",
+        draft: false,
+        prerelease: false,
+        html_url: "https://github.com/Evos09/Anchor/releases/tag/v9.0.0",
+        body: "Better.",
+      }),
+    );
+  });
+  const fakePort = await new Promise<number>((ok) =>
+    fake!.listen(0, "127.0.0.1", () => {
+      const a = fake!.address();
+      ok(typeof a === "object" && a ? a.port : 1);
+    }),
+  );
+  const urlFile = join(dir4, "url");
+  const app = join(repo, "examples/app");
+  proc4 = spawn(
+    bin,
+    ["app", "--roles", join(app, "roles.mock.toml"), "--mock-script", script, "--ui-url-file", urlFile],
+    {
+      env: {
+        ...process.env,
+        ANCHOR_STATE_DIR: state,
+        ANCHOR_APP_VERSION: "0.12.0",
+        ANCHOR_UPDATE_URL: `http://127.0.0.1:${fakePort}/repos/x`,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let log = "";
+  proc4.stdout?.on("data", (d) => (log += d));
+  proc4.stderr?.on("data", (d) => (log += d));
+  const url = await waitFor(() => (existsSync(urlFile) ? readFileSync(urlFile, "utf8").trim() || undefined : undefined), 60_000);
+
+  await page.goto(url);
+  await expect(page.getByTestId("update")).toContainText("Anchor 9.0.0 is available");
+  await page.getByTestId("update").getByRole("button", { name: "Not now" }).click();
+  await expect(page.getByTestId("update")).toHaveCount(0);
+
+  await page.getByRole("button", { name: /reply-project/ }).first().click();
+  await page.getByLabel("Task").fill("What does hello.py print?");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByTestId("result")).toHaveText("It prints hello.", { timeout: 60_000 });
+  const box = page.getByLabel("Task");
+  await expect(box).toHaveAttribute("placeholder", /Reply to this task/);
+  await box.fill("And in French?");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByTestId("task")).toHaveCount(2);
+  await expect(page.getByTestId("task").last()).toHaveText("And in French?");
+  await expect(page.getByTestId("result")).toHaveCount(2, { timeout: 60_000 });
+  await expect(page.getByTestId("history-item")).toHaveCount(1);
+  await page.screenshot({ path: join(shots, "app-11-reply.png"), fullPage: true });
+
+  // Settings → Models: no Ollama, so it is offered (and the test command).
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Models", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Get Ollama" })).toBeVisible();
+  await page.getByRole("button", { name: "Projects", exact: true }).click();
+  await expect(page.getByLabel("Test command")).toBeVisible();
+  await page.getByLabel("Test command").fill("python3 -m unittest");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Saved.")).toBeVisible();
+  await page.screenshot({ path: join(shots, "app-12-tests-setting.png"), fullPage: true });
   expect(log).not.toMatch(/panicked/);
 });

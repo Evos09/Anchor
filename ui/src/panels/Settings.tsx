@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { get, post } from "../api";
-import type { AppState, InferenceStatus, Overview } from "../types";
+import type { AppState, InferenceStatus, Overview, PullState, TestsInfo } from "../types";
 import { Meters, useInference } from "./Inference";
 import { ErrorLine } from "../util";
 import * as I from "../icons";
@@ -81,7 +81,7 @@ export function Settings({
           <I.Close />
         </button>
         <div className="settings-page">
-          {section === "general" && <General app={app} overview={overview} />}
+          {section === "general" && <General app={app} overview={overview} onChanged={onChanged} />}
           {section === "models" && <Models app={app} onChanged={onChanged} />}
           {section === "appearance" && <Appearance />}
           {section === "projects" && <Projects app={app} onOpen={onOpen} />}
@@ -123,11 +123,124 @@ function Row({ title, desc, children }: { title: string; desc: ReactNode; childr
   );
 }
 
+/** Open one of the few pages the backend allows (Releases, Ollama). */
+export function openUrl(url: string) {
+  post("/api/app/open_url", { url }).catch(() => window.open(url, "_blank", "noopener"));
+}
+
+function mb(n: number): string {
+  return n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`;
+}
+
+/** The two recommended local models, with Download buttons. */
+function Recommended({ s, onDone }: { s: InferenceStatus; onDone: () => void }) {
+  const [pulls, setPulls] = useState<PullState[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const active = pulls.some((p) => !p.done);
+  const done = useRef(onDone);
+  done.current = onDone;
+  useEffect(() => {
+    let live = true;
+    const load = () =>
+      get<{ pulls: PullState[] }>("/api/app/pulls").then(
+        (v) => {
+          if (!live) return;
+          setPulls((old) => {
+            if (old.some((p) => !p.done) && v.pulls.every((p) => p.done)) done.current();
+            return v.pulls;
+          });
+        },
+        () => undefined,
+      );
+    load();
+    const t = window.setInterval(load, active ? 700 : 5000);
+    return () => {
+      live = false;
+      window.clearInterval(t);
+    };
+  }, [active]);
+  if (!s.local.running) {
+    return (
+      <Row
+        title="Get Ollama"
+        desc="Ollama runs AI models on this computer. Install it, start it, then come back here to download models with one click."
+      >
+        <button className="btn btn-small" onClick={() => openUrl("https://ollama.com/download")}>
+          Get Ollama
+        </button>
+      </Row>
+    );
+  }
+  const start = (model: string) =>
+    post("/api/app/pull", { model }).then(
+      () => (setError(null), get<{ pulls: PullState[] }>("/api/app/pulls").then((v) => setPulls(v.pulls))),
+      (e) => setError(String(e)),
+    );
+  const cancel = (model: string) => post("/api/app/pull_cancel", { model }).catch((e) => setError(String(e)));
+  return (
+    <div data-testid="recommended">
+      <Row
+        title="Recommended models"
+        desc="A builder and a checker from two different families, so Builder + checker works with nothing leaving this computer."
+      />
+      {error && (
+        <div className="set-row set-row-wide">
+          <ErrorLine error={error} />
+        </div>
+      )}
+      {s.local.recommended.map((m) => {
+        const p = pulls.find((x) => x.model === m.model);
+        const ready = s.local.ready.some((r) => r.model === m.model);
+        const pct = p && p.total > 0 ? Math.min(100, Math.round((100 * p.completed) / p.total)) : 0;
+        return (
+          <Row
+            key={m.model}
+            title={`${m.label} (${m.role})`}
+            desc={
+              <>
+                <code>{m.model}</code> · family {m.family} · license {m.license} · about {mb(m.size)}
+                {p && !p.done && (
+                  <span className="pull">
+                    <span
+                      className="pull-bar"
+                      role="meter"
+                      aria-label={`Downloading ${m.model}`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={pct}
+                    >
+                      <span style={{ width: `${pct}%` }} />
+                    </span>
+                    {p.total > 0 ? `${mb(p.completed)} of ${mb(p.total)}` : p.status}
+                  </span>
+                )}
+                {p?.done && p.error && p.error !== "cancelled" && <span className="fail"> · {p.error}</span>}
+              </>
+            }
+          >
+            {ready ? (
+              <Pill kind="ok">Ready</Pill>
+            ) : p && !p.done ? (
+              <button className="btn btn-small" onClick={() => cancel(m.model)}>
+                Cancel
+              </button>
+            ) : (
+              <button className="btn btn-small btn-primary" onClick={() => start(m.model)}>
+                Download
+              </button>
+            )}
+          </Row>
+        );
+      })}
+    </div>
+  );
+}
+
 function Pill({ kind, children }: { kind: "ok" | "warn" | "fail" | "muted"; children: ReactNode }) {
   return <span className={`pill pill-${kind}`}>{children}</span>;
 }
 
-function General({ app, overview }: { app: AppState; overview: Overview | null }) {
+function General({ app, overview, onChanged }: { app: AppState; overview: Overview | null; onChanged: () => void }) {
   const chain = overview?.chain;
   return (
     <Page title="General" intro="How the agent works in your projects. Anchor's safety rules are always on.">
@@ -167,6 +280,19 @@ function General({ app, overview }: { app: AppState; overview: Overview | null }
         ) : (
           <Row title="Models" desc="Chosen for each task: local, your API key, or the free tier (Settings → Models)." />
         )}
+      </Group>
+      <Group title="Updates">
+        <Row
+          title="Check for updates"
+          desc={`Asks GitHub for the latest Anchor version a few times a day and shows a Download button when there is a newer one. It sends nothing about you or your projects.${app.version ? ` This is Anchor ${app.version}.` : ""}`}
+        >
+          <input
+            type="checkbox"
+            aria-label="Check for updates"
+            checked={app.inference?.check_updates ?? true}
+            onChange={(e) => post("/api/app/inference", { check_updates: e.target.checked }).then(onChanged, () => undefined)}
+          />
+        </Row>
       </Group>
     </Page>
   );
@@ -290,12 +416,7 @@ function Models({ app, onChanged }: { app: AppState; onChanged: () => void }) {
           <Pill kind={s.local.running ? "ok" : "muted"}>{s.local.running ? "Running" : "Not running"}</Pill>
         </Row>
         <PortRow port={s.local.port} onSave={(p) => act("/api/app/inference", { ollama_port: p }, "Saved.")} />
-        {s.local.running && !s.local.ready.length && !s.local.needs_family.length && (
-          <Row
-            title="No models yet"
-            desc="Pull two models of different families, for example: ollama pull qwen2.5-coder:7b and ollama pull llama3.1:8b"
-          />
-        )}
+        <Recommended s={s} onDone={refresh} />
         {s.local.ready.map((m) => (
           <Row
             key={m.model}
@@ -637,7 +758,81 @@ function Projects({ app, onOpen }: { app: AppState; onOpen: (p: string) => void 
           );
         })}
       </Group>
+      {app.project && <TestCommand project={app.project} />}
     </Page>
+  );
+}
+
+/** Split a command line into its parts ("double quotes" keep spaces). */
+export function splitArgs(s: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s))) out.push(m[1] ?? m[2] ?? "");
+  return out;
+}
+
+function joinArgs(a: string[]): string {
+  return a.map((x) => (/\s/.test(x) ? `"${x}"` : x)).join(" ");
+}
+
+/** The open project's test command: run on a copy of the project after
+ * each change, so the checker knows whether the tests pass. */
+function TestCommand({ project }: { project: string }) {
+  const [t, setT] = useState<TestsInfo | null>(null);
+  const [text, setText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const load = () =>
+    get<TestsInfo>("/api/app/tests").then(
+      (v) => {
+        setT(v);
+        setText(joinArgs(v.setup?.argv ?? v.suggested ?? []));
+      },
+      (e) => setError(String(e)),
+    );
+  useEffect(() => {
+    void load();
+  }, [project]);
+  const save = (argv: string[] | null) =>
+    post("/api/app/tests", { argv }).then(
+      () => (setError(null), setNote(argv ? "Saved." : "Turned off."), load()),
+      (e) => (setError(String(e)), setNote(null)),
+    );
+  return (
+    <Group title="Tests of the open project">
+      <Row
+        title="Test command"
+        desc={
+          <>
+            Runs after each change on a copy of the project, without network, so the checker sees whether your tests
+            pass. A change that makes them fail goes back to the builder.{" "}
+            {t && !t.setup && (t.suggested ? `Suggested for ${t.why}.` : `Anchor found ${t.why}.`)}
+          </>
+        }
+      >
+        {t?.setup ? <Pill kind="ok">On</Pill> : <Pill kind="muted">Off</Pill>}
+      </Row>
+      <div className="set-row set-row-wide">
+        <input
+          className="wide-input"
+          aria-label="Test command"
+          placeholder="e.g. npm test"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        <button className="btn btn-small btn-primary" disabled={!splitArgs(text).length} onClick={() => save(splitArgs(text))}>
+          Save
+        </button>
+        {t?.setup && (
+          <button className="btn btn-small" onClick={() => save(null)}>
+            Turn off
+          </button>
+        )}
+        <ErrorLine error={error} />
+        {note && !error && <span className="ok">{note}</span>}
+      </div>
+    </Group>
   );
 }
 

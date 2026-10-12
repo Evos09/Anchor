@@ -244,12 +244,32 @@ fn start_full(
     repair: Vec<String>,
     team: Option<String>,
 ) -> Fx {
+    start_custom(
+        explicit,
+        roles_path,
+        mock_script,
+        review,
+        repair,
+        team,
+        |_| {},
+    )
+}
+
+fn start_custom(
+    explicit: bool,
+    roles_path: PathBuf,
+    mock_script: Option<String>,
+    review: Vec<String>,
+    repair: Vec<String>,
+    team: Option<String>,
+    tweak: impl FnOnce(&mut AppConfig),
+) -> Fx {
     let dir = tempfile::tempdir().unwrap();
     let base = anchor_fs::normalize_verbatim(&std::fs::canonicalize(dir.path()).unwrap());
     let ws = base.join("project");
     std::fs::create_dir_all(&ws).unwrap();
     std::fs::copy(example().join("workspace/hello.py"), ws.join("hello.py")).unwrap();
-    let app: Arc<App> = App::new(AppConfig {
+    let mut cfg = AppConfig {
         state_base: base.join("state"),
         roles_path,
         mock_script,
@@ -265,7 +285,11 @@ fn start_full(
             None,
         )
         .unwrap(),
-    });
+        app_version: None,
+        update_url: anchor_backend::ui::app::UPDATE_URL.into(),
+    };
+    tweak(&mut cfg);
+    let app: Arc<App> = App::new(cfg);
     let ui = ui::start_app(app, 0).unwrap();
     let c = Client {
         port: ui.port(),
@@ -833,4 +857,435 @@ fn stop_ends_a_pair_task() {
     }
     assert!(!fx.ws.join("README.md").exists());
     assert!(of_kind(c, "pair_review").is_empty(), "{}", c.story());
+}
+
+/// A fake Ollama: `/api/version`, `/api/tags` (the models pulled so far)
+/// and a streaming `/api/pull`. Reads each whole request before
+/// answering (Windows resets a connection closed with unread bytes).
+fn fake_ollama() -> u16 {
+    use std::io::{BufRead, BufReader};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let pulled = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { continue };
+            let pulled = pulled.clone();
+            std::thread::spawn(move || {
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut first = String::new();
+                let _ = r.read_line(&mut first);
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).unwrap_or(0) == 0 || h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = h.split_once(':')
+                        && k.eq_ignore_ascii_case("content-length")
+                    {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; len];
+                let _ = r.read_exact(&mut body);
+                let reply = |s: &mut TcpStream, ctype: &str, out: &str| {
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}",
+                        out.len()
+                    );
+                };
+                if first.starts_with("GET /api/version") {
+                    reply(&mut s, "application/json", r#"{"version":"0.12.3"}"#);
+                } else if first.starts_with("GET /api/tags") {
+                    let models: Vec<Value> = pulled
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|m| json!({ "name": m, "size": 1, "details": {} }))
+                        .collect();
+                    reply(
+                        &mut s,
+                        "application/json",
+                        &json!({ "models": models }).to_string(),
+                    );
+                } else if first.starts_with("POST /api/pull") {
+                    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    let model = v["model"].as_str().unwrap_or("").to_string();
+                    let mut out = String::new();
+                    for line in [
+                        json!({ "status": "pulling manifest" }),
+                        json!({ "status": "pulling layer", "total": 1000, "completed": 500 }),
+                        json!({ "status": "pulling layer", "total": 1000, "completed": 1000 }),
+                        json!({ "status": "success" }),
+                    ] {
+                        out.push_str(&line.to_string());
+                        out.push('\n');
+                    }
+                    pulled.lock().unwrap().push(model);
+                    reply(&mut s, "application/x-ndjson", &out);
+                } else {
+                    reply(&mut s, "application/json", "{}");
+                }
+                let _ = s.flush();
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            });
+        }
+    });
+    port
+}
+
+/// 0.12.0: the recommended local models download from the app, through
+/// Ollama, and then show as ready. Only registry models can be pulled.
+#[test]
+fn models_download_from_the_app() {
+    let fx = start_with(false);
+    let c = &fx.c;
+    let port = fake_ollama();
+    c.ok("/api/app/inference", &json!({ "ollama_port": port }));
+    let inf = c.get("/api/app/inference");
+    assert_eq!(inf["local"]["running"], true, "{inf}");
+    let rec: Vec<String> = inf["local"]["recommended"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["model"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(rec, ["qwen2.5-coder:7b", "llama3.1:8b"]);
+    assert_eq!(
+        c.post("/api/app/pull", &json!({ "model": "someone/else:latest" }))
+            .0,
+        400
+    );
+    for m in &rec {
+        c.ok("/api/app/pull", &json!({ "model": m }));
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let pulls = c.get("/api/app/pulls")["pulls"].as_array().unwrap().clone();
+        if pulls.len() == 2 && pulls.iter().all(|p| p["done"] == true) {
+            for p in &pulls {
+                assert!(p["error"].is_null(), "{p}");
+                assert_eq!(p["status"], "success");
+                assert_eq!(p["completed"], 1000);
+            }
+            break;
+        }
+        assert!(Instant::now() < deadline, "{pulls:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let ready: Vec<String> = c.get("/api/app/inference")["local"]["ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["model"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ready, rec);
+    assert_eq!(
+        c.post("/api/app/pull_cancel", &json!({ "model": "llama3.1:8b" }))
+            .0,
+        409
+    );
+    // No Ollama, no download.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    c.ok("/api/app/inference", &json!({ "ollama_port": closed }));
+    let (st, r) = c.post("/api/app/pull", &json!({ "model": "qwen2.5-coder:7b" }));
+    assert_eq!(st, 409, "{r}");
+}
+
+/// 0.12.0: the desktop app learns of a newer release from GitHub (here a
+/// fake), asks at most every few hours, and not at all when turned off.
+#[test]
+fn the_app_offers_a_newer_release() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let count = asked.clone();
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { continue };
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut first = String::new();
+            let _ = r.read_line(&mut first);
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).unwrap_or(0) == 0 || h.trim().is_empty() {
+                    break;
+                }
+            }
+            assert!(first.starts_with("GET /repos/x/releases/latest"), "{first}");
+            count.fetch_add(1, Ordering::SeqCst);
+            let out = json!({
+                "tag_name": "v9.1.0", "draft": false, "prerelease": false,
+                "html_url": "https://github.com/Evos09/Anchor/releases/tag/v9.1.0",
+                "body": "Faster everything.",
+            })
+            .to_string();
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}",
+                out.len()
+            );
+            let _ = s.flush();
+            let _ = s.shutdown(std::net::Shutdown::Write);
+        }
+    });
+    let fx = start_custom(
+        true,
+        example().join("roles.mock.toml"),
+        None,
+        vec![],
+        vec![],
+        None,
+        |cfg| {
+            cfg.app_version = Some("0.12.0".into());
+            cfg.update_url = format!("http://127.0.0.1:{port}/repos/x");
+        },
+    );
+    let c = &fx.c;
+    assert_eq!(c.get("/api/app/state")["version"], "0.12.0");
+    let u = c.get("/api/app/update");
+    assert_eq!(u["current"], "0.12.0");
+    assert_eq!(u["latest"], "9.1.0", "{u}");
+    assert_eq!(u["notes"], "Faster everything.");
+    // Cached: GitHub is asked once.
+    assert_eq!(c.get("/api/app/update")["latest"], "9.1.0");
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    // Turned off: no request at all.
+    c.ok("/api/app/inference", &json!({ "check_updates": false }));
+    assert_eq!(c.get("/api/app/update")["off"], true);
+    assert_eq!(c.get("/api/app/state")["inference"]["check_updates"], false);
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    // Only the allowed pages open.
+    assert_eq!(
+        c.post(
+            "/api/app/open_url",
+            &json!({ "url": "https://example.com/" })
+        )
+        .0,
+        403
+    );
+}
+
+const PY: &str = if cfg!(windows) { "python" } else { "python3" };
+
+fn python() -> bool {
+    std::process::Command::new(PY)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// A project test: a README, when there is one, must say Python 3 is
+/// needed. It passes before the task (no README), fails after the
+/// builder's first round, and passes after its second.
+const README_TEST: &str = "import os\nimport unittest\n\n\nclass ReadmeTest(unittest.TestCase):\n    def test_readme_names_python_3(self):\n        if os.path.exists('README.md'):\n            with open('README.md') as f:\n                self.assertIn('Python 3', f.read())\n\n\nif __name__ == '__main__':\n    unittest.main()\n";
+
+/// 0.12.0: the checker runs the project's tests. The reviewer accepts the
+/// first change, but the tests fail, so the change goes back to the
+/// builder with the test output; its fix passes and is approved.
+#[test]
+fn the_checker_sees_the_tests_fail_and_the_builder_fixes_them() {
+    if !python() {
+        eprintln!("skipped: no {PY}");
+        return;
+    }
+    let fx = start_full(
+        true,
+        example().join("roles.mock.toml"),
+        Some(script("script.json")),
+        vec![script("review-approve.json")],
+        vec![script("repair.json")],
+        None,
+    );
+    let c = &fx.c;
+    std::fs::write(fx.ws.join("test_readme.py"), README_TEST).unwrap();
+    c.ok("/api/app/open", &json!({ "path": fx.ws }));
+    let t = c.get("/api/app/tests");
+    assert!(t["setup"].is_null(), "{t}");
+    assert!(t["suggested"].is_array(), "a Python project: {t}");
+    assert_eq!(
+        c.post("/api/app/tests", &json!({ "argv": [] })).0,
+        400,
+        "an empty command"
+    );
+    c.ok(
+        "/api/app/tests",
+        &json!({ "argv": [PY, "-m", "unittest", "discover", "-v"], "timeout_secs": 180 }),
+    );
+    assert_eq!(c.get("/api/app/tests")["setup"]["argv"][0], PY);
+    c.ok(
+        "/api/app/task",
+        &json!({ "text": "Add a README and greet anchor" }),
+    );
+    assert_eq!(c.answer_all("approve"), 3, "{}", c.story());
+
+    let runs = of_kind(c, "pair_tests");
+    assert_eq!(runs.len(), 3, "baseline and two rounds: {}", c.story());
+    let d = |i: usize| &runs[i]["data"];
+    assert_eq!(
+        (d(0)["round"].clone(), d(0)["ok"].clone()),
+        (json!(0), json!(true)),
+        "{}",
+        c.story()
+    );
+    assert_eq!(d(1)["round"], 1);
+    assert_eq!(d(1)["ok"], false, "{}", d(1));
+    assert_eq!(d(1)["holds"], false);
+    assert_eq!(d(1)["failed"], 1, "{}", d(1));
+    assert_eq!(d(2)["ok"], true, "{}", d(2));
+    let reviews = of_kind(c, "pair_review");
+    assert_eq!(reviews.len(), 2, "{}", c.story());
+    assert_eq!(reviews[0]["data"]["reviewer_ok"], true);
+    assert_eq!(reviews[0]["data"]["tests_ok"], false);
+    assert_eq!(reviews[0]["data"]["approved"], false);
+    assert_eq!(reviews[1]["data"]["approved"], true);
+    assert!(read(&fx.ws.join("README.md")).contains("Python 3"));
+    // The test command and its result are in the audit log.
+    let log = serde_json::to_string(&c.events()).unwrap();
+    assert!(log.contains("set_tests"), "{}", c.story());
+}
+
+/// Test runs use an export of the project, never the project itself: a
+/// test command that writes a file leaves the user's folder unchanged.
+#[test]
+fn tests_never_run_in_the_live_project() {
+    if !python() {
+        eprintln!("skipped: no {PY}");
+        return;
+    }
+    let fx = start();
+    let c = &fx.c;
+    c.ok("/api/app/open", &json!({ "path": fx.ws }));
+    c.ok("/api/app/inference", &json!({ "collab": "single" }));
+    c.ok(
+        "/api/app/tests",
+        &json!({ "argv": [PY, "-c", "open('touched.txt', 'w').write('x'); print('ran')"], "timeout_secs": 180 }),
+    );
+    c.ok("/api/app/task", &json!({ "text": "Add a README" }));
+    assert_eq!(c.answer_all("approve"), 2, "{}", c.story());
+    let runs = of_kind(c, "pair_tests");
+    assert_eq!(runs.len(), 1, "{}", c.story());
+    assert_eq!(runs[0]["data"]["ok"], true, "{}", runs[0]);
+    assert_eq!(runs[0]["data"]["info"], true);
+    assert!(runs[0]["data"]["output"].as_str().unwrap().contains("ran"));
+    assert!(!fx.ws.join("touched.txt").exists());
+    assert!(fx.ws.join("README.md").exists());
+    // Clearing the command, and declining the suggestion, are remembered.
+    c.ok("/api/app/tests", &json!({ "argv": null, "decline": true }));
+    let t = c.get("/api/app/tests");
+    assert!(t["setup"].is_null());
+    assert_eq!(t["declined"], true);
+}
+
+/// 0.12.0: a reply to a finished task continues the builder's own
+/// conversation (its checkpoint, with the user's message as the next
+/// turn); when the checkpoint is gone it starts afresh with a summary.
+#[test]
+fn a_follow_up_continues_the_same_task() {
+    let fx = start_cfg(
+        true,
+        example().join("roles.mock.toml"),
+        Some(
+            r#"{"steps":[{"content":"Answered.","prompt_tokens":100,"completion_tokens":5}]}"#
+                .into(),
+        ),
+    );
+    let c = &fx.c;
+    c.ok("/api/app/open", &json!({ "path": fx.ws }));
+    let (st, r) = c.post(
+        "/api/app/task",
+        &json!({ "text": "Too early", "follow_up": true }),
+    );
+    assert_eq!(st, 409, "nothing to reply to yet: {r}");
+    c.ok(
+        "/api/app/task",
+        &json!({ "text": "What does hello.py print?" }),
+    );
+    c.answer_all("approve");
+    let r = c.ok(
+        "/api/app/task",
+        &json!({ "text": "And in French?", "follow_up": true }),
+    );
+    assert_eq!(r["follow_up"], true, "{r}");
+    c.answer_all("approve");
+
+    let ev = c.events();
+    let follow = ev
+        .iter()
+        .find(|e| e["kind"] == "ui_action" && e["data"]["action"] == "follow_up_task")
+        .unwrap_or_else(|| panic!("{}", c.story()));
+    assert_eq!(follow["data"]["args"]["resumed"], true, "{follow}");
+    assert_eq!(follow["data"]["args"]["text"], "And in French?");
+    let started: Vec<&Value> = ev
+        .iter()
+        .filter(|e| e["kind"] == "session_started")
+        .collect();
+    assert_eq!(started.len(), 2, "{}", c.story());
+    assert!(started[0]["data"]["resumed_from"].is_null());
+    assert!(
+        started[1]["data"]["resumed_from"].is_string(),
+        "{}",
+        started[1]
+    );
+    assert_eq!(started[1]["data"]["follow_up"], true);
+    // The follow-up's conversation holds the first task and the reply.
+    let second = started[1]["data"]["session_id"].as_str().unwrap();
+    let saved: Vec<&Value> = ev
+        .iter()
+        .filter(|e| e["kind"] == "checkpoint_saved" && e["session_id"] == second)
+        .collect();
+    let path = saved.last().unwrap_or_else(|| panic!("{}", c.story()))["data"]["path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let cp = std::fs::read_to_string(&path).unwrap();
+    assert!(cp.contains("What does hello.py print?"), "{cp}");
+    assert!(cp.contains("And in French?"), "{cp}");
+    assert_eq!(c.finished().len(), 2);
+
+    // The last task is remembered without secrets, for after a restart.
+    let saved_app: Value =
+        serde_json::from_slice(&std::fs::read(fx.base.join("state/app.json")).unwrap()).unwrap();
+    let last = saved_app["last"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    assert!(
+        last["text"].as_str().unwrap().contains("And in French?"),
+        "{last}"
+    );
+    assert_eq!(last["result"], "Answered.");
+
+    // Checkpoints gone (pruned): the reply starts afresh with a summary.
+    for e in ev.iter().filter(|e| e["kind"] == "checkpoint_saved") {
+        let _ = std::fs::remove_file(e["data"]["path"].as_str().unwrap());
+    }
+    c.ok(
+        "/api/app/task",
+        &json!({ "text": "One more thing", "follow_up": true }),
+    );
+    c.answer_all("approve");
+    let ev = c.events();
+    let follows: Vec<&Value> = ev
+        .iter()
+        .filter(|e| e["kind"] == "ui_action" && e["data"]["action"] == "follow_up_task")
+        .collect();
+    assert_eq!(follows.len(), 2);
+    assert_eq!(
+        follows[1]["data"]["args"]["resumed"], false,
+        "{}",
+        follows[1]
+    );
+    assert_eq!(c.finished().len(), 3, "{}", c.story());
 }

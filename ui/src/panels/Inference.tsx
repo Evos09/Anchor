@@ -136,8 +136,8 @@ export function GetStarted({ s, onSetup }: { s: InferenceStatus; onSetup: (path:
             <b>Run locally — nothing leaves your machine</b>
             <span className="muted small">
               {s.local.running
-                ? "Ollama is running. Pull two models of different families, e.g. qwen2.5-coder:7b and llama3.1:8b."
-                : "Install Ollama from ollama.com, then pull two models (e.g. qwen2.5-coder:7b and llama3.1:8b)."}
+                ? "Ollama is running. Download the two recommended models with one click in Settings → Models."
+                : "Install Ollama (Settings → Models has the link), then download the two recommended models there."}
             </span>
           </button>
           <button className="prompt-option" onClick={() => onSetup("B")}>

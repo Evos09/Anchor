@@ -1108,6 +1108,15 @@ impl Mediator {
         let _ = store.delete_ref(&self.snap_opts.root.ref_name(ns, leaf));
     }
 
+    /// A snapshot of the workspace as it is now, under no ref (for a test
+    /// run on an export of it; the store may collect it later).
+    pub fn snapshot_now(&self, label: &str) -> Result<Id, String> {
+        let store = lock_store(&self.snapshots);
+        anchor_snapshot::snapshot(&store, &self.ws, &self.snap_opts, label)
+            .map(|r| r.id())
+            .map_err(|e| e.to_string())
+    }
+
     /// The files changed since snapshot `since`, with their line diffs.
     pub fn changes_since(
         &self,

@@ -14,6 +14,7 @@
 pub mod keys;
 pub mod net;
 pub mod plan;
+pub mod pull;
 
 use std::collections::BTreeMap;
 use std::path::{Path as FsPath, PathBuf};
@@ -87,6 +88,8 @@ pub struct Settings {
     pub collab: Collab,
     /// Reviews per builder + checker task (1-5).
     pub pair_rounds: u32,
+    /// Ask GitHub, at most every few hours, whether a newer Anchor is out.
+    pub check_updates: bool,
 }
 
 /// How many AIs work on a task, and how (ADR-0039).
@@ -117,6 +120,7 @@ impl Default for Settings {
             free_device: None,
             collab: Collab::Pair,
             pair_rounds: 2,
+            check_updates: true,
         }
     }
 }
@@ -197,6 +201,26 @@ impl Inference {
             local_timeout: Duration::from_millis(1500),
             net_timeout: Duration::from_secs(10),
         })
+    }
+
+    /// The two local models the app offers to download: a builder and a
+    /// checker of different families, so builder + checker works offline.
+    pub fn recommended_local(&self) -> Vec<Value> {
+        // Download sizes as Ollama lists them (approximate).
+        const PICKS: [(&str, &str, u64); 2] = [
+            ("qwen2.5-coder:7b", "builder", 4_700_000_000),
+            ("llama3.1:8b", "checker", 4_900_000_000),
+        ];
+        PICKS
+            .iter()
+            .filter_map(|(name, role, size)| {
+                let e = self.registry.by_provider_model("ollama", name)?;
+                Some(json!({
+                    "model": name, "label": e.display_name, "family": e.family,
+                    "role": role, "size": size, "license": e.license_id,
+                }))
+            })
+            .collect()
     }
 
     fn local(&self, s: &Settings) -> Local {
@@ -423,6 +447,7 @@ impl Inference {
                     "model": c.model_id, "label": c.label, "family": c.family,
                     "license": license(&c.model_id),
                 })).collect::<Vec<_>>(),
+                "recommended": self.recommended_local(),
                 "needs_family": local.needs_family.iter().map(|m| json!({
                     "model": m.name, "hint": m.ollama_family, "size": m.parameter_size,
                 })).collect::<Vec<_>>(),

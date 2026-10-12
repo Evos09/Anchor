@@ -151,12 +151,18 @@ pub fn run_session<T: Transport>(
     let (messages, turn) = match &task.resume_from {
         Some(cp) => {
             let mut m = cp.messages.clone();
-            m.push(ChatMessage {
-                role: ChatRole::User,
-                content: format!(
+            let content = match task.continue_with.as_deref().map(str::trim) {
+                // A follow-up: the user's next message in the same
+                // conversation.
+                Some(text) if !text.is_empty() => text.to_string(),
+                _ => format!(
                     "[Session resumed from checkpoint {} at turn {}. Continue the task.]",
                     cp.checkpoint_id, cp.turn
                 ),
+            };
+            m.push(ChatMessage {
+                role: ChatRole::User,
+                content,
                 tool_calls: vec![],
                 tool_call_id: None,
             });

@@ -11,13 +11,14 @@ import type {
   SnapshotsView,
   TaskPrompt,
   TaskReply,
+  TestsInfo,
 } from "../types";
 import { Badge, Empty, ErrorLine, makeColors, time, usd } from "../util";
 import * as I from "../icons";
 import { Snapshots } from "./Snapshots";
 import { Audit } from "./Audit";
 import { Cost } from "./Cost";
-import { Settings, applyTheme, type Section } from "./Settings";
+import { Settings, applyTheme, openUrl, type Section } from "./Settings";
 import {
   FirstFailure,
   GetStarted,
@@ -72,7 +73,12 @@ function tasksOf(events: Event[], running: boolean): Task[] {
   out.forEach((t, i) => {
     // The builder's last session says how it ended (builder + checker runs
     // one per round; the reviewer's sessions are its own).
-    const fins = t.events.filter((e) => e.kind === "session_finished" && e.agent !== "reviewer");
+    let fins = t.events.filter((e) => e.kind === "session_finished" && e.agent !== "reviewer");
+    // A reply (follow-up) restarts the task: only what came after it counts.
+    const reply = [...t.events]
+      .reverse()
+      .find((e) => e.kind === "ui_action" && (e.data as { action?: string } | null)?.action === "follow_up_task");
+    if (reply) fins = fins.filter((e) => e.seq > reply.seq);
     const team = t.events.some((e) => e.kind === "team_started");
     const teamDone = t.events.some((e) => e.kind === "team_finished");
     const fin = team && !teamDone && running && i === out.length - 1 ? undefined : fins[fins.length - 1];
@@ -115,6 +121,31 @@ type Tool = "" | "snapshots" | "audit" | "cost";
 
 /** The desktop app (ADR-0028): projects and their tasks on the left; give
  * the agent a task, answer its approvals, undo its turns. */
+/** "Anchor x.y.z is available": checked once per launch (the backend asks
+ * GitHub at most every six hours, and not at all when turned off). */
+function UpdateBanner() {
+  const [u, setU] = useState<{ latest?: string | null; url?: string } | null>(null);
+  const [hidden, setHidden] = useState(false);
+  useEffect(() => {
+    get<{ latest?: string | null; url?: string }>("/api/app/update").then(setU, () => undefined);
+  }, []);
+  if (hidden || !u?.latest || !u.url) return null;
+  const url = u.url;
+  return (
+    <div className="notice notice-update" role="status" data-testid="update">
+      <span>
+        <b>Anchor {u.latest}</b> is available.
+      </span>
+      <button className="btn btn-small btn-primary" onClick={() => openUrl(url)}>
+        Download
+      </button>
+      <button className="icon-btn" aria-label="Not now" onClick={() => setHidden(true)}>
+        <I.Close />
+      </button>
+    </div>
+  );
+}
+
 export function Workspace() {
   const [app, setApp] = useState<AppState | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -303,6 +334,7 @@ export function Workspace() {
             {error}
           </div>
         )}
+        {app?.version && <UpdateBanner />}
         <div className={tool && overview ? "desk-body desk-body-drawer" : "desk-body"}>
           <main className="desk-content">
             {notice && (
@@ -310,6 +342,7 @@ export function Workspace() {
                 <I.Folder /> {notice}
               </Notice>
             )}
+            {project && !running && <TestsPrompt project={project} />}
             {!project ? (
               <Welcome app={app} onPick={() => setPicker(true)} onOpen={openProject} />
             ) : view.kind === "history" ? (
@@ -334,8 +367,10 @@ export function Workspace() {
                   onChanged={refresh}
                 />
                 <Composer
+                  key={onLatest ? "reply" : "new"}
                   app={app}
                   running={running}
+                  reply={onLatest && shownTask.status !== "running"}
                   onSent={() => setView({ kind: "task", n: null })}
                   onChanged={refresh}
                   onModels={() => setView({ kind: "settings", section: "models" })}
@@ -742,6 +777,7 @@ function Composer({
   app,
   running,
   big = false,
+  reply = false,
   onSent,
   onChanged,
   onModels,
@@ -749,6 +785,8 @@ function Composer({
   app: AppState | null;
   running: boolean;
   big?: boolean;
+  /** Replies continue the open task (the builder keeps its conversation). */
+  reply?: boolean;
   onSent: () => void;
   onChanged: () => void;
   onModels: () => void;
@@ -759,7 +797,7 @@ function Composer({
   const send = async () => {
     if (!text.trim() || running) return;
     try {
-      const r = await post<TaskReply>("/api/app/task", { text });
+      const r = await post<TaskReply>("/api/app/task", reply ? { text, follow_up: true } : { text });
       setError(null);
       if (r.prompt) {
         // Nothing can run it yet: ask, and keep the text.
@@ -814,7 +852,13 @@ function Composer({
       <div className="composer-card">
         <textarea
           aria-label="Task"
-          placeholder={running ? "The agent is working…" : "Ask Anchor to do something in this project…"}
+          placeholder={
+            running
+              ? "The agent is working…"
+              : reply
+                ? "Reply to this task… (New task, on the left, starts fresh)"
+                : "Ask Anchor to do something in this project…"
+          }
           value={text}
           disabled={running}
           onChange={(e) => setText(e.target.value)}
@@ -901,9 +945,12 @@ function ReviewBubble({ e }: { e: Event }) {
     claims?: { id: string; text: string }[];
     verdicts?: Verdict[];
     approved?: boolean;
+    reviewer_ok?: boolean;
+    tests_ok?: boolean | null;
     final?: boolean;
   };
   const text = (id: string) => d.claims?.find((c) => c.id === id)?.text ?? id;
+  const testsOnly = !d.approved && d.reviewer_ok && d.tests_ok === false;
   return (
     <div className={`bubble bubble-reviewer ${d.approved ? "bubble-ok" : "bubble-warn"}`} data-testid="review">
       <div className="bubble-who">
@@ -913,7 +960,11 @@ function ReviewBubble({ e }: { e: Event }) {
       <p>
         {d.approved
           ? "I checked the change and accept it."
-          : d.final
+          : testsOnly
+            ? d.final
+              ? "The code looks right to me, but the project's tests still fail; the rounds are used up. Check it before you keep it."
+              : "The code looks right to me, but the project's tests fail, so it goes back to the builder."
+            : d.final
             ? "I still have objections; the rounds are used up. Look over the change before you keep it."
             : "I checked the change and do not accept it yet:"}
       </p>
@@ -925,6 +976,73 @@ function ReviewBubble({ e }: { e: Event }) {
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/** A test run's result: one line, with the output behind a Details. */
+function TestsLine({ e }: { e: Event }) {
+  const d = (e.data ?? {}) as {
+    ok?: boolean;
+    holds?: boolean;
+    baseline?: boolean;
+    info?: boolean;
+    summary?: string;
+    command?: string;
+    output?: string;
+  };
+  const kind = d.ok ? "ok" : d.baseline || d.info || d.holds ? "warn" : "fail";
+  const what = d.baseline ? "Tests before the task" : "Tests";
+  return (
+    <div className={`tests-line tests-${kind}`} data-testid="tests">
+      <span>
+        {d.ok ? "✓" : "✗"} {what}: {d.ok ? "passed" : "failed"}
+        {d.summary ? ` (${d.summary})` : ""}
+        {!d.ok && d.baseline ? " — they already failed before the task, so only new failures count." : ""}
+      </span>
+      {d.output && (
+        <details>
+          <summary>Details</summary>
+          {d.command && (
+            <p className="small">
+              <code>{d.command}</code> (on a copy of the project, without network)
+            </p>
+          )}
+          <pre className="pre">{d.output}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/** "Run `npm test` after each change?": asked once per project, when
+ * Anchor can suggest a command and none is set. */
+function TestsPrompt({ project }: { project: string }) {
+  const [t, setT] = useState<TestsInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    get<TestsInfo>("/api/app/tests").then(setT, () => setT(null));
+  }, [project]);
+  if (!t || t.setup || !t.suggested || t.declined) return null;
+  const argv = t.suggested;
+  const answer = (body: unknown) =>
+    post("/api/app/tests", body).then(
+      () => setT({ ...t, declined: true }),
+      (e) => setError(String(e)),
+    );
+  return (
+    <div className="notice notice-tests" role="status" data-testid="tests-prompt">
+      <span>
+        This looks like {t.why}. Run <code>{argv.join(" ")}</code> after each change, so the checker sees whether the
+        tests pass?
+      </span>
+      <button className="btn btn-small btn-primary" onClick={() => answer({ argv })}>
+        Yes
+      </button>
+      <button className="btn btn-small" onClick={() => answer({ argv: null, decline: true })}>
+        Not now
+      </button>
+      <ErrorLine error={error} />
     </div>
   );
 }
@@ -1006,7 +1124,7 @@ function Conversation({
     <div className="thread" aria-live="polite">
       {items.map((e) => {
         const d = (e.data ?? {}) as Record<string, unknown>;
-        if (e.kind === "ui_action" && d["action"] === "start_task") {
+        if (e.kind === "ui_action" && (d["action"] === "start_task" || d["action"] === "follow_up_task")) {
           const args = (d["args"] ?? {}) as { text?: string };
           return (
             <div key={e.seq} className="bubble bubble-user" data-testid="task">
@@ -1030,6 +1148,9 @@ function Conversation({
         }
         if (e.kind === "pair_review") {
           return <ReviewBubble key={e.seq} e={e} />;
+        }
+        if (e.kind === "pair_tests") {
+          return <TestsLine key={e.seq} e={e} />;
         }
         if (e.kind === "pair_reply") {
           return (

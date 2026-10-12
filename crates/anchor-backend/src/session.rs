@@ -29,6 +29,9 @@ pub struct SessionConfig {
     /// Review sessions (Phase 5): what the reviewer judges. The runtime
     /// gets no workspace tools; any tool call ends the session.
     pub review: Option<anchor_protocol::verify::ReviewInput>,
+    /// With `resume_from`: the user's follow-up message, which the runtime
+    /// adds to the resumed conversation (0.12.0).
+    pub continue_with: Option<String>,
     /// Secrets for the runtime's environment (the app's BYOK keys or
     /// free-tier token, named by the models file's `api_key_env`), on
     /// top of what [`runtime_env`] passes through. Never logged.
@@ -500,6 +503,8 @@ pub fn run_cancellable(
             "runtime_pid": report.runtime_pid,
             "runtime_isolated": isolated,
             "review": cfg.review.is_some(),
+            "resumed_from": cfg.resume_from.as_ref().map(|c| &c.checkpoint_id),
+            "follow_up": cfg.continue_with.is_some(),
         }),
     );
 
@@ -535,6 +540,7 @@ pub fn run_cancellable(
                         mock_script: cfg.mock_script.clone(),
                         hub: cfg.hub.clone(),
                         review: cfg.review.clone().map(Box::new),
+                        continue_with: cfg.continue_with.clone(),
                     })))?;
                 }
                 Message::TurnStarted { turn } => {

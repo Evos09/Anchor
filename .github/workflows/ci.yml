@@ -283,6 +283,63 @@ jobs:
             desktop/target/release/bundle/msi/*.msi
             desktop/target/release/bundle/nsis/*.exe
 
+  release:
+    # One GitHub Release per desktop version (0.12.0, ADR-0040): when every
+    # job is green on a push to the branch users download from, and the
+    # version in desktop/tauri.conf.json has no release yet, the three
+    # platforms' installers are published under tag v<version> with that
+    # version's CHANGELOG.md section as the notes. A version that already
+    # has a release is left alone, so only a version bump releases.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/claude/anchor-master-build-slkedr'
+    needs: [linux, supply-chain, other-platforms, desktop, quickstart, snapshot-bench]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Version
+        id: v
+        run: |
+          v=$(python3 -c 'import json;print(json.load(open("desktop/tauri.conf.json"))["version"])')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if gh release view "v$v" >/dev/null 2>&1; then
+            echo "Release v$v already exists; nothing to publish." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Download the installers
+        if: steps.v.outputs.exists == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: anchor-desktop-*
+          path: installers
+          merge-multiple: true
+      - name: Publish the release
+        if: steps.v.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            /^## / { on = ($2 == v) ; next }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md || echo "Anchor $VERSION." > notes.md
+          cat >> notes.md <<'NOTES'
+
+          **Which file?** Windows: the `.msi` (or `-setup.exe`). macOS: the `.dmg`. Linux: the `.deb` or `.rpm`.
+          The installers are not code-signed yet, so Windows and macOS may warn the first time; see the README.
+          NOTES
+          ls -l installers
+          gh release create "v$VERSION" --target "$GITHUB_SHA" \
+            --title "Anchor $VERSION" --notes-file notes.md \
+            installers/*
+          echo "Published https://github.com/${{ github.repository }}/releases/tag/v$VERSION" >> "$GITHUB_STEP_SUMMARY"
+
   quickstart:
     # Spec §14 Phase 8: "the CI is green on a fresh clone". Clones the
     # checkout into a new directory (no build cache, no prior state) and

@@ -1575,3 +1575,85 @@ button {
 .meter-fail {
   background: var(--fail);
 }
+
+/* Model downloads (Settings → Models → Local). */
+.pull {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.pull-bar {
+  display: block;
+  flex: 1;
+  max-width: 220px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+.pull-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent, var(--ok));
+  transition: width 0.3s;
+}
+
+.notice-update {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+}
+.notice-update > span {
+  flex: 1;
+}
+
+/* Test runs in the conversation (0.12.0). */
+.tests-line {
+  margin: 6px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  font-size: 13px;
+}
+.tests-ok {
+  color: var(--ok);
+}
+.tests-warn {
+  color: var(--warn);
+}
+.tests-fail {
+  color: var(--fail);
+  border-color: var(--fail);
+}
+.tests-line details {
+  color: var(--text, inherit);
+  margin-top: 4px;
+}
+.notice-tests {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.notice-tests > span {
+  flex: 1;
+  min-width: 200px;
+}
+.wide-input {
+  flex: 1;
+  min-width: 200px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: inherit;
+  font-family: var(--mono, monospace);
+  font-size: 13px;
+}

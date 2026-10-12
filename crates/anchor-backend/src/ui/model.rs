@@ -632,6 +632,10 @@ impl Model {
                         },
                     )
                     .collect();
+                let mut problems = problems;
+                if d["tests_ok"] == false {
+                    problems.push("the project's tests fail".into());
+                }
                 if d["approved"] == true {
                     (
                         "review",
@@ -670,6 +674,25 @@ impl Model {
                 Fail,
                 format!("the review stopped: {}", short(&d["detail"], 300)),
             ),
+            "pair_tests" => {
+                let what = if d["baseline"] == true {
+                    "Before the task, the tests"
+                } else {
+                    "The tests"
+                };
+                let summary = short(&d["summary"], 100);
+                if d["ok"] == true {
+                    ("tests", Ok, format!("{what} passed ({summary})"))
+                } else if d["holds"] == true || d["baseline"] == true || d["info"] == true {
+                    ("tests", Warn, format!("{what} failed ({summary})"))
+                } else {
+                    (
+                        "tests",
+                        Fail,
+                        format!("{what} failed after the change ({summary})"),
+                    )
+                }
+            }
             "pair_skipped" => (
                 "review",
                 Info,
@@ -1201,6 +1224,25 @@ impl Model {
                         short(&d["args"]["ref"], 60)
                     ),
                     Some("start_task") => format!("You asked: {}", short(&d["args"]["text"], 400)),
+                    Some("follow_up_task") => {
+                        format!("You replied: {}", short(&d["args"]["text"], 400))
+                    }
+                    Some("set_tests") => match d["args"]["argv"].as_array() {
+                        Some(a) => format!(
+                            "You set the test command: {}",
+                            a.iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ),
+                        None => "You turned the test command off".to_string(),
+                    },
+                    Some("pull_model") => {
+                        format!(
+                            "You downloaded the model {}",
+                            short(&d["args"]["model"], 100)
+                        )
+                    }
                     Some("cancel_task") => "You stopped the task".to_string(),
                     Some("open_project") => {
                         format!("You opened {}", short(&d["args"]["path"], 200))

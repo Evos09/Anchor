@@ -96,10 +96,12 @@ DIR` prints the location; set `ANCHOR_STATE_DIR` to move it.
 Open a project folder, type what you want done, approve or deny each change
 the agent asks to make, and undo any turn, in one window (ADR-0028).
 
-**Install.** Every CI run builds installers: open the run on GitHub
-(Actions → CI → the latest run on this branch) and download
-`anchor-desktop-Windows` (`.msi`, or the `-setup.exe`), `anchor-desktop-macOS`
-(`.dmg`) or `anchor-desktop-Linux` (`.deb`, `.rpm`). They are **unsigned**:
+**Install.** Download the installer from the
+[**Releases**](https://github.com/Evos09/Anchor/releases) page: Windows
+`.msi` (or the `-setup.exe`), macOS `.dmg`, Linux `.deb` or `.rpm`. The app
+tells you when a newer version is out (Settings → General). Every CI run
+also keeps its installers as artifacts (`anchor-desktop-Windows`, …). They
+are **unsigned**:
 - **Windows:** SmartScreen says "Windows protected your PC": choose *More
   info*, then *Run anyway*.
 - **macOS:** right-click the app, choose *Open*, then *Open* again.
@@ -108,9 +110,9 @@ the agent asks to make, and undo any turn, in one window (ADR-0028).
 three ways (ADR-0029), chosen in **Settings → Models**:
 
 - **Local — nothing leaves your machine.** Install
-  [Ollama](https://ollama.com) and pull two models of different families,
-  e.g. `ollama pull qwen2.5-coder:7b` and `ollama pull llama3.1:8b`. The app
-  finds Ollama by itself ("Local inference active").
+  [Ollama](https://ollama.com), then click **Download** next to the two
+  recommended models in Settings → Models (a builder and a checker of two
+  families). The app finds Ollama by itself ("Local inference active").
 - **Your own API key** (OpenAI, Mistral, DeepSeek, Gemini). Paste it once;
   Anchor checks it with that provider and keeps it in your system keychain.
   Requests go straight from your computer to the provider.
@@ -142,6 +144,15 @@ Models → Two AIs**:
 
 Every change either AI makes still asks for your OK, and every turn can be
 undone.
+
+**Your tests.** Give a project its test command (Settings → Projects, or
+say *Yes* when Anchor suggests one) and the checker also runs your tests
+after each change, on a copy of the project with no network. A change that
+makes them fail goes back to the builder with the output (ADR-0040).
+
+**Reply to a task.** When a task is open, the task box continues it ("now
+also…", "that's wrong, fix…"): the builder keeps its conversation. *New
+task* on the left starts fresh.
 
 **Build it yourself:** `desktop/` (see CONTRIBUTING.md). **Without
 installing:** `anchor app` serves the same app in your browser:

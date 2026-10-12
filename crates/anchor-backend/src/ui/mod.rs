@@ -42,6 +42,7 @@ mod assets;
 pub mod broker;
 pub mod model;
 pub mod pair;
+pub mod project_tests;
 pub mod snapshots;
 
 pub use broker::{Broker, UiInteraction};

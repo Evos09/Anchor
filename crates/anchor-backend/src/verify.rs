@@ -375,11 +375,193 @@ fn tail(s: &str, n: usize) -> String {
 
 /// One command's result: its record, its full output, and its two streams
 /// (unittest reports on stderr).
-struct Ran {
-    record: CommandRecord,
-    log: Vec<u8>,
-    stdout: String,
-    stderr: String,
+pub(crate) struct Ran {
+    pub(crate) record: CommandRecord,
+    pub(crate) log: Vec<u8>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+}
+
+/// Where and how a user's command runs: the gate's tests, and the app's
+/// test runs (0.12.0). Never the live project: `cwd` is a scratch export.
+pub(crate) struct CommandEnv<'a> {
+    pub(crate) path_var: &'a str,
+    pub(crate) read_only: &'a [PathBuf],
+    /// An empty, read-only `HOME` (never the candidate's tree).
+    pub(crate) home: Option<&'a Path>,
+    pub(crate) timeout: Duration,
+}
+
+/// Write snapshot `snap` of a shared store into the empty directory `dir`.
+pub(crate) fn export_shared(store: &SharedStore, snap: &Id, dir: &Path) -> Result<(), String> {
+    let st = lock_store(store);
+    export(&st, snap, dir)
+}
+
+/// Create a scratch directory (see [`scratch_base`]) and, for a backend
+/// running as root, hand `trees` to the unprivileged uid commands run as.
+pub(crate) fn prepare_scratch(dir: &Path) -> Result<(), String> {
+    create_scratch_dir(dir, anchor_exec::running_as_root())
+}
+
+#[cfg(unix)]
+pub(crate) fn hand_over(trees: &[&Path]) -> Result<(), String> {
+    if anchor_exec::running_as_root() {
+        for d in trees {
+            chown_tree(d, anchor_exec::NOBODY_UID).map_err(|e| format!("{}: {e}", d.display()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn hand_over(_trees: &[&Path]) -> Result<(), String> {
+    Ok(())
+}
+
+/// Run one command sandboxed: no network, writes only under `rw`, the
+/// environment exactly this, and the time limit enforced.
+pub(crate) fn run_command(
+    name: &str,
+    argv: &[String],
+    cwd: &Path,
+    rw: &[PathBuf],
+    env: &CommandEnv<'_>,
+) -> Ran {
+    let mut record = CommandRecord {
+        name: name.into(),
+        argv: argv.to_vec(),
+        ok: false,
+        exit: None,
+        timed_out: false,
+        elapsed_ms: 0,
+        user_cpu_ms: None,
+        max_rss_bytes: None,
+        output_tail: String::new(),
+        artifact: String::new(),
+    };
+    let Some(first) = argv.first() else {
+        record.output_tail = "no command".into();
+        let log = record.output_tail.clone().into_bytes();
+        return Ran {
+            record,
+            log,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+    };
+    let program = match anchor_exec::resolve_program(first, env.path_var) {
+        Ok(p) => p,
+        Err(e) => {
+            record.output_tail = format!("cannot run {first:?}: {e}");
+            let log = record.output_tail.clone().into_bytes();
+            return Ran {
+                record,
+                log,
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+        }
+    };
+    let home = env
+        .home
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("/nonexistent"));
+    let mut read_only = env.read_only.to_vec();
+    if env.home.is_some() {
+        read_only.push(home.clone());
+    }
+    let spec = anchor_exec::CommandSpec {
+        program,
+        args: argv[1..].to_vec(),
+        cwd: cwd.to_path_buf(),
+        // The environment is exactly this (anchor-exec clears the
+        // rest, so PYTHONPATH and PYTHONSTARTUP are unset); no user
+        // site directory is consulted.
+        env: vec![
+            ("PATH".into(), env.path_var.to_string()),
+            (
+                "HOME".into(),
+                anchor_exec::native_path(&home).display().to_string(),
+            ),
+            ("LANG".into(), "C.UTF-8".into()),
+            ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
+            ("PYTHONHASHSEED".into(), "0".into()),
+            ("PYTHONNOUSERSITE".into(), "1".into()),
+        ],
+        limits: anchor_exec::Limits {
+            cpu_seconds: env.timeout.as_secs(),
+            wall_timeout: env.timeout,
+            ..anchor_exec::Limits::default()
+        },
+        network: anchor_exec::Network::Deny,
+        fs: Some(anchor_exec::FsConfinement {
+            read_write: rw.to_vec(),
+            read_only,
+        }),
+        stdin: Vec::new(),
+    };
+    let result = anchor_exec::run(&spec);
+    // The read/write roots are throwaway: on Windows the command's
+    // AppContainer profile (and the writable folder Windows gives it)
+    // goes with them, so nothing piles up and nothing a candidate left
+    // there reaches the next check (round 2 W-5, W-13).
+    let released = match spec
+        .fs
+        .as_ref()
+        .map(|fs| anchor_exec::release(fs, &spec.cwd))
+    {
+        Some(Err(e)) => format!("\n[sandbox profile not released: {e}]"),
+        _ => String::new(),
+    };
+    match result {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
+            record.exit = match o.exit {
+                anchor_exec::ExitKind::Exited(c) => Some(c),
+                _ => None,
+            };
+            record.timed_out = o.exit == anchor_exec::ExitKind::TimedOut;
+            record.ok = record.exit == Some(0);
+            record.elapsed_ms = o.elapsed.as_millis() as u64;
+            record.user_cpu_ms = o.rusage.as_ref().map(|r| r.user_cpu.as_millis() as u64);
+            record.max_rss_bytes = o.rusage.as_ref().map(|r| r.max_rss_bytes);
+            let both = format!("{stdout}{stderr}");
+            record.output_tail = tail(&both, OUTPUT_TAIL_BYTES);
+            let log = format!(
+                "$ {argv:?}\nexit: {:?}\nisolation: network {:?}, fs_confined {}, \
+                 dropped_root {}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}{}{released}",
+                o.exit,
+                o.isolation.network,
+                o.isolation.fs_confined,
+                o.isolation.dropped_root,
+                if o.truncated {
+                    "\n[output truncated]"
+                } else {
+                    ""
+                }
+            )
+            .into_bytes();
+            Ran {
+                record,
+                log,
+                stdout,
+                stderr,
+            }
+        }
+        Err(e) => {
+            // No sandbox, no run: the command fails, so the merge does.
+            record.output_tail = format!("refused to run: {e}");
+            let log = record.output_tail.clone().into_bytes();
+            Ran {
+                record,
+                log,
+                stdout: String::new(),
+                stderr: String::new(),
+            }
+        }
+    }
 }
 
 /// The reviewer the gate uses.
@@ -462,130 +644,18 @@ impl VerifyGate {
     }
 
     fn run(&self, name: &str, argv: &[String], cwd: &Path, rw: &[PathBuf]) -> Ran {
-        let mut record = CommandRecord {
-            name: name.into(),
-            argv: argv.to_vec(),
-            ok: false,
-            exit: None,
-            timed_out: false,
-            elapsed_ms: 0,
-            user_cpu_ms: None,
-            max_rss_bytes: None,
-            output_tail: String::new(),
-            artifact: String::new(),
-        };
-        let program = match anchor_exec::resolve_program(&argv[0], &self.path_var) {
-            Ok(p) => p,
-            Err(e) => {
-                record.output_tail = format!("cannot run {:?}: {e}", argv[0]);
-                let log = record.output_tail.clone().into_bytes();
-                return Ran {
-                    record,
-                    log,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                };
-            }
-        };
-        let home = self
-            .home
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("/nonexistent"));
-        let mut read_only = self.read_only.clone();
-        if self.home.is_some() {
-            read_only.push(home.clone());
-        }
-        let spec = anchor_exec::CommandSpec {
-            program,
-            args: argv[1..].to_vec(),
-            cwd: cwd.to_path_buf(),
-            // The environment is exactly this (anchor-exec clears the
-            // rest, so PYTHONPATH and PYTHONSTARTUP are unset); no user
-            // site directory is consulted.
-            env: vec![
-                ("PATH".into(), self.path_var.clone()),
-                (
-                    "HOME".into(),
-                    anchor_exec::native_path(&home).display().to_string(),
-                ),
-                ("LANG".into(), "C.UTF-8".into()),
-                ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
-                ("PYTHONHASHSEED".into(), "0".into()),
-                ("PYTHONNOUSERSITE".into(), "1".into()),
-            ],
-            limits: anchor_exec::Limits {
-                cpu_seconds: self.spec.timeout.as_secs(),
-                wall_timeout: self.spec.timeout,
-                ..anchor_exec::Limits::default()
+        run_command(
+            name,
+            argv,
+            cwd,
+            rw,
+            &CommandEnv {
+                path_var: &self.path_var,
+                read_only: &self.read_only,
+                home: self.home.as_deref(),
+                timeout: self.spec.timeout,
             },
-            network: anchor_exec::Network::Deny,
-            fs: Some(anchor_exec::FsConfinement {
-                read_write: rw.to_vec(),
-                read_only,
-            }),
-            stdin: Vec::new(),
-        };
-        let result = anchor_exec::run(&spec);
-        // The read/write roots are throwaway: on Windows the command's
-        // AppContainer profile (and the writable folder Windows gives it)
-        // goes with them, so nothing piles up and nothing a candidate left
-        // there reaches the next check (round 2 W-5, W-13).
-        let released = match spec
-            .fs
-            .as_ref()
-            .map(|fs| anchor_exec::release(fs, &spec.cwd))
-        {
-            Some(Err(e)) => format!("\n[sandbox profile not released: {e}]"),
-            _ => String::new(),
-        };
-        match result {
-            Ok(o) => {
-                let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
-                record.exit = match o.exit {
-                    anchor_exec::ExitKind::Exited(c) => Some(c),
-                    _ => None,
-                };
-                record.timed_out = o.exit == anchor_exec::ExitKind::TimedOut;
-                record.ok = record.exit == Some(0);
-                record.elapsed_ms = o.elapsed.as_millis() as u64;
-                record.user_cpu_ms = o.rusage.as_ref().map(|r| r.user_cpu.as_millis() as u64);
-                record.max_rss_bytes = o.rusage.as_ref().map(|r| r.max_rss_bytes);
-                let both = format!("{stdout}{stderr}");
-                record.output_tail = tail(&both, OUTPUT_TAIL_BYTES);
-                let log = format!(
-                    "$ {argv:?}\nexit: {:?}\nisolation: network {:?}, fs_confined {}, \
-                     dropped_root {}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}{}{released}",
-                    o.exit,
-                    o.isolation.network,
-                    o.isolation.fs_confined,
-                    o.isolation.dropped_root,
-                    if o.truncated {
-                        "\n[output truncated]"
-                    } else {
-                        ""
-                    }
-                )
-                .into_bytes();
-                Ran {
-                    record,
-                    log,
-                    stdout,
-                    stderr,
-                }
-            }
-            Err(e) => {
-                // No sandbox, no run: the command fails, so the merge does.
-                record.output_tail = format!("refused to run: {e}");
-                let log = record.output_tail.clone().into_bytes();
-                Ran {
-                    record,
-                    log,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                }
-            }
-        }
+        )
     }
 
     /// Store one evidence file; returns its reference.
@@ -1166,6 +1236,7 @@ impl ModelReviewer {
                 mock_script,
                 hub: None,
                 review: None,
+                continue_with: None,
                 extra_env: Default::default(),
             },
             view,

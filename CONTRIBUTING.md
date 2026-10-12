@@ -209,6 +209,20 @@ cp target/release/anchor-agent desktop/binaries/anchor-agent-$T
 cd desktop && cargo test && cargo tauri build
 ```
 
+**Releases.** CI's `release` job publishes a GitHub Release when every
+job is green on a push to the download branch and the version in
+`desktop/tauri.conf.json` has no `v<version>` tag yet. To release, bump the
+version in `desktop/Cargo.toml` and `desktop/tauri.conf.json` (and
+`desktop/Cargo.lock`), and add its `## <version>` section to `CHANGELOG.md`
+(the release notes). The app's update check reads that release.
+
+**Releases.** CI's `release` job publishes a GitHub Release when every
+job is green on a push to the download branch and the version in
+`desktop/tauri.conf.json` has no `v<version>` tag yet. To release, bump the
+version in `desktop/Cargo.toml`, `desktop/tauri.conf.json` and
+`desktop/Cargo.lock`, and add its `## <version>` section to `CHANGELOG.md`
+(the release notes). The app's update check reads that release.
+
 On Windows, add `.exe` to the four binary names. `desktop/deny.toml` holds
 the shell's dependency policy: the main one plus named exceptions, each
 recorded in `docs/deps/dependency-records.md`.

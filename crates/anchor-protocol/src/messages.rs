@@ -472,6 +472,11 @@ pub struct Task {
     /// role, gets no workspace tools, and must answer with verdicts.
     #[serde(default)]
     pub review: Option<Box<ReviewInput>>,
+    /// With `resume_from`: the user's follow-up message, added to the
+    /// resumed conversation as their next turn (instead of the plain
+    /// "continue" note). Optional, so older peers are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_with: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -531,6 +536,14 @@ impl Validate for Task {
         }
         if let Some(c) = &self.resume_from {
             c.validate()?;
+        }
+        if let Some(t) = &self.continue_with {
+            if self.resume_from.is_none() {
+                return Err("continue_with needs resume_from".into());
+            }
+            if t.trim().is_empty() || t.len() > MAX_CONTENT_BYTES / 4 {
+                return Err("continue_with empty or too large".into());
+            }
         }
         if let Some(h) = &self.hub {
             h.validate()?;

@@ -251,6 +251,25 @@ gets no tools.
 | Stop leaves a builder or the checker running | Cancel tracks every runtime it started; the pair loop and the team runner use cancellable sessions | `stop_ends_a_pair_task`, `stop_refuses_the_pending_approval_and_ends_the_task` | ⏳ CI |
 | A local model (Ollama) cannot be reached on Windows (os error 10106) | The unconfined runtime (loopback, AR-7) gets the OS variables Winsock needs (`SystemRoot`, …): paths, not secrets, as the AppContainer path already passed | `a_loopback_model_server_runs_a_task` (Windows CI runs the unconfined path) | ⏳ CI |
 
+## Models, updates, tests and follow-ups in the app (ADR-0040)
+
+New behaviour:
+
+- the app downloads models through Ollama;
+- it asks GitHub whether a newer version is out;
+- it opens two allow-listed pages in the browser;
+- it runs the project's own tests;
+- a reply resumes the builder's conversation.
+
+| Threat / requirement | Mitigation | Test | Status |
+|---|---|---|---|
+| A page or a model makes the app pull an arbitrary model | Only names the registry lists for Ollama are accepted (400 otherwise); the pull goes to the loopback port with no proxy | `only_registry_models_for_ollama_are_allowed`, `models_download_from_the_app` | ⏳ CI |
+| The update check leaks who the user is or what they work on | One `GET releases/latest`, no identifiers, at most every 6 h, opt-out in Settings; the browser-served app (no version) never asks | `the_app_offers_a_newer_release`, `versions_compare_and_only_newer_releases_are_offered` | ⏳ CI |
+| A malicious release record, or a page, opens an arbitrary URL or runs a command | `open_url` accepts only the Releases page and Ollama's download page, plain characters only (no `%`, `..`, quotes, spaces), one argument, no shell; a release's link must pass the same check to be offered; nothing is installed automatically (unsigned installers) | `only_allowed_pages_open` | ⏳ CI |
+| Test commands change the user's files, reach the network or read secrets | Only a command the user confirmed runs; it runs sandboxed (no network, exact environment, empty read-only `HOME`) on a scratch export of a snapshot that is deleted afterwards | `tests_never_run_in_the_live_project`, `the_checker_sees_the_tests_fail_and_the_builder_fixes_them` | ⏳ CI |
+| A builder games approval while the tests fail | Approval needs the reviewer's support **and** tests that pass or fail no worse than at the start; failing output goes back to the builder | `the_checker_sees_the_tests_fail_and_the_builder_fixes_them`, `tests_hold_when_they_pass_or_fail_no_worse_than_before` | ⏳ CI |
+| A follow-up leaks keys into `app.json` or runs on another family | The last task is saved as text, result and session id only; the plan with its keys stays in memory; a follow-up reuses the same checked models or is routed again under the family rule | `a_follow_up_continues_the_same_task`, `a_follow_up_message_continues_the_resumed_conversation` | ⏳ CI |
+
 ## Phase 2 "verified by instrumentation"
 
 - *No filesystem mutation bypasses the permission engine*: mutations

@@ -646,6 +646,14 @@ pub fn cmd_app(a: &Args) -> Result<ExitCode, String> {
         policy: a.get("--policy").map(PathBuf::from),
         roles_explicit: a.get("--roles").is_some(),
         inference,
+        // Set by the desktop shell; the browser-served app has none.
+        app_version: std::env::var("ANCHOR_APP_VERSION")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        update_url: std::env::var("ANCHOR_UPDATE_URL")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| anchor_backend::ui::app::UPDATE_URL.into()),
     });
     let ui =
         anchor_backend::ui::start_app(app.clone(), ui_port(a)?).map_err(|e| format!("app: {e}"))?;

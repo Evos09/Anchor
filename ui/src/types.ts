@@ -277,8 +277,11 @@ export interface AppState {
     free_offered: boolean;
     collab?: Collab;
     pair_rounds?: number;
+    check_updates?: boolean;
   };
   mock: boolean;
+  /** The desktop app's version; null when served to a browser. */
+  version?: string | null;
   platform: string;
   home: string | null;
 }
@@ -312,6 +315,7 @@ export interface InferenceStatus {
       license: { id: string; commercial: boolean; gated: boolean; notes: string } | null;
     }[];
     needs_family: { model: string; hint: string; size: string }[];
+    recommended: { model: string; label: string; family: string; role: string; size: number; license: string }[];
   };
   byok: {
     id: string;
@@ -370,4 +374,22 @@ export interface DirListing {
   names?: string[];
   truncated?: boolean;
   home: string | null;
+}
+
+/** A model download through Ollama (`GET /api/app/pulls`). */
+export interface PullState {
+  model: string;
+  status: string;
+  total: number;
+  completed: number;
+  error: string | null;
+  done: boolean;
+}
+
+/** The open project's test command (`GET /api/app/tests`). */
+export interface TestsInfo {
+  setup: { argv: string[]; timeout_secs: number } | null;
+  suggested: string[] | null;
+  why: string;
+  declined: boolean;
 }

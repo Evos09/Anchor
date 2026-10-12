@@ -25,6 +25,8 @@ use anchor_verify::Reviewer;
 
 use crate::verify::ModelReviewer;
 
+use super::project_tests::{self, MAX_FEEDBACK_OUTPUT, TestRun, TestSetup};
+
 /// Most review rounds a task may ask for.
 pub const MAX_ROUNDS: u32 = 5;
 /// Most diff text quoted back to the builder.
@@ -46,6 +48,10 @@ pub struct PairSpec {
     pub review_mock_scripts: Vec<String>,
     /// Scripted builder models for rounds 2, 3, … (the last repeats).
     pub repair_mock_scripts: Vec<String>,
+    /// The project's test command, when the user set one (0.12.0).
+    pub tests: Option<TestSetup>,
+    /// Where test runs export the project (see `verify::scratch_base`).
+    pub scratch: PathBuf,
 }
 
 fn pick(scripts: &[String], i: usize) -> Option<String> {
@@ -121,12 +127,16 @@ pub fn feedback(
     reviewer_family: &str,
     input: &ReviewInput,
     verdicts: &[ClaimVerdict],
+    failing_tests: Option<&TestRun>,
 ) -> String {
-    let mut out = format!(
-        "{task}\n\nThe reviewer ({reviewer_family}) checked your change and does not accept it yet:\n"
-    );
+    let mut out = format!("{task}\n");
+    if !approved(input, verdicts) {
+        out.push_str(&format!(
+            "\nThe reviewer ({reviewer_family}) checked your change and does not accept it yet:\n"
+        ));
+    }
     let mut cited: Vec<String> = Vec::new();
-    for c in &input.claims {
+    for c in input.claims.iter().filter(|_| !approved(input, verdicts)) {
         let v = verdicts.iter().find(|v| v.claim_id == c.id);
         match v {
             Some(v) if v.verdict == Verdict::Supported => continue,
@@ -172,12 +182,110 @@ pub fn feedback(
         }
         out.push('\n');
     }
+    if let Some(t) = failing_tests {
+        out.push_str(&format!(
+            "\nThe project's tests fail after your change ({}). The end of their output:\n",
+            t.summary
+        ));
+        let tail = t.output_tail.trim();
+        let mut start = tail.len().saturating_sub(MAX_FEEDBACK_OUTPUT);
+        while !tail.is_char_boundary(start) {
+            start += 1;
+        }
+        out.push_str(&tail[start..]);
+        out.push('\n');
+    }
     out.push_str("\nFix these, then finish again.");
     out
 }
 
+/// The tests once after a one-AI or two-builder task, for information.
+pub fn tests_after(mediator: &Mediator, setup: &TestSetup, scratch: &std::path::Path) {
+    match mediator.snapshot_now("tests after the task") {
+        Ok(now) => {
+            logged_run(
+                mediator,
+                setup,
+                scratch,
+                &now,
+                json!({ "round": 1, "info": true }),
+                None,
+            );
+        }
+        Err(e) => log(
+            mediator,
+            "pair_error",
+            json!({ "detail": format!("cannot snapshot the project: {e}") }),
+        ),
+    }
+}
+
+/// Run the project's tests on snapshot `snap` (a scratch export), and log
+/// the result; `None` when no command is set or the run could not start.
+fn test_run(
+    mediator: &Mediator,
+    spec: &PairSpec,
+    snap: &anchor_snapshot::Id,
+    data: serde_json::Value,
+    before: Option<&TestRun>,
+) -> Option<TestRun> {
+    let setup = spec.tests.as_ref()?;
+    logged_run(mediator, setup, &spec.scratch, snap, data, before)
+}
+
+fn logged_run(
+    mediator: &Mediator,
+    setup: &TestSetup,
+    scratch: &std::path::Path,
+    snap: &anchor_snapshot::Id,
+    data: serde_json::Value,
+    before: Option<&TestRun>,
+) -> Option<TestRun> {
+    match project_tests::run_on(mediator, snap, setup, scratch) {
+        Ok(t) => {
+            let mut d = data;
+            d["ok"] = json!(t.ok);
+            d["holds"] = json!(project_tests::holds(before, &t));
+            d["summary"] = json!(t.summary);
+            d["exit"] = json!(t.exit);
+            d["passed"] = json!(t.passed);
+            d["failed"] = json!(t.failed);
+            d["command"] = json!(setup.argv.join(" "));
+            d["output"] = json!(cut_tail(&t.output_tail, MAX_FEEDBACK_OUTPUT));
+            d["baseline_ok"] = json!(before.map(|b| b.ok));
+            log(mediator, "pair_tests", d);
+            Some(t)
+        }
+        Err(e) => {
+            log(
+                mediator,
+                "pair_error",
+                json!({ "detail": format!("the tests could not run: {e}") }),
+            );
+            None
+        }
+    }
+}
+
+/// The last `max` bytes of `s`, on a character boundary.
+fn cut_tail(s: &str, max: usize) -> String {
+    let mut start = s.len().saturating_sub(max);
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_string()
+}
+
 fn log(m: &Mediator, kind: &str, data: serde_json::Value) {
     let _ = m.log(kind, data);
+}
+
+/// How a task ended, for a follow-up message: the builder's last session
+/// (whose checkpoint the follow-up resumes) and its answer.
+#[derive(Debug, Clone, Default)]
+pub struct Outcome {
+    pub session_id: String,
+    pub done: Option<String>,
 }
 
 /// Run a task as builder + checker. Session errors end the task (and are
@@ -188,9 +296,22 @@ pub fn run(
     checkpoints: &CheckpointStore,
     cancel: &Arc<Cancel>,
     spec: &PairSpec,
-) -> Result<(), session::SessionError> {
+) -> Result<Outcome, session::SessionError> {
+    let mut out = Outcome {
+        session_id: cfg.session_id.clone(),
+        done: None,
+    };
     if spec.rounds == 0 {
-        return session::run_cancellable(cfg, mediator, checkpoints, Some(cancel)).map(drop);
+        let rep = session::run_cancellable(cfg, mediator, checkpoints, Some(cancel))?;
+        out.done = rep.done.clone();
+        // One AI: the tests run once afterwards, for the user's information.
+        if let Some(setup) = &spec.tests
+            && rep.failed.is_none()
+            && !cancel.is_cancelled()
+        {
+            tests_after(mediator, setup, &spec.scratch);
+        }
+        return Ok(out);
     }
     let start = match mediator.snapshot_ref(NS, LEAF, "before the task (builder + checker)") {
         Ok(id) => id,
@@ -200,12 +321,14 @@ pub fn run(
                 "pair_error",
                 json!({ "detail": format!("cannot snapshot the project: {e}") }),
             );
-            return session::run_cancellable(cfg, mediator, checkpoints, Some(cancel)).map(drop);
+            let rep = session::run_cancellable(cfg, mediator, checkpoints, Some(cancel))?;
+            out.done = rep.done;
+            return Ok(out);
         }
     };
-    let out = rounds(cfg, mediator, checkpoints, cancel, spec, &start);
+    let r = rounds(cfg, mediator, checkpoints, cancel, spec, &start, &mut out);
     mediator.drop_ref(NS, LEAF);
-    out
+    r.map(|()| out)
 }
 
 fn rounds(
@@ -215,6 +338,7 @@ fn rounds(
     cancel: &Arc<Cancel>,
     spec: &PairSpec,
     start: &anchor_snapshot::Id,
+    out: &mut Outcome,
 ) -> Result<(), session::SessionError> {
     let rounds = spec.rounds.min(MAX_ROUNDS);
     let identity = crate::team::roles_view(&cfg.roles_toml)
@@ -227,11 +351,24 @@ fn rounds(
         .to_string();
     let mut reviewer: Option<ModelReviewer> = None;
     let mut instruction = cfg.instruction.clone();
+    // The tests as they stood before the task: a project whose tests
+    // already fail is not blocked on that, only on failing worse.
+    let baseline = test_run(
+        mediator,
+        spec,
+        start,
+        json!({ "round": 0, "baseline": true }),
+        None,
+    );
     for round in 1..=rounds {
         let mut c = cfg.clone();
         c.instruction = instruction.clone();
         if round > 1 {
             c.session_id = format!("{}-r{round}", cfg.session_id);
+            // A fresh session with the review's notes (a follow-up's
+            // resumed conversation was round 1's).
+            c.resume_from = None;
+            c.continue_with = None;
             if !spec.repair_mock_scripts.is_empty() {
                 c.mock_script = pick(&spec.repair_mock_scripts, round as usize - 2);
             }
@@ -242,7 +379,11 @@ fn rounds(
             );
         }
         let rep = match session::run_cancellable(&c, mediator, checkpoints, Some(cancel)) {
-            Ok(r) => r,
+            Ok(r) => {
+                out.session_id = c.session_id.clone();
+                out.done = r.done.clone();
+                r
+            }
             Err(e) if round == 1 => return Err(e),
             Err(e) => {
                 log(
@@ -275,7 +416,35 @@ fn rounds(
             );
             return Ok(());
         }
-        let input = review_input(&rep, changes);
+        let mut input = review_input(&rep, changes);
+        let tests = match spec.tests.is_some() {
+            true => match mediator.snapshot_now("tests after the change") {
+                Ok(now) => test_run(
+                    mediator,
+                    spec,
+                    &now,
+                    json!({ "round": round }),
+                    baseline.as_ref(),
+                ),
+                Err(e) => {
+                    log(
+                        mediator,
+                        "pair_error",
+                        json!({ "round": round, "detail": format!("cannot snapshot the project: {e}") }),
+                    );
+                    None
+                }
+            },
+            false => None,
+        };
+        if let Some(t) = &tests {
+            input.commands.push(t.record.clone());
+            input.tests = t.tests.clone();
+            crate::verify::fit(&mut input);
+        }
+        let tests_hold = tests
+            .as_ref()
+            .is_none_or(|t| project_tests::holds(baseline.as_ref(), t));
         if let Err(e) = input.validate() {
             log(
                 mediator,
@@ -316,7 +485,8 @@ fn rounds(
                 return Ok(());
             }
         };
-        let ok = approved(&input, &verdicts);
+        let reviewer_ok = approved(&input, &verdicts);
+        let ok = reviewer_ok && tests_hold;
         let claims: Vec<_> = input
             .claims
             .iter()
@@ -332,13 +502,16 @@ fn rounds(
                 "claims": claims,
                 "verdicts": verdicts,
                 "approved": ok,
+                "reviewer_ok": reviewer_ok,
+                "tests_ok": tests.as_ref().map(|_| tests_hold),
                 "final": ok || round == rounds,
             }),
         );
         if ok || cancel.is_cancelled() {
             return Ok(());
         }
-        instruction = feedback(&cfg.instruction, &family, &input, &verdicts);
+        let failing = tests.as_ref().filter(|_| !tests_hold);
+        instruction = feedback(&cfg.instruction, &family, &input, &verdicts, failing);
     }
     Ok(())
 }
@@ -457,7 +630,7 @@ mod tests {
             "a.py prints the wrong name",
             &["diff:a.py"],
         )];
-        let f = feedback("Make it greet Bob.", "llama", &input, &v);
+        let f = feedback("Make it greet Bob.", "llama", &input, &v, None);
         assert!(f.starts_with("Make it greet Bob."));
         assert!(f.contains("The reviewer (llama) checked your change"));
         assert!(f.contains("refuted (checked): a.py prints the wrong name"));

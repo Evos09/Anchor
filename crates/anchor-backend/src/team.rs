@@ -616,6 +616,7 @@ pub fn run(
             mock_script,
             hub: Some(hub_info(i)),
             review: None,
+            continue_with: None,
             extra_env: a.extra_env.clone(),
         };
         Ok::<_, String>(Prepared {

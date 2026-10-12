@@ -277,6 +277,7 @@ fn review_tasks_are_isolated() {
         mock_script: None,
         hub: None,
         review: Some(Box::new(review)),
+        continue_with: None,
     };
     roundtrip(Message::Task(Box::new(task.clone())));
     // A reviewer is never also a Hub agent.
