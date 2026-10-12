@@ -1646,14 +1646,3 @@ button {
   flex: 1;
   min-width: 200px;
 }
-.wide-input {
-  flex: 1;
-  min-width: 200px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--line);
-  background: var(--bg);
-  color: inherit;
-  font-family: var(--mono, monospace);
-  font-size: 13px;
-}

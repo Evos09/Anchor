@@ -661,8 +661,12 @@ function Picker({ app, onClose, onOpened }: { app: AppState; onClose: () => void
   // Only the latest browse is shown: a slow earlier reply (the first listing,
   // say) must not replace the folder the user has since gone to.
   const latest = useRef(0);
+  // While a folder is loading, "Open this folder" would open the previous
+  // one: it waits.
+  const [loading, setLoading] = useState(false);
   const browse = useCallback(async (path?: string) => {
     const n = ++latest.current;
+    setLoading(true);
     try {
       const l = await get<DirListing>(`/api/app/dirs${q({ path })}`);
       if (n !== latest.current) return;
@@ -671,6 +675,8 @@ function Picker({ app, onClose, onOpened }: { app: AppState; onClose: () => void
       setError(null);
     } catch (e) {
       if (n === latest.current) setError(String(e));
+    } finally {
+      if (n === latest.current) setLoading(false);
     }
   }, []);
   // Where the dialog starts, read once when it opens.
@@ -724,7 +730,12 @@ function Picker({ app, onClose, onOpened }: { app: AppState; onClose: () => void
             </button>
           )}
           {listing?.path && (
-            <button className="btn btn-primary" onClick={() => open(listing.path!)} data-testid="open-here">
+            <button
+              className="btn btn-primary"
+              disabled={loading}
+              onClick={() => open(listing.path!)}
+              data-testid="open-here"
+            >
               Open this folder
             </button>
           )}

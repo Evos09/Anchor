@@ -108,6 +108,8 @@ test("open a folder, run a task, approve, undo", async ({ page }) => {
   await page.waitForTimeout(300); // let the page apply the late reply
   await expect(picker.getByLabel("Folder path")).toHaveValue(dir);
   await picker.getByRole("button", { name: /my-project/ }).click();
+  // The click loads that folder; open it only once it is shown.
+  await expect(picker.getByLabel("Folder path")).toHaveValue(/my-project$/);
   await picker.getByTestId("open-here").click();
   await expect(page.getByTestId("project")).toContainText("my-project");
   await expect(page.getByRole("heading", { name: "What should Anchor do in my-project?" })).toBeVisible();
