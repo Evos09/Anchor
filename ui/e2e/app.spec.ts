@@ -372,6 +372,7 @@ test("reply to a task, see an update, get Ollama", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Get Ollama" })).toBeVisible();
   await page.getByRole("button", { name: "Projects", exact: true }).click();
   await expect(page.getByLabel("Test command")).toBeVisible();
+  await expect(page.getByText(/No tests found/)).toBeVisible(); // loaded
   await page.getByLabel("Test command").fill("python3 -m unittest");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText("Saved.")).toBeVisible();

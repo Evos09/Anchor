@@ -783,11 +783,13 @@ function TestCommand({ project }: { project: string }) {
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  // What the user typed is never replaced by a late answer.
+  const typed = useRef(false);
   const load = () =>
     get<TestsInfo>("/api/app/tests").then(
       (v) => {
         setT(v);
-        setText(joinArgs(v.setup?.argv ?? v.suggested ?? []));
+        if (!typed.current) setText(joinArgs(v.setup?.argv ?? v.suggested ?? []));
       },
       (e) => setError(String(e)),
     );
@@ -796,7 +798,7 @@ function TestCommand({ project }: { project: string }) {
   }, [project]);
   const save = (argv: string[] | null) =>
     post("/api/app/tests", { argv }).then(
-      () => (setError(null), setNote(argv ? "Saved." : "Turned off."), load()),
+      () => ((typed.current = false), setError(null), setNote(argv ? "Saved." : "Turned off."), load()),
       (e) => (setError(String(e)), setNote(null)),
     );
   return (
@@ -807,7 +809,7 @@ function TestCommand({ project }: { project: string }) {
           <>
             Runs after each change on a copy of the project, without network, so the checker sees whether your tests
             pass. A change that makes them fail goes back to the builder.{" "}
-            {t && !t.setup && (t.suggested ? `Suggested for ${t.why}.` : `Anchor found ${t.why}.`)}
+            {t && !t.setup && (t.suggested ? `Suggested for ${t.why}.` : `${t.why.charAt(0).toUpperCase()}${t.why.slice(1)}.`)}
           </>
         }
       >
@@ -819,7 +821,10 @@ function TestCommand({ project }: { project: string }) {
           aria-label="Test command"
           placeholder="e.g. npm test"
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            typed.current = true;
+            setText(e.target.value);
+          }}
         />
         <button className="btn btn-small btn-primary" disabled={!splitArgs(text).length} onClick={() => save(splitArgs(text))}>
           Save
