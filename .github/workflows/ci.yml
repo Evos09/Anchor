@@ -303,10 +303,17 @@ jobs:
         run: |
           v=$(python3 -c 'import json;print(json.load(open("desktop/tauri.conf.json"))["version"])')
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          if gh release view "v$v" >/dev/null 2>&1; then
+          # A published release with installers is done. A draft or an empty
+          # one (a publish that failed halfway) is removed and made again.
+          info=$(gh release view "v$v" --json isDraft,assets -q '"\(.isDraft) \(.assets | length)"' 2>/dev/null || true)
+          if [ "${info%% *}" = false ] && [ "${info##* }" -gt 0 ]; then
             echo "Release v$v already exists; nothing to publish." | tee -a "$GITHUB_STEP_SUMMARY"
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
+            if [ -n "$info" ]; then
+              echo "Removing the incomplete release v$v ($info)."
+              gh release delete "v$v" --yes --cleanup-tag || gh release delete "v$v" --yes
+            fi
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
         env:
@@ -334,10 +341,13 @@ jobs:
           **Which file?** Windows: the `.msi` (or `-setup.exe`). macOS: the `.dmg`. Linux: the `.deb` or `.rpm`.
           The installers are not code-signed yet, so Windows and macOS may warn the first time; see the README.
           NOTES
-          ls -l installers
+          # Each platform's artifact keeps the bundler's folders (msi/, dmg/, ...).
+          mapfile -t files < <(find installers -type f | sort)
+          printf '%s\n' "${files[@]}"
+          test "${#files[@]}" -gt 0
           gh release create "v$VERSION" --target "$GITHUB_SHA" \
             --title "Anchor $VERSION" --notes-file notes.md \
-            installers/*
+            "${files[@]}"
           echo "Published https://github.com/${{ github.repository }}/releases/tag/v$VERSION" >> "$GITHUB_STEP_SUMMARY"
 
   quickstart:
