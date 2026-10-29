@@ -18,12 +18,28 @@ use anchor_policy::AuditLog;
 use anchor_protocol::ResumeChoice;
 
 fn resolve_workspace() -> Result<PathBuf, String> {
-    if let Some(arg) = std::env::args().nth(1) {
-        let p = PathBuf::from(arg);
-        if p.exists() {
-            return Ok(p);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--workspace" {
+            if let Some(val) = args.get(i + 1) {
+                let p = PathBuf::from(val);
+                if p.exists() {
+                    return Ok(p);
+                }
+            }
+            i += 2;
+            continue;
         }
+        if !args[i].starts_with('-') {
+            let p = PathBuf::from(&args[i]);
+            if p.exists() {
+                return Ok(p);
+            }
+        }
+        i += 1;
     }
+
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))
@@ -48,7 +64,7 @@ fn resolve_workspace() -> Result<PathBuf, String> {
     Ok(local_ws)
 }
 
-fn launch_native_window(url: &str) -> Option<std::process::Child> {
+fn launch_native_window(url: &str) {
     #[cfg(target_os = "windows")]
     {
         let candidates = [
@@ -57,30 +73,29 @@ fn launch_native_window(url: &str) -> Option<std::process::Child> {
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         ];
-        let profile_dir = std::env::temp_dir().join("anchor-desktop-app-profile");
+        let profile_dir = std::env::temp_dir().join("anchor-desktop-gui-profile");
         let _ = std::fs::create_dir_all(&profile_dir);
         for bin in candidates {
             if Path::new(bin).exists()
-                && let Ok(child) = std::process::Command::new(bin)
+                && std::process::Command::new(bin)
                     .arg(format!("--app={url}"))
                     .arg(format!("--user-data-dir={}", profile_dir.display()))
                     .arg("--window-size=1560,940")
                     .arg("--no-first-run")
                     .arg("--no-default-browser-check")
                     .spawn()
+                    .is_ok()
             {
-                return Some(child);
+                return;
             }
         }
         let _ = std::process::Command::new("rundll32")
             .args(["url.dll,FileProtocolHandler", url])
             .spawn();
-        None
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = url;
-        None
     }
 }
 
@@ -137,16 +152,34 @@ fn run_desktop() -> Result<(), String> {
         }
     };
 
-    let server = ui::start(src, 0).map_err(|e| e.to_string())?;
+    let server = ui::start(src, 3210)
+        .or_else(|_| {
+            // Re-open sources if port 3210 is already in use and bind an ephemeral port
+            let w = anchor_fs::Workspace::open(&ws).map_err(|e| e.to_string())?;
+            let paths =
+                StatePaths::create(w.root(), &default_state_base()).map_err(|e| e.to_string())?;
+            let audit = Arc::new(AuditLog::open(&paths.audit).map_err(|e| e.to_string())?);
+            ui::start(
+                ui::Sources {
+                    workspace: w.root().to_path_buf(),
+                    audit,
+                    hub: None,
+                    store: None,
+                    store_note: None,
+                    broker: None,
+                    mode: "inspect",
+                },
+                0,
+            )
+        })
+        .map_err(|e| e.to_string())?;
+
     if let Some(m) = mediator {
         server.attach_workspace(m);
     }
     let url = server.url();
-    if let Some(mut child) = launch_native_window(&url) {
-        let _ = child.wait();
-    } else {
-        server.wait();
-    }
+    launch_native_window(&url);
+    server.wait();
     Ok(())
 }
 
