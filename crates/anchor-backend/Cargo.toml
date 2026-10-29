@@ -12,6 +12,10 @@ rust-version.workspace = true
 name = "anchor"
 path = "src/main.rs"
 
+[[bin]]
+name = "anchor-desktop"
+path = "src/bin/anchor_desktop.rs"
+
 [dependencies]
 anchor-protocol.workspace = true
 anchor-fs.workspace = true
