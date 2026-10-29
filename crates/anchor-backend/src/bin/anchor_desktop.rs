@@ -152,28 +152,12 @@ fn run_desktop() -> Result<(), String> {
         }
     };
 
-    let server = ui::start(src, 3210)
-        .or_else(|_| {
-            // Re-open sources if port 3210 is already in use and bind an ephemeral port
-            let w = anchor_fs::Workspace::open(&ws).map_err(|e| e.to_string())?;
-            let paths =
-                StatePaths::create(w.root(), &default_state_base()).map_err(|e| e.to_string())?;
-            let audit = Arc::new(AuditLog::open(&paths.audit).map_err(|e| e.to_string())?);
-            ui::start(
-                ui::Sources {
-                    workspace: w.root().to_path_buf(),
-                    audit,
-                    hub: None,
-                    store: None,
-                    store_note: None,
-                    broker: None,
-                    mode: "inspect",
-                },
-                0,
-            )
-        })
-        .map_err(|e| e.to_string())?;
-
+    let preferred_port = if std::net::TcpListener::bind(("127.0.0.1", 3210)).is_ok() {
+        3210
+    } else {
+        0
+    };
+    let server = ui::start(src, preferred_port).map_err(|e| e.to_string())?;
     if let Some(m) = mediator {
         server.attach_workspace(m);
     }
