@@ -8,6 +8,7 @@
 
 pub mod agent;
 pub mod config;
+pub mod kernel;
 pub mod prompt;
 pub mod provider;
 pub mod router;

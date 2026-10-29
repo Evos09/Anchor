@@ -464,6 +464,20 @@ pub fn run(
                         serde_json::json!({ "turn": turn }),
                     );
                 }
+                Message::Reasoning { turn, text } => {
+                    audit(
+                        mediator,
+                        "reasoning_step",
+                        serde_json::json!({
+                            "turn": turn,
+                            "text": text,
+                        }),
+                    );
+                    mediator.interact().notify(&format!(
+                        "  [reasoning turn {turn}] {}",
+                        text.lines().next().unwrap_or_default()
+                    ));
+                }
                 Message::ToolCall(call) if cfg.review.is_some() => {
                     // A reviewer has no workspace access (ADR-0009): fail
                     // closed rather than answer.

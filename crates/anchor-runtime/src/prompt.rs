@@ -95,8 +95,15 @@ pub static TOOLS_JSON: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::json!([
         f(
             "read_file",
-            "Read an entire file.",
-            s(serde_json::json!({"path": path}), &["path"])
+            "Read a file in full, or pass start_line and end_line (1-based inclusive) to read a line range.",
+            s(
+                serde_json::json!({
+                    "path": path,
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"}
+                }),
+                &["path"]
+            )
         ),
         f(
             "write_file",
@@ -108,10 +115,41 @@ pub static TOOLS_JSON: LazyLock<serde_json::Value> = LazyLock::new(|| {
         ),
         f(
             "edit_file",
-            "Edit a file: {\"op\":\"append\",\"text\":...} or {\"op\":\"replace\",\"old\":...,\"new\":...}.",
+            "Edit a file: {\"op\":\"append\",\"text\":...}, {\"op\":\"replace\",\"old\":...,\"new\":...}, or {\"op\":\"replace_all\",\"old\":...,\"new\":...}.",
             s(
                 serde_json::json!({"path": path, "edit": {"type": "object"}}),
                 &["path", "edit"]
+            )
+        ),
+        f(
+            "multi_edit",
+            "Apply multiple sequential replace operations atomically to a single file.",
+            s(
+                serde_json::json!({
+                    "path": path,
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old": {"type": "string"},
+                                "new": {"type": "string"},
+                                "replace_all": {"type": "boolean"}
+                            },
+                            "required": ["old", "new"],
+                            "additionalProperties": false
+                        }
+                    }
+                }),
+                &["path", "edits"]
+            )
+        ),
+        f(
+            "apply_patch",
+            "Apply a unified diff patch to a file inside the workspace.",
+            s(
+                serde_json::json!({"path": path, "patch": {"type": "string"}}),
+                &["path", "patch"]
             )
         ),
         f(
@@ -142,6 +180,113 @@ pub static TOOLS_JSON: LazyLock<serde_json::Value> = LazyLock::new(|| {
                 serde_json::json!({"program": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}},
                                "network": {"type": "boolean"}}),
                 &["program", "args"]
+            )
+        ),
+        f(
+            "todo_write",
+            "Update the structured task checklist (Pending, InProgress, Review, Done, Blocked).",
+            s(
+                serde_json::json!({
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "description": {"type": "string"},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "review", "done", "blocked"]}
+                            },
+                            "required": ["id", "description", "status"],
+                            "additionalProperties": false
+                        }
+                    }
+                }),
+                &["todos"]
+            )
+        ),
+        f(
+            "ask_question",
+            "Ask the user one or more multiple-choice clarification questions.",
+            s(
+                serde_json::json!({
+                    "questions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {"type": "string"},
+                                "options": {"type": "array", "items": {"type": "string"}},
+                                "multi_select": {"type": "boolean"}
+                            },
+                            "required": ["question", "options"],
+                            "additionalProperties": false
+                        }
+                    }
+                }),
+                &["questions"]
+            )
+        ),
+        f(
+            "write_artifact",
+            "Write a structured Antigravity Markdown artifact (plan, report, walkthrough, diagram).",
+            s(
+                serde_json::json!({
+                    "name": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "content": {"type": "string"},
+                    "request_feedback": {"type": "boolean"}
+                }),
+                &["name", "kind", "content"]
+            )
+        ),
+        f(
+            "invoke_subagent",
+            "Spawn a scoped subagent (research, verifier, implementer) with an isolated context window.",
+            s(
+                serde_json::json!({
+                    "agent_type": {"type": "string"},
+                    "role": {"type": "string"},
+                    "prompt": {"type": "string"},
+                    "max_turns": {"type": "integer"}
+                }),
+                &["agent_type", "role", "prompt"]
+            )
+        ),
+        f(
+            "code_mode_batch",
+            "Execute a batch of read_file, list_dir, glob, and grep operations in one round-trip (DeepSeek Harness Code Mode).",
+            s(
+                serde_json::json!({
+                    "steps": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    }
+                }),
+                &["steps"]
+            )
+        ),
+        f(
+            "web_fetch",
+            "Fetch and extract documentation from a URL (subject to network policy).",
+            s(
+                serde_json::json!({"url": {"type": "string"}}),
+                &["url"]
+            )
+        ),
+        f(
+            "web_search",
+            "Search documentation/web for a query (subject to network policy).",
+            s(
+                serde_json::json!({"query": {"type": "string"}}),
+                &["query"]
+            )
+        ),
+        f(
+            "activate_skill",
+            "Load the full SKILL.md instructions for a discovered skill by name.",
+            s(
+                serde_json::json!({"name": {"type": "string"}}),
+                &["name"]
             )
         ),
         submit_claims_tool(),

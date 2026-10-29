@@ -38,12 +38,22 @@ pub enum Tool {
     ReadFile,
     WriteFile,
     EditFile,
+    MultiEdit,
+    ApplyPatch,
     ListDir,
     Glob,
     Grep,
     RunCommand,
+    WebFetch,
+    WebSearch,
+    TodoWrite,
+    AskQuestion,
+    WriteArtifact,
+    InvokeSubagent,
+    CodeModeBatch,
+    ActivateSkill,
     /// Actions taken by the backend on the user's explicit instruction
-    /// (rollback, config overrides). Never requested by the agent.
+    /// (rollback, config overrides, workbench edits). Never requested by the agent.
     UserAction,
 }
 
@@ -216,6 +226,8 @@ pub enum UserAction {
     Merge,
     /// Undo one merge (spec §7.3).
     RevertMerge,
+    /// Direct file edit from the desktop Code Workbench.
+    WorkbenchEdit,
 }
 
 #[derive(Debug)]

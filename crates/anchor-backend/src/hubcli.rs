@@ -460,15 +460,36 @@ fn ui_port(a: &Args) -> Result<u16, String> {
         .map(|p| p.unwrap_or(0))
 }
 
-/// Print the dashboard's URL (it carries the access token), and write it
-/// to `--ui-url-file` (owner-only) for scripts.
+/// Print the dashboard's URL (it carries the access token), write it
+/// to `--ui-url-file` (owner-only) for scripts, or launch the system browser
+/// when started interactively.
 fn announce_ui(a: &Args, ui: &anchor_backend::ui::Ui) -> Result<(), String> {
-    eprintln!("anchor: dashboard at {}", ui.url());
+    let url = ui.url();
+    eprintln!("anchor: dashboard at {url}");
     if let Some(f) = a.get("--ui-url-file") {
-        write_secret_file(Path::new(f), format!("{}\n", ui.url()).as_bytes())
+        write_secret_file(Path::new(f), format!("{url}\n").as_bytes())
             .map_err(|e| format!("{f}: {e}"))?;
+    } else {
+        open_browser(&url);
     }
     Ok(())
+}
+
+fn open_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
 }
 
 /// Write `bytes` to `path` so that only the owner can ever read them: a
@@ -494,6 +515,7 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let r = o.open(&tmp).and_then(|mut file| {
         file.write_all(bytes)?;
         file.sync_all()?;
+        drop(file);
         std::fs::rename(&tmp, path)
     });
     if r.is_err() {
@@ -502,11 +524,38 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     r
 }
 
-/// `anchor ui --workspace DIR`: the dashboard for a workspace, outside a
+fn default_ui_workspace() -> Result<PathBuf, String> {
+    let example = Path::new("examples/ui/workspace");
+    if example.is_dir() {
+        return Ok(example.to_path_buf());
+    }
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let ws = exe_dir.join("workspace");
+    if !ws.exists() {
+        std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+        let _ = std::fs::write(
+            ws.join("ANCHOR.md"),
+            "---\ntrigger: always_on\n---\n# Anchor Workspace Rules\n- Follow Swiss-Industrial Precision.\n- Read files before editing.\n",
+        );
+        let _ = std::fs::write(
+            ws.join("calc.py"),
+            "def clamp(x: int, lo: int, hi: int) -> int:\n    \"\"\"Clamp x into the inclusive range [lo, hi].\"\"\"\n    return max(lo, min(hi, x))\n",
+        );
+    }
+    Ok(ws)
+}
+
+/// `anchor ui [--workspace DIR]`: the dashboard for a workspace, outside a
 /// run. If a team run holds the snapshot store, the timeline and rollback
 /// are unavailable (that run's own `--ui` dashboard has them).
 pub fn cmd_ui(a: &Args) -> Result<ExitCode, String> {
-    let ws = PathBuf::from(a.need("--workspace")?);
+    let ws = match a.get("--workspace") {
+        Some(w) => PathBuf::from(w),
+        None => default_ui_workspace()?,
+    };
     let deny = Box::new(anchor_backend::interact::Scripted::new(
         false,
         anchor_protocol::ResumeChoice::FreshSession,

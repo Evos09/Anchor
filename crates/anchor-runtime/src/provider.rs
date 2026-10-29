@@ -12,6 +12,7 @@ use crate::config::{Params, ProviderConfig, ProviderKind};
 pub struct TokenUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub cached_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +25,8 @@ pub struct InvalidCall {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatResponse {
     pub content: String,
+    /// Reasoning trace extracted from DeepSeek `reasoning_content` or `<think>` blocks.
+    pub reasoning_content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub invalid_calls: Vec<InvalidCall>,
     /// `None` if the provider did not report usage.
@@ -65,13 +68,22 @@ pub fn parse_tool_call(
         name: name.to_string(),
         error,
     };
-    let request: ToolRequest = if anchor_protocol::valid_hub_tool(name) {
+    let effective_name = if name == "read_file"
+        && arguments
+            .as_object()
+            .is_some_and(|o| o.contains_key("start_line") || o.contains_key("end_line"))
+    {
+        "read_file_range"
+    } else {
+        name
+    };
+    let request: ToolRequest = if anchor_protocol::valid_hub_tool(effective_name) {
         ToolRequest::Hub {
-            tool: name.to_string(),
+            tool: effective_name.to_string(),
             args: arguments.clone(),
         }
     } else {
-        serde_json::from_value(serde_json::json!({"tool": name, "args": arguments}))
+        serde_json::from_value(serde_json::json!({"tool": effective_name, "args": arguments}))
             .map_err(|e| invalid(e.to_string()))?
     };
     let call = ToolCall {
@@ -80,6 +92,27 @@ pub fn parse_tool_call(
     };
     call.validate().map_err(invalid)?;
     Ok(call)
+}
+
+/// Split `<think>...</think>` blocks out of raw completion text when the
+/// provider embeds reasoning inline rather than in `reasoning_content`.
+fn split_think_block(raw: &str) -> (Option<String>, String) {
+    let trimmed = raw.trim_start();
+    if let Some(after_open) = trimmed.strip_prefix("<think>")
+        && let Some(end_idx) = after_open.find("</think>")
+    {
+        let thought = after_open[..end_idx].trim().to_string();
+        let rest = after_open[end_idx + "</think>".len()..]
+            .trim_start()
+            .to_string();
+        let reasoning = if thought.is_empty() {
+            None
+        } else {
+            Some(thought)
+        };
+        return (reasoning, rest);
+    }
+    (None, raw.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +201,8 @@ struct OaMessage {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     tool_calls: Vec<OaToolCall>,
 }
 #[derive(Debug, Deserialize)]
@@ -186,6 +221,8 @@ struct OaUsage {
     prompt_tokens: u64,
     #[serde(default)]
     completion_tokens: u64,
+    #[serde(default)]
+    prompt_cache_hit_tokens: u64,
 }
 
 /// Parse an OpenAI-compatible response body.
@@ -216,13 +253,22 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<ChatResponse, P
             Err(ic) => invalid_calls.push(ic),
         }
     }
+    let raw_content = choice.message.content.unwrap_or_default();
+    let (inline_reasoning, cleaned_content) = split_think_block(&raw_content);
+    let reasoning_content = choice
+        .message
+        .reasoning_content
+        .filter(|s| !s.trim().is_empty())
+        .or(inline_reasoning);
     Ok(ChatResponse {
-        content: choice.message.content.unwrap_or_default(),
+        content: cleaned_content,
+        reasoning_content,
         tool_calls,
         invalid_calls,
         usage: r.usage.map(|u| TokenUsage {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
+            cached_tokens: u.prompt_cache_hit_tokens,
         }),
     })
 }
@@ -279,6 +325,8 @@ struct MockStep {
     #[serde(default)]
     content: String,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     tool_calls: Vec<MockCall>,
     #[serde(default)]
     prompt_tokens: Option<u64>,
@@ -324,6 +372,7 @@ impl Provider for MockProvider {
         let Some(step) = self.steps.next() else {
             return Ok(ChatResponse {
                 content: "Script finished.".into(),
+                reasoning_content: None,
                 tool_calls: vec![],
                 invalid_calls: vec![],
                 usage: None,
@@ -347,10 +396,13 @@ impl Provider for MockProvider {
             (p, c) => Some(TokenUsage {
                 prompt_tokens: p.unwrap_or(0),
                 completion_tokens: c.unwrap_or(0),
+                cached_tokens: 0,
             }),
         };
+        let (inline_reasoning, cleaned_content) = split_think_block(&step.content);
         Ok(ChatResponse {
-            content: step.content,
+            content: cleaned_content,
+            reasoning_content: step.reasoning_content.or(inline_reasoning),
             tool_calls,
             invalid_calls,
             usage,

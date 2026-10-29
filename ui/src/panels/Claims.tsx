@@ -37,7 +37,15 @@ function buildTree(paths: string[]): Node {
 
 /** The file claim map (§12.2): the workspace tree colored by the agent
  * holding each file's claim; refused claims and merge conflicts in red. */
-export function Claims({ version, colors }: { version: number; colors: (n: string | null | undefined) => string }) {
+export function Claims({
+  version,
+  colors,
+  onInspectFile,
+}: {
+  version: number;
+  colors: (n: string | null | undefined) => string;
+  onInspectFile?: (path: string) => void;
+}) {
   const [view, setView] = useState<ClaimsView | null>(null);
   const [error, setError] = useState<string | null>(null);
   // After a run every claim is settled: show them all by default then.
@@ -99,6 +107,11 @@ export function Claims({ version, colors }: { version: number; colors: (n: strin
             {k.name}
             {k.dir ? "/" : ""}
           </span>
+          {!k.dir && onInspectFile && (
+            <button type="button" className="link small" onClick={() => onInspectFile(k.path)}>
+              open in workbench
+            </button>
+          )}
           {here.map((c) => (
             <span key={c.id} className={c.status === "active" ? "" : "faded"}>
               <AgentChip name={c.agent} color={colors(c.agent)} />

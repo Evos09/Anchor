@@ -13,6 +13,7 @@ use anchor_protocol::{
 };
 
 use crate::config::RolesConfig;
+use crate::kernel::{HarnessContext, TrajectoryEvent};
 use crate::prompt::{PrefixMonitor, REVIEW_TOOLS_JSON, REVIEWER_PROMPT, SYSTEM_PROMPT, TOOLS_JSON};
 use crate::provider::{self, ChatResponse, Provider, ProviderError};
 use crate::router::{Router, TaskKind};
@@ -79,6 +80,7 @@ struct Session<'a, T: Transport> {
     providers: BTreeMap<String, Box<dyn Provider>>,
     factory: &'a ProviderFactory<'a>,
     messages: Vec<ChatMessage>,
+    ctx: HarnessContext,
     turn: u64,
     tracker: ContextTracker,
     prefix: PrefixMonitor,
@@ -210,6 +212,10 @@ pub fn run_session<T: Transport>(
     } else {
         tools_for(task.hub.as_ref())
     };
+    let mut ctx = HarnessContext::new(&messages, tools.clone());
+    if let Some(cp) = &task.resume_from {
+        ctx.memory.tasks = cp.tasks.clone();
+    }
     let mut s = Session {
         t,
         task,
@@ -218,6 +224,7 @@ pub fn run_session<T: Transport>(
         providers: BTreeMap::new(),
         factory,
         messages,
+        ctx,
         turn,
         tracker,
         prefix: PrefixMonitor::default(),
@@ -314,6 +321,22 @@ impl<T: Transport> Session<'_, T> {
             }
 
             let resp = self.complete_with_fallback()?;
+            if let Some(reasoning) = &resp.reasoning_content {
+                self.ctx.memory.reasoning_steps += 1;
+                self.ctx.trajectory.record(TrajectoryEvent::ReasoningTrace {
+                    turn: self.turn,
+                    text: reasoning.clone(),
+                });
+                self.t.send(Message::Reasoning {
+                    turn: self.turn,
+                    text: reasoning.clone(),
+                })?;
+            }
+            self.ctx.trajectory.record(TrajectoryEvent::AssistantTurn {
+                turn: self.turn,
+                content: resp.content.clone(),
+                tool_calls: resp.tool_calls.clone(),
+            });
             self.messages.push(ChatMessage {
                 role: ChatRole::Assistant,
                 content: resp.content.clone(),
@@ -327,11 +350,17 @@ impl<T: Transport> Session<'_, T> {
                     None => self.execute(call.clone())?,
                 };
                 self.track_claims(call, &outcome);
+                self.track_memory(call, &outcome);
                 let content = match outcome {
                     ToolOutcome::Ok { output } => output,
                     ToolOutcome::Denied { by, detail } => format!("DENIED by {by:?}: {detail}"),
                     ToolOutcome::Error { detail } => format!("ERROR: {detail}"),
                 };
+                self.ctx.trajectory.record(TrajectoryEvent::ToolReply {
+                    turn: self.turn,
+                    call_id: call.call_id.clone(),
+                    content: content.clone(),
+                });
                 self.messages.push(ChatMessage {
                     role: ChatRole::Tool,
                     content,
@@ -340,12 +369,16 @@ impl<T: Transport> Session<'_, T> {
                 });
             }
             for bad in &resp.invalid_calls {
+                let msg = format!(
+                    "[Tool call {} ({}) was rejected before execution: {}]",
+                    bad.id, bad.name, bad.error
+                );
+                self.ctx
+                    .trajectory
+                    .record(TrajectoryEvent::UserMessage { content: msg.clone() });
                 self.messages.push(ChatMessage {
                     role: ChatRole::User,
-                    content: format!(
-                        "[Tool call {} ({}) was rejected before execution: {}]",
-                        bad.id, bad.name, bad.error
-                    ),
+                    content: msg,
                     tool_calls: vec![],
                     tool_call_id: None,
                 });
@@ -408,6 +441,25 @@ impl<T: Transport> Session<'_, T> {
             other if review => refuse(&format!("{} is not available to a reviewer", other.name())),
             _ => return None,
         })
+    }
+
+    /// Track session-level tasks (`todo_write`) and activated skills (`activate_skill`)
+    /// so checkpoints carry the live task checklist.
+    fn track_memory(&mut self, call: &ToolCall, outcome: &ToolOutcome) {
+        if !matches!(outcome, ToolOutcome::Ok { .. }) {
+            return;
+        }
+        match &call.request {
+            ToolRequest::TodoWrite { todos } => {
+                self.ctx.memory.tasks = todos.clone();
+            }
+            ToolRequest::ActivateSkill { name }
+                if !self.ctx.memory.active_skills.contains(name) =>
+            {
+                self.ctx.memory.active_skills.push(name.clone());
+            }
+            _ => {}
+        }
     }
 
     /// Keep the checkpoint's claim list in step with successful Hub claim
@@ -569,7 +621,7 @@ impl<T: Transport> Session<'_, T> {
             context_used_tokens: self.last_used,
             context_window_tokens: role.context_window,
             messages: self.messages.clone(),
-            tasks: vec![],
+            tasks: self.ctx.memory.tasks.clone(),
             file_claims: self.claims.values().cloned().collect(),
             pending_decisions: vec![],
             summary: None,

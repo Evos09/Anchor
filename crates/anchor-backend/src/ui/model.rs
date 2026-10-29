@@ -161,6 +161,14 @@ pub struct Model {
     pub cost: Cost,
     /// `approval_pending` entries not yet resolved, by id.
     pub pending: BTreeMap<u64, Value>,
+    /// Latest task checklist from `todo_write`.
+    pub todos: Vec<Value>,
+    /// Count of reasoning traces (`reasoning_step`) emitted by R1/Thinking models.
+    pub reasoning_steps: u64,
+    /// Count of scoped subagents spawned (`subagent_spawned`).
+    pub subagents_spawned: u64,
+    /// Count of lifecycle hooks executed (`hook_executed` / `hook_denied`).
+    pub hooks_run: u64,
 }
 
 fn s(v: &Value) -> Option<String> {
@@ -302,10 +310,24 @@ impl Model {
                     s.denied += 1;
                 }
             }
-            "mutation" | "command" | "command_refused" => {
+            "mutation" | "command" | "command_refused" | "code_mode_batch" => {
                 if let Some(s) = self.session(sid) {
                     s.tool_calls += 1;
                 }
+            }
+            "todo_updated" => {
+                if let Some(arr) = d["todos"].as_array() {
+                    self.todos = arr.clone();
+                }
+            }
+            "reasoning_step" => {
+                self.reasoning_steps += 1;
+            }
+            "subagent_spawned" => {
+                self.subagents_spawned += 1;
+            }
+            "hook_executed" | "hook_denied" => {
+                self.hooks_run += 1;
             }
             "usage" => self.usage(e, agent, sid),
             "session_finished" => self.finish_session(e, sid),
@@ -618,6 +640,88 @@ impl Model {
                 "session",
                 Trace,
                 format!("{who} finished turn {}", d["turn"]),
+            ),
+            "reasoning_step" => (
+                "session",
+                Info,
+                format!(
+                    "{who} reasoned (turn {}): {}",
+                    d["turn"],
+                    short(&d["text"], 140)
+                ),
+            ),
+            "todo_updated" => (
+                "session",
+                Info,
+                format!(
+                    "{who} updated task checklist ({} item(s))",
+                    d["todos"].as_array().map_or(0, Vec::len)
+                ),
+            ),
+            "artifact_written" => (
+                "verify",
+                Ok,
+                format!(
+                    "{who} wrote {} artifact {:?}",
+                    short(&d["kind"], 30),
+                    short(&d["name"], 60)
+                ),
+            ),
+            "subagent_spawned" => (
+                "session",
+                Info,
+                format!(
+                    "{who} spawned subagent {:?} ({})",
+                    short(&d["role"], 40),
+                    short(&d["agent_type"], 30)
+                ),
+            ),
+            "code_mode_batch" => (
+                "tool",
+                Info,
+                format!("{who} executed Code Mode batch ({} steps)", d["steps"]),
+            ),
+            "hook_executed" => (
+                "policy",
+                Trace,
+                format!(
+                    "Hook ({}) ran on {}: `{}`",
+                    short(&d["event"], 20),
+                    short(&d["tool"], 30),
+                    short(&d["hook"], 60)
+                ),
+            ),
+            "hook_denied" => (
+                "policy",
+                Warn,
+                format!(
+                    "Hook DENIED {who}'s {}: {}",
+                    short(&d["tool"], 30),
+                    short(&d["reason"], 120)
+                ),
+            ),
+            "skill_activated" => (
+                "session",
+                Info,
+                format!("{who} activated skill {:?}", short(&d["skill"], 60)),
+            ),
+            "web_fetch" => (
+                "tool",
+                Info,
+                format!("{who} fetched URL {}", short(&d["url"], 100)),
+            ),
+            "web_search" => (
+                "tool",
+                Info,
+                format!("{who} searched web for {:?}", short(&d["query"], 80)),
+            ),
+            "question_asked" => (
+                "approval",
+                Info,
+                format!(
+                    "{who} asked clarification question ({})",
+                    short(&d["response"], 20)
+                ),
             ),
             "usage" => (
                 "cost",
@@ -1110,6 +1214,20 @@ impl Model {
                     Some("rollback") => format!(
                         "You restored snapshot {} from the dashboard",
                         short(&d["args"]["ref"], 60)
+                    ),
+                    Some("workbench_edit") => format!(
+                        "You edited {} in the Code Workbench",
+                        short(&d["args"]["path"], 80)
+                    ),
+                    Some("create_artifact") => format!(
+                        "You created artifact {:?} ({}) in the Workbench",
+                        short(&d["args"]["name"], 60),
+                        short(&d["args"]["kind"], 30)
+                    ),
+                    Some("session_prompt") => format!(
+                        "You dispatched prompt ({}): {}",
+                        short(&d["args"]["mode"], 20),
+                        short(&d["args"]["prompt"], 100)
                     ),
                     _ => format!("Dashboard action: {}", short(d, 160)),
                 },

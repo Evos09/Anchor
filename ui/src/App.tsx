@@ -13,6 +13,9 @@ import { Cost } from "./panels/Cost";
 import { Snapshots } from "./panels/Snapshots";
 import { Audit } from "./panels/Audit";
 import { CommandBar } from "./panels/CommandBar";
+import { CodeWorkbench } from "./panels/CodeWorkbench";
+import { ArtifactsPanel } from "./panels/ArtifactsPanel";
+import { CustomizationsPanel } from "./panels/CustomizationsPanel";
 
 export const TABS = [
   ["story", "What happened"],
@@ -23,6 +26,9 @@ export const TABS = [
   ["cost", "Cost meter"],
   ["snapshots", "Snapshot timeline"],
   ["audit", "Audit log"],
+  ["workbench", "Code workbench"],
+  ["artifacts", "Artifacts & plans"],
+  ["customizations", "Skills, hooks & MCP"],
 ] as const;
 export type Tab = (typeof TABS)[number][0];
 
@@ -37,6 +43,8 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTabState] = useState<Tab>(tabFromHash);
   const [focus, setFocus] = useState<{ merge?: number; snapshot?: string } | null>(null);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const lastSeq = useRef(-1);
 
   const setTab = useCallback((t: Tab) => {
@@ -106,17 +114,26 @@ export function App() {
   }
 
   const ov = overview;
+  const todos = ov?.todos ?? [];
+
   return (
     <div className="app">
       <header className="top">
         <div className="title">
+          <span className="brand-mark" aria-hidden="true">
+            ■
+          </span>
           <h1>Anchor</h1>
           {ov && (
             <span className={`badge badge-${ov.mode === "live" && ov.running ? "live" : "muted"}`}>
               {ov.mode === "live" ? (ov.running ? "LIVE · team running" : "run finished") : "inspecting"}
             </span>
           )}
-          {ov && <span className="ws" title={ov.workspace}>{ov.workspace}</span>}
+          {ov && (
+            <span className="ws" title={ov.workspace}>
+              {ov.workspace}
+            </span>
+          )}
         </div>
         {ov && (
           <div className="stats" aria-label="summary">
@@ -129,6 +146,11 @@ export function App() {
             <button className={`stat ${ov.pending.length ? "stat-warn" : ""}`}>
               <b>{ov.pending.length}</b> awaiting you
             </button>
+            {(ov.reasoning_steps ?? 0) > 0 && (
+              <button className="stat stat-plan" onClick={() => setTab("story")} title="Reasoning CoT blocks recorded">
+                <b>{ov.reasoning_steps}</b> CoT
+              </button>
+            )}
             <button
               className={`stat ${ov.chain.error ? "stat-fail" : "stat-ok"}`}
               onClick={() => setTab("audit")}
@@ -165,11 +187,57 @@ export function App() {
           setFocus({ snapshot: r });
           setTab("snapshots");
         }}
+        onToggleWorkbench={() => setWorkbenchOpen((v) => !v)}
+        workbenchOpen={workbenchOpen}
       />
-      <div className="layout">
+      <div className={workbenchOpen ? "layout layout-split" : "layout"}>
         <aside className="side">
           {ov && <Approvals pending={ov.pending} colors={colors} onAnswered={refreshOverview} />}
           {ov && <Roster roster={ov.roster} colors={colors} />}
+          {todos.length > 0 && (
+            <section className="card" aria-label="Task Checklist">
+              <div className="wb-section-head">
+                <span>TASK CHECKLIST (TODOWRITE)</span>
+                <span className="mono">{todos.length}</span>
+              </div>
+              <ul className="todo-list">
+                {todos.map((t) => (
+                  <li key={t.id} className={`todo-item todo-${t.status}`}>
+                    <span className="todo-box">
+                      {t.status === "completed" ? "■" : t.status === "in_progress" ? "▸" : "□"}
+                    </span>
+                    <span>{t.content}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+          {ov && (
+            <section className="card" aria-label="Harness Kernel Telemetry">
+              <div className="wb-section-head">
+                <span>HARNESS KERNEL</span>
+                <span className="mono muted">L1/L2</span>
+              </div>
+              <div className="kernel-stats small mono">
+                <div>
+                  <span>Reasoning blocks</span>
+                  <b>{ov.reasoning_steps ?? 0}</b>
+                </div>
+                <div>
+                  <span>Subagents spawned</span>
+                  <b>{ov.subagents_spawned ?? 0}</b>
+                </div>
+                <div>
+                  <span>Hooks executed</span>
+                  <b>{ov.hooks_run ?? 0}</b>
+                </div>
+                <div>
+                  <span>Snapshots store</span>
+                  <b>{ov.store.available ? "ONLINE" : "LOCKED"}</b>
+                </div>
+              </div>
+            </section>
+          )}
         </aside>
         <main className="main">
           <nav className="tabs" role="tablist" aria-label="Panels">
@@ -207,14 +275,62 @@ export function App() {
                 }}
               />
             )}
-            {tab === "claims" && <Claims version={version} colors={colors} />}
+            {tab === "claims" && (
+              <Claims
+                version={version}
+                colors={colors}
+                onInspectFile={(p) => {
+                  setSelectedFile(p);
+                  setWorkbenchOpen(true);
+                }}
+              />
+            )}
             {tab === "decisions" && <Decisions version={version} colors={colors} overview={ov} />}
             {tab === "merges" && <MergeQueue version={version} colors={colors} focus={focus?.merge} />}
             {tab === "cost" && <Cost version={version} colors={colors} />}
             {tab === "snapshots" && <Snapshots version={version} colors={colors} focus={focus?.snapshot} />}
             {tab === "audit" && <Audit events={events} overview={ov} />}
+            {tab === "workbench" && (
+              <CodeWorkbench
+                version={version}
+                colors={colors}
+                selectedFile={selectedFile}
+                onSelectFile={setSelectedFile}
+              />
+            )}
+            {tab === "artifacts" && <ArtifactsPanel version={version} />}
+            {tab === "customizations" && <CustomizationsPanel version={version} />}
           </section>
         </main>
+        {workbenchOpen && (
+          <aside className="wb-drawer" aria-label="Code Workbench Drawer">
+            <div className="wb-drawer-head">
+              <strong>CODE INSPECTOR</strong>
+              <div className="row">
+                <button
+                  type="button"
+                  className="btn btn-small"
+                  onClick={() => {
+                    setWorkbenchOpen(false);
+                    setTab("workbench");
+                  }}
+                >
+                  Expand full
+                </button>
+                <button type="button" className="btn btn-small" onClick={() => setWorkbenchOpen(false)}>
+                  ×
+                </button>
+              </div>
+            </div>
+            <CodeWorkbench
+              version={version}
+              colors={colors}
+              selectedFile={selectedFile}
+              onSelectFile={setSelectedFile}
+              compact
+            />
+          </aside>
+        )}
       </div>
     </div>
   );

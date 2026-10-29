@@ -791,3 +791,111 @@ fn two_model_collaboration_through_the_dashboard() {
     );
     AuditLog::verify(audit.path()).unwrap();
 }
+
+
+#[test]
+fn workbench_endpoints_and_customizations_are_audited_and_confined() {
+    let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let f = fixture();
+    std::fs::write(f.ws.join("ANCHOR.md"), "# Project Rules\nUse Swiss-industrial precision.\n").unwrap();
+    let opened = open_workspace_in(
+        &f.ws,
+        &f.base.join("state"),
+        None,
+        Box::new(Scripted::new(false, ResumeChoice::FreshSession)),
+        vec![],
+    )
+    .unwrap();
+    let audit = opened.mediator.engine().audit_arc();
+    let ui = ui::start(
+        Sources {
+            workspace: opened.mediator.workspace().root().to_path_buf(),
+            audit: audit.clone(),
+            hub: None,
+            store: Some(opened.mediator.shared_store()),
+            store_note: None,
+            broker: None,
+            mode: "inspect",
+        },
+        0,
+    )
+    .unwrap();
+    ui.attach_workspace(opened.mediator);
+    let c = Client {
+        port: ui.port(),
+        token: ui.token().to_string(),
+    };
+
+    // GET views (workspace-file, customizations, artifacts) write nothing to the audit log.
+    let before = audit.head();
+    let wf = c.get("/api/workspace-file?path=calc.py");
+    assert_eq!(wf["path"], "calc.py");
+    assert!(wf["content"].as_str().unwrap().contains("def clamp"));
+    assert_eq!(wf["editable"], true);
+
+    let cust = c.get("/api/customizations");
+    assert!(
+        cust["inventory"]["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "ANCHOR.md")
+    );
+    assert!(
+        cust["inventory"]["subagents"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 3
+    );
+
+    let arts = c.get("/api/artifacts");
+    assert!(arts["artifacts"].as_array().unwrap().is_empty());
+    assert_eq!(audit.head(), before, "GET workbench views must not write audit entries");
+
+    // Path traversal outside workspace is rejected with 400.
+    let (st, _, _) = http(
+        ui.port(),
+        &format!(
+            "GET /api/workspace-file?path=..%2FCargo.toml HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\n\r\n",
+            ui.port(),
+            ui.token()
+        ),
+    );
+    assert_eq!(st, 400);
+
+    // POST actions are schema-checked and audited.
+    let (st, art) = c.post(
+        "/api/artifacts/create",
+        &json!({
+            "name": "arch_plan",
+            "kind": "plan",
+            "content": "# Architecture Plan\n1. Verify invariants",
+            "request_feedback": true
+        }),
+    );
+    assert_eq!(st, 200, "{art}");
+    let arts_after = c.get("/api/artifacts");
+    assert_eq!(arts_after["artifacts"].as_array().unwrap().len(), 1);
+
+    let (st, edit) = c.post(
+        "/api/file/edit",
+        &json!({
+            "path": "calc.py",
+            "content": "def clamp(x, lo, hi):\n    return max(lo, min(hi, x))\n"
+        }),
+    );
+    assert_eq!(st, 200, "{edit}");
+    let wf_after = c.get("/api/workspace-file?path=calc.py");
+    assert!(wf_after["content"].as_str().unwrap().contains("max(lo, min(hi, x))"));
+
+    let (st, prompt) = c.post(
+        "/api/session/prompt",
+        &json!({
+            "prompt": "Verify edge cases in calc.py",
+            "mode": "plan"
+        }),
+    );
+    assert_eq!(st, 200, "{prompt}");
+    assert_ne!(audit.head(), before, "POST workbench actions must be audited");
+}

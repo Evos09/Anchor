@@ -27,6 +27,11 @@ pub enum Message {
     Paused(Paused),
     /// Something the user must be told (fallback, downgrade, ...).
     Notice(Notice),
+    /// Reasoning trace emitted by a thinking/reasoning model (e.g. R1 or Thinking).
+    Reasoning {
+        turn: u64,
+        text: String,
+    },
     /// Turn bookkeeping.
     TurnStarted {
         turn: u64,
@@ -77,6 +82,12 @@ impl Validate for Message {
             Message::Checkpoint(c) => c.validate(),
             Message::Paused(p) => check_param("checkpoint_id", &p.checkpoint_id),
             Message::Notice(n) => check_param("detail", &n.detail),
+            Message::Reasoning { text, .. } => {
+                if text.len() > MAX_CONTENT_BYTES {
+                    return Err("reasoning text too large".into());
+                }
+                Ok(())
+            }
             Message::TurnStarted { .. } | Message::TurnFinished { .. } => Ok(()),
             Message::Done(d) => {
                 if d.summary.len() > MAX_CONTENT_BYTES {
@@ -130,6 +141,50 @@ impl Validate for ToolCall {
     }
 }
 
+/// One replacement operation within a `MultiEdit` transaction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceOp {
+    pub old: String,
+    pub new: String,
+    #[serde(default)]
+    pub replace_all: bool,
+}
+
+/// One structured question item for `AskQuestion`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionItem {
+    pub question: String,
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+/// One read-only step in a DeepSeek-style `CodeModeBatch` pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BatchStep {
+    ReadFile {
+        path: String,
+        #[serde(default)]
+        start_line: Option<u32>,
+        #[serde(default)]
+        end_line: Option<u32>,
+    },
+    ListDir {
+        path: String,
+    },
+    Glob {
+        pattern: String,
+    },
+    Grep {
+        pattern: String,
+        #[serde(default)]
+        path_glob: Option<String>,
+    },
+}
+
 /// The closed set of tools the runtime may request. Every parameter is
 /// treated by the backend as hostile input (spec §5.2(e)).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,6 +198,13 @@ pub enum ToolRequest {
     ReadFile {
         path: String,
     },
+    /// Line-range file read; records `[start_line, end_line]` in the Guard's
+    /// range ledger so localized edits in that range are permitted.
+    ReadFileRange {
+        path: String,
+        start_line: u32,
+        end_line: u32,
+    },
     WriteFile {
         path: String,
         content: String,
@@ -150,6 +212,16 @@ pub enum ToolRequest {
     EditFile {
         path: String,
         edit: EditOp,
+    },
+    /// Atomic multi-hunk replacement on a single file (Claude Code `MultiEdit`).
+    MultiEdit {
+        path: String,
+        edits: Vec<ReplaceOp>,
+    },
+    /// Apply a unified diff patch to a file inside the workspace.
+    ApplyPatch {
+        path: String,
+        patch: String,
     },
     ListDir {
         path: String,
@@ -167,6 +239,46 @@ pub enum ToolRequest {
         args: Vec<String>,
         #[serde(default)]
         network: bool,
+    },
+    /// Update the session's structured task list (Claude Code `TodoWrite`).
+    TodoWrite {
+        todos: Vec<TaskState>,
+    },
+    /// Ask the user one or more structured multiple-choice questions.
+    AskQuestion {
+        questions: Vec<QuestionItem>,
+    },
+    /// Write a persistent Antigravity-style Markdown artifact (`Plan`, `Report`, `Walkthrough`).
+    WriteArtifact {
+        name: String,
+        kind: String,
+        content: String,
+        #[serde(default)]
+        request_feedback: bool,
+    },
+    /// Spawn a scoped subagent (`research`, `verifier`, `implementer`) with an isolated context.
+    InvokeSubagent {
+        agent_type: String,
+        role: String,
+        prompt: String,
+        #[serde(default)]
+        max_turns: Option<u32>,
+    },
+    /// DeepSeek Harness Code Mode: execute a batch of read/search operations in a single turn.
+    CodeModeBatch {
+        steps: Vec<BatchStep>,
+    },
+    /// Fetch and extract text from a documentation URL (requires network permission).
+    WebFetch {
+        url: String,
+    },
+    /// Search documentation/web for a query (requires network permission).
+    WebSearch {
+        query: String,
+    },
+    /// Progressive disclosure: load a discovered `SKILL.md` by name into context.
+    ActivateSkill {
+        name: String,
     },
     /// A Coordination Hub tool (spec §6): claims, messages, tasks,
     /// decisions. Only offered when [`Task::hub`] is set. The backend
@@ -204,12 +316,23 @@ impl ToolRequest {
     pub fn name(&self) -> &'static str {
         match self {
             ToolRequest::ReadFile { .. } => "read_file",
+            ToolRequest::ReadFileRange { .. } => "read_file_range",
             ToolRequest::WriteFile { .. } => "write_file",
             ToolRequest::EditFile { .. } => "edit_file",
+            ToolRequest::MultiEdit { .. } => "multi_edit",
+            ToolRequest::ApplyPatch { .. } => "apply_patch",
             ToolRequest::ListDir { .. } => "list_dir",
             ToolRequest::Glob { .. } => "glob",
             ToolRequest::Grep { .. } => "grep",
             ToolRequest::RunCommand { .. } => "run_command",
+            ToolRequest::TodoWrite { .. } => "todo_write",
+            ToolRequest::AskQuestion { .. } => "ask_question",
+            ToolRequest::WriteArtifact { .. } => "write_artifact",
+            ToolRequest::InvokeSubagent { .. } => "invoke_subagent",
+            ToolRequest::CodeModeBatch { .. } => "code_mode_batch",
+            ToolRequest::WebFetch { .. } => "web_fetch",
+            ToolRequest::WebSearch { .. } => "web_search",
+            ToolRequest::ActivateSkill { .. } => "activate_skill",
             ToolRequest::Hub { .. } => "hub",
             ToolRequest::SubmitClaims { .. } => "submit_claims",
             ToolRequest::SubmitVerdicts { .. } => "submit_verdicts",
@@ -223,6 +346,8 @@ impl ToolRequest {
             self,
             ToolRequest::WriteFile { .. }
                 | ToolRequest::EditFile { .. }
+                | ToolRequest::MultiEdit { .. }
+                | ToolRequest::ApplyPatch { .. }
                 | ToolRequest::RunCommand { .. }
         )
     }
@@ -234,6 +359,17 @@ impl Validate for ToolRequest {
             ToolRequest::ReadFile { path } | ToolRequest::ListDir { path } => {
                 crate::check_name("path", path)
             }
+            ToolRequest::ReadFileRange {
+                path,
+                start_line,
+                end_line,
+            } => {
+                crate::check_name("path", path)?;
+                if *start_line == 0 || *end_line < *start_line {
+                    return Err("invalid line range: start_line must be >= 1 and <= end_line".into());
+                }
+                Ok(())
+            }
             ToolRequest::WriteFile { path, content } => {
                 crate::check_name("path", path)?;
                 if content.len() > MAX_CONTENT_BYTES {
@@ -244,6 +380,30 @@ impl Validate for ToolRequest {
             ToolRequest::EditFile { path, edit } => {
                 crate::check_name("path", path)?;
                 edit.validate()
+            }
+            ToolRequest::MultiEdit { path, edits } => {
+                crate::check_name("path", path)?;
+                if edits.is_empty() || edits.len() > 128 {
+                    return Err("multi_edit requires 1..=128 edits".into());
+                }
+                let mut total = 0usize;
+                for e in edits {
+                    if e.old.is_empty() {
+                        return Err("multi_edit old string is empty".into());
+                    }
+                    total = total.saturating_add(e.old.len()).saturating_add(e.new.len());
+                    if total > MAX_CONTENT_BYTES {
+                        return Err("multi_edit content too large".into());
+                    }
+                }
+                Ok(())
+            }
+            ToolRequest::ApplyPatch { path, patch } => {
+                crate::check_name("path", path)?;
+                if patch.is_empty() || patch.len() > MAX_CONTENT_BYTES {
+                    return Err("patch empty or too large".into());
+                }
+                Ok(())
             }
             ToolRequest::Glob { pattern } => crate::check_name("pattern", pattern),
             ToolRequest::Grep { pattern, path_glob } => {
@@ -265,6 +425,79 @@ impl Validate for ToolRequest {
                 }
                 Ok(())
             }
+            ToolRequest::TodoWrite { todos } => {
+                if todos.len() > 128 {
+                    return Err("too many todos".into());
+                }
+                for t in todos {
+                    check_param("todo.id", &t.id)?;
+                    check_param("todo.description", &t.description)?;
+                }
+                Ok(())
+            }
+            ToolRequest::AskQuestion { questions } => {
+                if questions.is_empty() || questions.len() > 16 {
+                    return Err("ask_question requires 1..=16 questions".into());
+                }
+                for q in questions {
+                    check_param("question", &q.question)?;
+                    if q.options.len() > 16 {
+                        return Err("too many options in question".into());
+                    }
+                }
+                Ok(())
+            }
+            ToolRequest::WriteArtifact {
+                name,
+                kind,
+                content,
+                ..
+            } => {
+                crate::check_name("name", name)?;
+                crate::check_name("kind", kind)?;
+                if content.len() > MAX_CONTENT_BYTES {
+                    return Err("artifact content too large".into());
+                }
+                Ok(())
+            }
+            ToolRequest::InvokeSubagent {
+                agent_type,
+                role,
+                prompt,
+                ..
+            } => {
+                crate::check_name("agent_type", agent_type)?;
+                crate::check_name("role", role)?;
+                if prompt.is_empty() || prompt.len() > MAX_CONTENT_BYTES / 4 {
+                    return Err("subagent prompt empty or too large".into());
+                }
+                Ok(())
+            }
+            ToolRequest::CodeModeBatch { steps } => {
+                if steps.is_empty() || steps.len() > 32 {
+                    return Err("code_mode_batch requires 1..=32 steps".into());
+                }
+                for s in steps {
+                    match s {
+                        BatchStep::ReadFile { path, .. } | BatchStep::ListDir { path } => {
+                            crate::check_name("path", path)?;
+                        }
+                        BatchStep::Glob { pattern } => {
+                            crate::check_name("pattern", pattern)?;
+                        }
+                        BatchStep::Grep { pattern, path_glob } => {
+                            crate::check_name("pattern", pattern)?;
+                            if let Some(g) = path_glob {
+                                crate::check_name("path_glob", g)?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            ToolRequest::WebFetch { url } => crate::check_name("url", url),
+            ToolRequest::WebSearch { query } => check_param("query", query),
+            ToolRequest::ActivateSkill { name } => crate::check_name("name", name),
             ToolRequest::Hub { tool, args } => {
                 if !valid_hub_tool(tool) {
                     return Err("invalid hub tool name".into());
@@ -290,6 +523,8 @@ pub enum EditOp {
     Append { text: String },
     /// Replace exactly one occurrence of `old` with `new`.
     Replace { old: String, new: String },
+    /// Replace all occurrences of `old` with `new`.
+    ReplaceAll { old: String, new: String },
 }
 
 impl Validate for EditOp {
@@ -300,7 +535,7 @@ impl Validate for EditOp {
                     return Err("append text empty or too large".into());
                 }
             }
-            EditOp::Replace { old, new } => {
+            EditOp::Replace { old, new } | EditOp::ReplaceAll { old, new } => {
                 if old.is_empty() {
                     return Err("replace.old is empty".into());
                 }
@@ -326,7 +561,7 @@ pub enum ToolOutcome {
     Ok {
         output: String,
     },
-    /// Refused by the permission engine, the guard, or the user.
+    /// Refused by the permission engine, the guard, a lifecycle hook, or the user.
     Denied {
         by: DeniedBy,
         detail: String,
@@ -350,6 +585,8 @@ pub enum DeniedBy {
     Claim,
     /// The Coordination Hub refused the request (permissions, identity).
     Hub,
+    /// A lifecycle hook (`PreToolUse` / `PreInvocation`) refused the request.
+    Hook,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

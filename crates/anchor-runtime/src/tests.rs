@@ -540,3 +540,55 @@ fn review_session_routes_to_reviewer_and_returns_verdicts() {
     let tools = crate::prompt::REVIEW_TOOLS_JSON.to_string();
     assert!(tools.contains("submit_verdicts") && !tools.contains("read_file"));
 }
+
+
+#[test]
+fn deepseek_reasoning_and_kernel_trajectory_roundtrip() {
+    let body = serde_json::json!({
+        "choices": [{
+            "message": {
+                "content": "<think>Verify bounds before mutating.</think>\n Ready to read.",
+                "tool_calls": [
+                    {"id": "r1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"src/lib.rs\",\"start_line\":10,\"end_line\":40}"}}
+                ]
+            }
+        }],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 20, "prompt_cache_hit_tokens": 40}
+    });
+    let r = parse_openai_response(&body).unwrap();
+    assert_eq!(
+        r.reasoning_content.as_deref(),
+        Some("Verify bounds before mutating.")
+    );
+    assert_eq!(r.content, "Ready to read.");
+    assert_eq!(r.usage.unwrap().cached_tokens, 40);
+    assert_eq!(
+        r.tool_calls[0].request,
+        ToolRequest::ReadFileRange {
+            path: "src/lib.rs".into(),
+            start_line: 10,
+            end_line: 40,
+        }
+    );
+
+    let mut ctx = crate::kernel::HarnessContext::new(
+        &[ChatMessage {
+            role: ChatRole::System,
+            content: SYSTEM_PROMPT.into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }],
+        TOOLS_JSON.clone(),
+    );
+    let base_hash = prefix_hash(&ctx.trajectory.derive_messages(), &ctx.tools.active_tools_json());
+    ctx.tools.mount_scope(
+        "code_mode",
+        vec![serde_json::json!({"type": "function", "function": {"name": "extra_tool"}})],
+    );
+    assert_eq!(ctx.tools.active_scopes().len(), 1);
+    assert!(ctx.tools.unmount_scope("code_mode"));
+    assert_eq!(
+        prefix_hash(&ctx.trajectory.derive_messages(), &ctx.tools.active_tools_json()),
+        base_hash
+    );
+}

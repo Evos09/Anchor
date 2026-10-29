@@ -10,8 +10,10 @@ use anchor_fs::Workspace;
 use anchor_guard::Guard;
 use anchor_policy::{AuditLog, Engine};
 
+pub mod customizations;
 pub mod eval;
 pub mod gitguard;
+pub mod hooks;
 pub mod interact;
 pub mod iso;
 pub mod mediator;

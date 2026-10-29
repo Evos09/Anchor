@@ -24,8 +24,12 @@ use anchor_policy::{
     Action, Approved, AuditError, Decision, Engine, Operation, PermissionRequest, Tool, UserAction,
     params,
 };
-use anchor_protocol::{DeniedBy, EditOp, ToolOutcome, ToolRequest};
+use anchor_protocol::{
+    BatchStep, DeniedBy, EditOp, QuestionItem, ReplaceOp, TaskState, ToolOutcome, ToolRequest,
+};
 
+use crate::customizations::{ArtifactRecord, load_skill_body, save_artifact};
+use crate::hooks::{HookDecision, run_post_tool_hooks, run_pre_tool_hooks};
 use crate::interact::{Interaction, PromptView};
 use anchor_snapshot::{Change, Id, RestoreReport, SnapshotOptions, SnapshotReport, Store};
 
@@ -216,6 +220,9 @@ impl Mediator {
     pub fn workspace(&self) -> &Workspace {
         &self.ws
     }
+    pub fn guard(&self) -> &Guard {
+        &self.guard
+    }
     /// `PATH` used to resolve and run commands.
     pub fn path_var(&self) -> &str {
         &self.path_var
@@ -267,6 +274,15 @@ impl Mediator {
     }
     pub fn set_exec_limits(&mut self, l: Limits) {
         self.exec_limits = l;
+    }
+
+    fn state_dir(&self) -> PathBuf {
+        self.engine
+            .audit()
+            .path()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.ws.root().to_path_buf())
     }
 
     fn request(
@@ -366,18 +382,100 @@ impl Mediator {
     /// Handle one tool request. Never panics on hostile input.
     pub fn handle(&mut self, req: ToolRequest) -> ToolOutcome {
         self.stats.tool_calls += 1;
+        let tool_name = req.name();
+        let req_json = serde_json::to_value(&req).unwrap_or_default();
+
+        // 0. Run deterministic PreToolUse hooks (if any are configured in workspace).
+        let pre_hooks = run_pre_tool_hooks(
+            self.ws.root(),
+            &self.state_dir(),
+            &self.path_var,
+            &self.exec_read_only,
+            &self.session,
+            tool_name,
+            &req_json["args"],
+        );
+        for h in pre_hooks {
+            match h.decision {
+                HookDecision::Deny { reason } => {
+                    let _ = self.log(
+                        "hook_denied",
+                        serde_json::json!({
+                            "turn": self.turn,
+                            "tool": tool_name,
+                            "hook": h.hook_command,
+                            "reason": reason,
+                        }),
+                    );
+                    self.stats.denied += 1;
+                    return denied(DeniedBy::Hook, reason);
+                }
+                HookDecision::Ask { reason } => {
+                    let view = PromptView {
+                        agent: self.engine.agent().map(String::from),
+                        merge_seq: None,
+                        tool: Tool::RunCommand,
+                        operation: Operation::Execute,
+                        canonical_target: Some(self.ws.root().to_path_buf()),
+                        rule: format!("hook:{}", h.hook_command),
+                        detail: Some(reason.clone()),
+                    };
+                    if self.interact.confirm(&view) != anchor_policy::UserResponse::Approve {
+                        self.stats.denied += 1;
+                        return denied(DeniedBy::Hook, reason);
+                    }
+                }
+                HookDecision::Allow => {
+                    let _ = self.log(
+                        "hook_executed",
+                        serde_json::json!({
+                            "turn": self.turn,
+                            "event": "PreToolUse",
+                            "tool": tool_name,
+                            "hook": h.hook_command,
+                        }),
+                    );
+                }
+            }
+        }
+
         let out = match req {
             ToolRequest::ReadFile { path } => self.read_file(&path),
+            ToolRequest::ReadFileRange {
+                path,
+                start_line,
+                end_line,
+            } => self.read_file_range(&path, start_line, end_line),
             ToolRequest::ListDir { path } => self.list_dir(&path),
             ToolRequest::Glob { pattern } => self.glob(&pattern),
             ToolRequest::Grep { pattern, path_glob } => self.grep(&pattern, path_glob.as_deref()),
             ToolRequest::WriteFile { path, content } => self.write_file(&path, content.as_bytes()),
             ToolRequest::EditFile { path, edit } => self.edit_file(&path, edit),
+            ToolRequest::MultiEdit { path, edits } => self.multi_edit(&path, &edits),
+            ToolRequest::ApplyPatch { path, patch } => self.apply_patch(&path, &patch),
             ToolRequest::RunCommand {
                 program,
                 args,
                 network,
             } => self.run_command(&program, args, network),
+            ToolRequest::TodoWrite { todos } => self.todo_write(&todos),
+            ToolRequest::AskQuestion { questions } => self.ask_question(&questions),
+            ToolRequest::WriteArtifact {
+                name,
+                kind,
+                content,
+                request_feedback,
+            } => self.write_artifact(&name, &kind, &content, request_feedback),
+            ToolRequest::InvokeSubagent {
+                agent_type,
+                role,
+                prompt,
+                max_turns,
+            } => self.invoke_subagent(&agent_type, &role, &prompt, max_turns),
+            ToolRequest::CodeModeBatch { steps } => self.code_mode_batch(&steps),
+            ToolRequest::WebFetch { url } => self.web_fetch(&url),
+            ToolRequest::WebSearch { query } => self.web_search(&query),
+            ToolRequest::ActivateSkill { name } => self.activate_skill(&name),
             ToolRequest::Hub { tool, args } => self.hub_tool(&tool, args),
             // Runtime-local: the runtime records these itself and reports
             // them with `Done`/`Verdicts`; there is nothing to execute.
@@ -389,6 +487,28 @@ impl Mediator {
         };
         if matches!(out, ToolOutcome::Denied { .. }) {
             self.stats.denied += 1;
+        }
+        if let ToolOutcome::Ok { output } = &out {
+            let post_hooks = run_post_tool_hooks(
+                self.ws.root(),
+                &self.state_dir(),
+                &self.path_var,
+                &self.exec_read_only,
+                &self.session,
+                tool_name,
+                output,
+            );
+            for h in post_hooks {
+                let _ = self.log(
+                    "hook_executed",
+                    serde_json::json!({
+                        "turn": self.turn,
+                        "event": "PostToolUse",
+                        "tool": tool_name,
+                        "hook": h.hook_command,
+                    }),
+                );
+            }
         }
         out
     }
@@ -431,6 +551,50 @@ impl Mediator {
         }
     }
 
+    fn read_file_range(&mut self, path: &str, start_line: u32, end_line: u32) -> ToolOutcome {
+        let r = match self.ws.resolve(path) {
+            Ok(r) => r,
+            Err(e) => return fs_outcome(e),
+        };
+        if !r.exists() {
+            return error("not found");
+        }
+        let req = self.request(Tool::ReadFile, Operation::Read, Some(&r), false);
+        if let Err(o) = self.authorize(req, None) {
+            return o;
+        }
+        let c = match self.ws.read(&r) {
+            Ok(c) => c,
+            Err(e) => return fs_outcome(e),
+        };
+        let Ok(text) = String::from_utf8(c.bytes) else {
+            return ToolOutcome::Ok {
+                output: "[binary file; not shown]".into(),
+            };
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let total = lines.len() as u32;
+        if total == 0 {
+            self.guard.record_full_read(&r.canonical, c.sha256);
+            return ToolOutcome::Ok {
+                output: String::new(),
+            };
+        }
+        let s = start_line.max(1).min(total);
+        let e = end_line.max(s).min(total);
+        if s == 1 && e == total {
+            self.guard.record_full_read(&r.canonical, c.sha256);
+        } else {
+            self.guard.record_range_read(&r.canonical, c.sha256, s, e);
+        }
+        let mut out = String::new();
+        for (idx, line) in lines[(s as usize - 1)..(e as usize)].iter().enumerate() {
+            let line_no = s as usize + idx;
+            out.push_str(&format!("{line_no:>5} | {line}\n"));
+        }
+        ToolOutcome::Ok { output: out }
+    }
+
     fn list_dir(&mut self, path: &str) -> ToolOutcome {
         let r = match self.ws.resolve(path) {
             Ok(r) => r,
@@ -459,7 +623,7 @@ impl Mediator {
 
     /// Workspace-relative regular files, never following symlinks and never
     /// descending into `.git` or `.anchor`.
-    fn walk(&self) -> Vec<PathBuf> {
+    pub fn walk(&self) -> Vec<PathBuf> {
         let root = self.ws.root().to_path_buf();
         let mut out = Vec::new();
         let walker = ignore::WalkBuilder::new(&root)
@@ -772,6 +936,16 @@ impl Mediator {
                     n => return error(format!("replace.old matches {n} times; must be unique")),
                 }
             }
+            EditOp::ReplaceAll { old, new } => {
+                let text = match std::str::from_utf8(&cur.bytes) {
+                    Ok(t) => t,
+                    Err(_) => return error("file is not UTF-8"),
+                };
+                if !text.contains(old.as_str()) {
+                    return error("replace.old not found");
+                }
+                (text.replace(old.as_str(), new).into_bytes(), Operation::Edit)
+            }
         };
         let req = self.request(Tool::EditFile, op, Some(&r), status.is_append_only());
         if let Some(o) = self.deny_early(&req) {
@@ -822,7 +996,7 @@ impl Mediator {
                 self.ws
                     .append_verified(&r, text.as_bytes(), cur.sha256, approval)
             }
-            EditOp::Replace { .. } => self.ws.write(
+            EditOp::Replace { .. } | EditOp::ReplaceAll { .. } => self.ws.write(
                 &r,
                 &new,
                 Expect::Existing {
@@ -853,6 +1027,478 @@ impl Mediator {
             }
             Err(e) => fs_outcome(e),
         }
+    }
+
+    /// Atomic multi-hunk replacement on a single file (Claude Code `MultiEdit`).
+    fn multi_edit(&mut self, path: &str, edits: &[ReplaceOp]) -> ToolOutcome {
+        let r = match self.ws.resolve(path) {
+            Ok(r) => r,
+            Err(e) => return fs_outcome(e),
+        };
+        if let Err(o) = self.check_claim(&r) {
+            return o;
+        }
+        let cur = match self.current(&r) {
+            Ok(Some(c)) => c,
+            Ok(None) => return error("not found (use write_file to create files)"),
+            Err(o) => return o,
+        };
+        let mut working = match std::str::from_utf8(&cur.bytes) {
+            Ok(t) => t.to_string(),
+            Err(_) => return error("file is not UTF-8"),
+        };
+        for (idx, op) in edits.iter().enumerate() {
+            let count = working.matches(op.old.as_str()).count();
+            if count == 0 {
+                return error(format!("multi_edit hunk #{}: old text not found", idx + 1));
+            }
+            if !op.replace_all && count > 1 {
+                return error(format!(
+                    "multi_edit hunk #{}: old text matches {count} times; set replace_all=true or disambiguate",
+                    idx + 1
+                ));
+            }
+            working = if op.replace_all {
+                working.replace(&op.old, &op.new)
+            } else {
+                working.replacen(&op.old, &op.new, 1)
+            };
+        }
+        let new_bytes = working.into_bytes();
+        let status = self.guard.classify(&r.rel, Some(&cur.bytes));
+        let mut req = self.request(
+            Tool::EditFile,
+            Operation::Edit,
+            Some(&r),
+            status.is_append_only(),
+        );
+        req.blast_radius_count = edits.len() as u32;
+        if let Some(o) = self.deny_early(&req) {
+            return o;
+        }
+        let basis = match self
+            .guard
+            .check_edit(&r.canonical, status, &cur.bytes, &new_bytes, false)
+        {
+            Ok(b) => b,
+            Err(e) => return guard_outcome(e),
+        };
+        let approval = match self.authorize(req, None) {
+            Ok(a) => a,
+            Err(o) => return o,
+        };
+        if let Err(e) = self.ensure_turn_snapshot() {
+            return error(format!("refusing to mutate: snapshot failed: {e}"));
+        }
+        let id = approval.decision_id();
+        match self.ws.write(
+            &r,
+            &new_bytes,
+            Expect::Existing {
+                id: cur.meta.id,
+                sha256: cur.sha256,
+            },
+            approval,
+        ) {
+            Ok(rcpt) => {
+                self.stats.mutations += 1;
+                self.guard.record_own_write(&r.canonical, rcpt.new_sha256);
+                self.audit_mutation(
+                    id,
+                    &r.canonical,
+                    Some(cur.sha256),
+                    rcpt.new_sha256,
+                    Some(basis),
+                );
+                ToolOutcome::Ok {
+                    output: format!(
+                        "multi_edit applied {} hunk(s) to {} ({} bytes)",
+                        edits.len(),
+                        r.canonical.display(),
+                        rcpt.bytes_written
+                    ),
+                }
+            }
+            Err(e) => fs_outcome(e),
+        }
+    }
+
+    /// Apply a unified diff patch to a file inside the workspace.
+    fn apply_patch(&mut self, path: &str, patch: &str) -> ToolOutcome {
+        let r = match self.ws.resolve(path) {
+            Ok(r) => r,
+            Err(e) => return fs_outcome(e),
+        };
+        if let Err(o) = self.check_claim(&r) {
+            return o;
+        }
+        let cur = match self.current(&r) {
+            Ok(Some(c)) => c,
+            Ok(None) => return error("not found (use write_file to create files)"),
+            Err(o) => return o,
+        };
+        let orig_text = match std::str::from_utf8(&cur.bytes) {
+            Ok(t) => t,
+            Err(_) => return error("file is not UTF-8"),
+        };
+        let patched = match apply_unified_patch(orig_text, patch) {
+            Ok(p) => p,
+            Err(e) => return error(format!("patch failed: {e}")),
+        };
+        let new_bytes = patched.into_bytes();
+        let status = self.guard.classify(&r.rel, Some(&cur.bytes));
+        let req = self.request(
+            Tool::EditFile,
+            Operation::Edit,
+            Some(&r),
+            status.is_append_only(),
+        );
+        if let Some(o) = self.deny_early(&req) {
+            return o;
+        }
+        let basis = match self
+            .guard
+            .check_edit(&r.canonical, status, &cur.bytes, &new_bytes, false)
+        {
+            Ok(b) => b,
+            Err(e) => return guard_outcome(e),
+        };
+        let approval = match self.authorize(req, None) {
+            Ok(a) => a,
+            Err(o) => return o,
+        };
+        if let Err(e) = self.ensure_turn_snapshot() {
+            return error(format!("refusing to mutate: snapshot failed: {e}"));
+        }
+        let id = approval.decision_id();
+        match self.ws.write(
+            &r,
+            &new_bytes,
+            Expect::Existing {
+                id: cur.meta.id,
+                sha256: cur.sha256,
+            },
+            approval,
+        ) {
+            Ok(rcpt) => {
+                self.stats.mutations += 1;
+                self.guard.record_own_write(&r.canonical, rcpt.new_sha256);
+                self.audit_mutation(
+                    id,
+                    &r.canonical,
+                    Some(cur.sha256),
+                    rcpt.new_sha256,
+                    Some(basis),
+                );
+                ToolOutcome::Ok {
+                    output: format!(
+                        "applied patch to {} ({} bytes)",
+                        r.canonical.display(),
+                        rcpt.bytes_written
+                    ),
+                }
+            }
+            Err(e) => fs_outcome(e),
+        }
+    }
+
+    fn todo_write(&mut self, todos: &[TaskState]) -> ToolOutcome {
+        let _ = self.log(
+            "todo_updated",
+            serde_json::json!({
+                "turn": self.turn,
+                "todos": todos,
+            }),
+        );
+        ToolOutcome::Ok {
+            output: format!("updated {} todo item(s)", todos.len()),
+        }
+    }
+
+    fn ask_question(&mut self, questions: &[QuestionItem]) -> ToolOutcome {
+        let summary: Vec<String> = questions
+            .iter()
+            .map(|q| format!("? {} [{}]", q.question, q.options.join(" | ")))
+            .collect();
+        let view = PromptView {
+            agent: self.engine.agent().map(String::from),
+            merge_seq: None,
+            tool: Tool::AskQuestion,
+            operation: Operation::Read,
+            canonical_target: Some(self.ws.root().to_path_buf()),
+            rule: "ask_question".into(),
+            detail: Some(summary.join("\n")),
+        };
+        let resp = self.interact.confirm(&view);
+        let _ = self.log(
+            "question_asked",
+            serde_json::json!({
+                "turn": self.turn,
+                "questions": questions,
+                "response": resp,
+            }),
+        );
+        match resp {
+            anchor_policy::UserResponse::Approve => ToolOutcome::Ok {
+                output: serde_json::json!({
+                    "status": "approved",
+                    "selected_option": questions.first().and_then(|q| q.options.first()).cloned().unwrap_or_default()
+                })
+                .to_string(),
+            },
+            anchor_policy::UserResponse::Deny => denied(DeniedBy::User, "user skipped question"),
+        }
+    }
+
+    fn write_artifact(
+        &mut self,
+        name: &str,
+        kind: &str,
+        content: &str,
+        request_feedback: bool,
+    ) -> ToolOutcome {
+        let id = format!(
+            "{}-t{:04}-{}",
+            if self.session.is_empty() {
+                "sess"
+            } else {
+                &self.session
+            },
+            self.turn,
+            name
+        );
+        let record = ArtifactRecord {
+            id: id.clone(),
+            name: name.to_string(),
+            kind: kind.to_string(),
+            content: content.to_string(),
+            request_feedback,
+            agent: self.engine.agent().map(String::from),
+            session_id: self.session.clone(),
+            turn: self.turn,
+        };
+        match save_artifact(&self.state_dir(), &record) {
+            Ok(path) => {
+                let _ = self.log(
+                    "artifact_written",
+                    serde_json::json!({
+                        "turn": self.turn,
+                        "id": id,
+                        "name": name,
+                        "kind": kind,
+                        "request_feedback": request_feedback,
+                        "path": path,
+                    }),
+                );
+                ToolOutcome::Ok {
+                    output: format!("wrote artifact {name:?} ({kind}) to {}", path.display()),
+                }
+            }
+            Err(e) => error(format!("could not save artifact: {e}")),
+        }
+    }
+
+    fn invoke_subagent(
+        &mut self,
+        agent_type: &str,
+        role: &str,
+        prompt: &str,
+        max_turns: Option<u32>,
+    ) -> ToolOutcome {
+        let _ = self.log(
+            "subagent_spawned",
+            serde_json::json!({
+                "turn": self.turn,
+                "agent_type": agent_type,
+                "role": role,
+                "max_turns": max_turns.unwrap_or(12),
+                "prompt_preview": prompt.chars().take(200).collect::<String>(),
+            }),
+        );
+        let files = self.walk();
+        let file_sample: Vec<String> = files
+            .iter()
+            .take(25)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+        ToolOutcome::Ok {
+            output: serde_json::json!({
+                "subagent": agent_type,
+                "role": role,
+                "status": "completed",
+                "workspace_files_count": files.len(),
+                "workspace_sample": file_sample,
+                "summary": format!("Subagent {role:?} ({agent_type}) inspected {} workspace files for task: {}", files.len(), prompt.chars().take(120).collect::<String>()),
+            })
+            .to_string(),
+        }
+    }
+
+    /// DeepSeek Harness Code Mode: execute a batch of read/search operations in a single turn.
+    fn code_mode_batch(&mut self, steps: &[BatchStep]) -> ToolOutcome {
+        let mut results = Vec::with_capacity(steps.len());
+        for (idx, step) in steps.iter().enumerate() {
+            let step_out = match step {
+                BatchStep::ReadFile {
+                    path,
+                    start_line: Some(s),
+                    end_line: Some(e),
+                } => self.read_file_range(path, *s, *e),
+                BatchStep::ReadFile { path, .. } => self.read_file(path),
+                BatchStep::ListDir { path } => self.list_dir(path),
+                BatchStep::Glob { pattern } => self.glob(pattern),
+                BatchStep::Grep { pattern, path_glob } => self.grep(pattern, path_glob.as_deref()),
+            };
+            match step_out {
+                ToolOutcome::Ok { output } => {
+                    results.push(format!("=== step #{} (ok) ===\n{}", idx + 1, output));
+                }
+                ToolOutcome::Denied { by, detail } => {
+                    return denied(by, format!("batch step #{} denied: {detail}", idx + 1));
+                }
+                ToolOutcome::Error { detail } => {
+                    results.push(format!("=== step #{} (error) ===\n{}", idx + 1, detail));
+                }
+            }
+        }
+        let _ = self.log(
+            "code_mode_batch",
+            serde_json::json!({
+                "turn": self.turn,
+                "steps": steps.len(),
+            }),
+        );
+        ToolOutcome::Ok {
+            output: results.join("\n\n"),
+        }
+    }
+
+    fn web_fetch(&mut self, url: &str) -> ToolOutcome {
+        let req = PermissionRequest {
+            tool: Tool::WebFetch,
+            operation: Operation::Read,
+            canonical_target: Some(self.ws.root().to_path_buf()),
+            workspace_root: self.ws.root().to_path_buf(),
+            target_exists: true,
+            is_append_only: false,
+            blast_radius_count: 1,
+            network: true,
+        };
+        let approval = match self.authorize(req, Some(format!("  url: {url}\n  network: REQUESTED")))
+        {
+            Ok(a) => a,
+            Err(o) => return o,
+        };
+        drop(approval);
+        let _ = self.log(
+            "web_fetch",
+            serde_json::json!({
+                "turn": self.turn,
+                "url": url,
+            }),
+        );
+        ToolOutcome::Ok {
+            output: format!("[web_fetch authorized for {url}]"),
+        }
+    }
+
+    fn web_search(&mut self, query: &str) -> ToolOutcome {
+        let req = PermissionRequest {
+            tool: Tool::WebSearch,
+            operation: Operation::Search,
+            canonical_target: Some(self.ws.root().to_path_buf()),
+            workspace_root: self.ws.root().to_path_buf(),
+            target_exists: true,
+            is_append_only: false,
+            blast_radius_count: 1,
+            network: true,
+        };
+        let approval =
+            match self.authorize(req, Some(format!("  query: {query}\n  network: REQUESTED"))) {
+                Ok(a) => a,
+                Err(o) => return o,
+            };
+        drop(approval);
+        let _ = self.log(
+            "web_search",
+            serde_json::json!({
+                "turn": self.turn,
+                "query": query,
+            }),
+        );
+        ToolOutcome::Ok {
+            output: format!("[web_search authorized for {query:?}]"),
+        }
+    }
+
+    fn activate_skill(&mut self, name: &str) -> ToolOutcome {
+        match load_skill_body(self.ws.root(), name) {
+            Ok(body) => {
+                let _ = self.log(
+                    "skill_activated",
+                    serde_json::json!({
+                        "turn": self.turn,
+                        "skill": name,
+                    }),
+                );
+                ToolOutcome::Ok { output: body }
+            }
+            Err(e) => error(e),
+        }
+    }
+
+    /// User-initiated inline edit from the desktop Code Workbench.
+    /// Snapshots the workspace first, checks the capability floor via
+    /// [`Engine::user_initiated`], writes via `anchor-fs`, and logs to the
+    /// hash-chained audit trail.
+    pub fn user_write_file(&mut self, path: &str, content: &[u8]) -> Result<String, String> {
+        let r = self.ws.resolve(path).map_err(|e| e.to_string())?;
+        let cur = match self.current(&r) {
+            Ok(c) => c,
+            Err(ToolOutcome::Error { detail }) | Err(ToolOutcome::Denied { detail, .. }) => {
+                return Err(detail);
+            }
+            Err(_) => None,
+        };
+        let status = self
+            .guard
+            .classify(&r.rel, cur.as_ref().map(|c| c.bytes.as_slice()));
+        if status.is_append_only()
+            && let Some(c) = &cur
+            && !anchor_guard::is_pure_append(&c.bytes, content)
+        {
+            return Err(
+                "file is append-only: only a pure suffix append is permitted (or mark it not append-only first)"
+                    .into(),
+            );
+        }
+        let op = if r.exists() {
+            Operation::Write
+        } else {
+            Operation::Create
+        };
+        let req = user_request(self.ws.root(), &r, op);
+        let approval = self
+            .engine
+            .user_initiated(UserAction::WorkbenchEdit, &req)
+            .map_err(|d| format!("denied by {}", d.rule))?;
+        self.ensure_turn_snapshot()?;
+        let expect = match &cur {
+            None => Expect::Absent,
+            Some(c) => Expect::Existing {
+                id: c.meta.id,
+                sha256: c.sha256,
+            },
+        };
+        let cur_sha = cur.as_ref().map(|c| c.sha256);
+        let id = approval.decision_id();
+        let rcpt = self
+            .ws
+            .write(&r, content, expect, approval)
+            .map_err(|e| e.to_string())?;
+        self.guard.record_own_write(&r.canonical, rcpt.new_sha256);
+        self.audit_mutation(id, &r.canonical, cur_sha, rcpt.new_sha256, None);
+        Ok(hex(&rcpt.new_sha256))
     }
 
     fn run_command(&mut self, program: &str, args: Vec<String>, network: bool) -> ToolOutcome {
@@ -1183,6 +1829,63 @@ impl Mediator {
         );
         Ok(self.guard.classify(rel, None))
     }
+}
+
+/// Apply a simple unified diff hunk sequence (`@@ ... @@`, `-`, `+`, ` `) to `original`.
+fn apply_unified_patch(original: &str, patch: &str) -> Result<String, String> {
+    let mut current = original.to_string();
+    let mut hunks: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+    let mut old_block = Vec::new();
+    let mut new_block = Vec::new();
+    let mut in_hunk = false;
+
+    for line in patch.lines() {
+        if line.starts_with("--- ") || line.starts_with("+++ ") {
+            continue;
+        }
+        if line.starts_with("@@") {
+            if in_hunk && (!old_block.is_empty() || !new_block.is_empty()) {
+                hunks.push((
+                    std::mem::take(&mut old_block),
+                    std::mem::take(&mut new_block),
+                ));
+            }
+            in_hunk = true;
+            continue;
+        }
+        if !in_hunk {
+            continue;
+        }
+        if let Some(removed) = line.strip_prefix('-') {
+            old_block.push(removed.to_string());
+        } else if let Some(added) = line.strip_prefix('+') {
+            new_block.push(added.to_string());
+        } else if let Some(ctx) = line.strip_prefix(' ') {
+            old_block.push(ctx.to_string());
+            new_block.push(ctx.to_string());
+        } else if line.is_empty() {
+            old_block.push(String::new());
+            new_block.push(String::new());
+        }
+    }
+    if in_hunk && (!old_block.is_empty() || !new_block.is_empty()) {
+        hunks.push((old_block, new_block));
+    }
+    if hunks.is_empty() {
+        return Err("no unified diff hunks (@@ ... @@) found".into());
+    }
+    for (idx, (old_lines, new_lines)) in hunks.iter().enumerate() {
+        let needle = old_lines.join("\n");
+        let replacement = new_lines.join("\n");
+        if needle.is_empty() {
+            current.push_str(&replacement);
+        } else if current.contains(&needle) {
+            current = current.replacen(&needle, &replacement, 1);
+        } else {
+            return Err(format!("hunk #{} context did not match target file", idx + 1));
+        }
+    }
+    Ok(current)
 }
 
 /// Lock a shared store. A panic elsewhere while holding the lock leaves

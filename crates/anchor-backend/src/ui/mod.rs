@@ -27,12 +27,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use anchor_guard::Guard;
 use anchor_hub::http::{Request, Response, ServerConfig, ServerHandle, Service};
-use anchor_hub::{Caller, Hub, MergeEntry, MergeStatus};
+use anchor_hub::{Caller, ClaimStatus, Hub, MergeEntry, MergeStatus};
 use anchor_policy::{AuditLog, Tailer};
 use anchor_snapshot::Id;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
+use crate::customizations::{self, ArtifactRecord};
 use crate::mediator::{Mediator, SharedStore, lock_store};
 
 mod assets;
@@ -79,7 +82,7 @@ struct State {
     src: Sources,
     feed: Mutex<Feed>,
     /// The main workspace's mediator, when no run holds it: enables
-    /// one-click rollback.
+    /// one-click rollback and workbench inline edits.
     workspace: Mutex<Option<Mediator>>,
     running: AtomicBool,
     diffs: Mutex<BTreeMap<(Id, Id), Vec<snapshots::FileChange>>>,
@@ -131,7 +134,7 @@ pub fn start(src: Sources, port: u16) -> std::io::Result<Ui> {
     let cfg = ServerConfig {
         // Long polls hold a worker each.
         workers: 12,
-        max_body_bytes: 64 << 10,
+        max_body_bytes: 512 << 10,
         ..ServerConfig::default()
     };
     let server = anchor_hub::http::serve_on(listener, state.clone(), cfg)?;
@@ -287,6 +290,15 @@ impl Service for State {
 }
 
 impl State {
+    fn state_dir(&self) -> PathBuf {
+        self.src
+            .audit
+            .path()
+            .parent()
+            .unwrap_or(self.src.workspace.as_path())
+            .to_path_buf()
+    }
+
     fn origin_ok(&self, req: &Request) -> bool {
         let ours = |v: &str, scheme: &str| {
             v == format!("{scheme}127.0.0.1:{}", self.port)
@@ -466,6 +478,12 @@ impl State {
                 (Some(a), Some(b), Some(p)) => self.snapshot_diff(a, b, p),
                 _ => bad("a, b and path required"),
             },
+            "workspace-file" => match q.get("path") {
+                Some(p) => self.workspace_file(p),
+                None => bad("path required"),
+            },
+            "customizations" => self.customizations(),
+            "artifacts" => self.artifacts(),
             _ => Response::error(404, "no such endpoint"),
         }
     }
@@ -502,8 +520,91 @@ impl State {
                 "store": { "available": self.src.store.is_some(), "note": self.src.store_note },
                 "rollback": self.can_rollback().err(),
                 "hub": self.src.hub.is_some(),
+                "todos": f.model.todos,
+                "reasoning_steps": f.model.reasoning_steps,
+                "subagents_spawned": f.model.subagents_spawned,
+                "hooks_run": f.model.hooks_run,
             }))
         })
+    }
+
+    fn workspace_file(&self, rel: &str) -> Response {
+        let ws = match anchor_fs::Workspace::open(&self.src.workspace) {
+            Ok(w) => w,
+            Err(e) => return Response::error(500, &e.to_string()),
+        };
+        let resolved = match ws.resolve(rel) {
+            Ok(r) => r,
+            Err(e) => return bad(&e.to_string()),
+        };
+        let path = &resolved.canonical;
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(m) => m,
+            Err(_) => return Response::error(404, "file not found"),
+        };
+        if !meta.is_file() {
+            return bad("not a regular file");
+        }
+        const MAX_VIEW_BYTES: u64 = 512 * 1024;
+        if meta.len() > MAX_VIEW_BYTES {
+            return bad("file exceeds 512 KiB viewer limit");
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => return Response::error(500, &e.to_string()),
+        };
+        let content = match String::from_utf8(bytes.clone()) {
+            Ok(s) => s,
+            Err(_) => return bad("binary file (non-UTF-8)"),
+        };
+        let lines = content.lines().count();
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let sha256 = anchor_policy::audit::hex(&digest);
+        let append_only = match Guard::heuristic(Path::new(rel), Some(&bytes)) {
+            Some(_) => "append_only",
+            None => "normal",
+        };
+        let claim = self.src.hub.as_ref().and_then(|hub| {
+            let names = self.names();
+            let now = hub.now_ms();
+            let claims = hub.view_claims().ok()?;
+            claims
+                .into_iter()
+                .find(|c| c.status == ClaimStatus::Active && c.lease_expires_at > now && c.path == rel)
+                .map(|c| {
+                    json!({
+                        "agent": names.get(&c.agent_id).cloned(),
+                        "claim_type": c.claim_type,
+                    })
+                })
+        });
+        ok(json!({
+            "path": rel,
+            "content": content,
+            "lines": lines,
+            "bytes": bytes.len(),
+            "sha256": sha256,
+            "append_only": append_only,
+            "claim": claim,
+            "editable": self.can_rollback().is_ok(),
+        }))
+    }
+
+    fn customizations(&self) -> Response {
+        let state_dir = self.state_dir();
+        let inventory = customizations::discover(&self.src.workspace, &state_dir);
+        let policy_toml = std::fs::read_to_string(state_dir.join("policy.toml"))
+            .or_else(|_| std::fs::read_to_string(self.src.workspace.join("policy.toml")))
+            .unwrap_or_default();
+        ok(json!({
+            "inventory": inventory,
+            "policy_toml": policy_toml,
+        }))
+    }
+
+    fn artifacts(&self) -> Response {
+        let artifacts = customizations::list_artifacts(&self.state_dir());
+        ok(json!({ "artifacts": artifacts }))
     }
 
     /// Events after `after`; with `wait`, hold the request up to 8 s for
@@ -918,6 +1019,77 @@ impl State {
                     return bad("nonce required");
                 };
                 self.rollback_confirm(n)
+            }
+            "file/edit" => {
+                if !allowed(&["path", "content"]) {
+                    return bad("unexpected fields");
+                }
+                let (Some(path), Some(content)) =
+                    (field("path").as_str(), field("content").as_str())
+                else {
+                    return bad("path and content required");
+                };
+                if let Err(e) = self.can_rollback() {
+                    return Response::error(409, e);
+                }
+                if let Err(r) = self.audit_action("workbench_edit", &json!({ "path": path, "bytes": content.len() })) {
+                    return r;
+                }
+                let mut ws = self.workspace.lock().unwrap_or_else(|p| p.into_inner());
+                let Some(m) = ws.as_mut() else {
+                    return Response::error(409, "the workspace is not available");
+                };
+                match m.user_write_file(path, content.as_bytes()) {
+                    Ok(msg) => ok(json!({ "ok": true, "path": path, "message": msg })),
+                    Err(e) => Response::error(409, &e),
+                }
+            }
+            "artifacts/create" => {
+                if !allowed(&["name", "kind", "content", "request_feedback"]) {
+                    return bad("unexpected fields");
+                }
+                let (Some(name), Some(kind), Some(content)) = (
+                    field("name").as_str(),
+                    field("kind").as_str(),
+                    field("content").as_str(),
+                ) else {
+                    return bad("name, kind and content required");
+                };
+                let request_feedback = field("request_feedback").as_bool().unwrap_or(false);
+                if let Err(r) = self.audit_action("create_artifact", &json!({ "name": name, "kind": kind })) {
+                    return r;
+                }
+                let record = ArtifactRecord {
+                    id: name.to_string(),
+                    name: name.to_string(),
+                    kind: kind.to_string(),
+                    content: content.to_string(),
+                    request_feedback,
+                    agent: Some("user".into()),
+                    session_id: "ui".into(),
+                    turn: 0,
+                };
+                match customizations::save_artifact(&self.state_dir(), &record) {
+                    Ok(_) => ok(json!({ "ok": true, "artifact": record })),
+                    Err(e) => Response::error(500, &e.to_string()),
+                }
+            }
+            "session/prompt" => {
+                if !allowed(&["prompt", "mode"]) {
+                    return bad("unexpected fields");
+                }
+                let (Some(prompt), Some(mode)) =
+                    (field("prompt").as_str(), field("mode").as_str())
+                else {
+                    return bad("prompt and mode required");
+                };
+                if prompt.trim().is_empty() || prompt.len() > 32_768 {
+                    return bad("prompt must be 1..32768 bytes");
+                }
+                if let Err(r) = self.audit_action("session_prompt", &json!({ "prompt": prompt, "mode": mode })) {
+                    return r;
+                }
+                ok(json!({ "ok": true, "mode": mode, "queued": true }))
             }
             _ => Response::error(404, "no such action"),
         }

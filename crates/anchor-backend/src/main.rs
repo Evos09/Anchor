@@ -18,6 +18,8 @@ const USAGE: &str = "\
 anchor — trust-first coding agent (backend harness)
 
 USAGE:
+  anchor [ui] [--workspace DIR] [--port N] [--ui-url-file FILE]
+                             launch the Desktop Workbench UI (default when run with no args)
   anchor run --workspace DIR --task TEXT --roles FILE [options]
       --policy FILE          use this policy instead of the workspace's policy.toml
       --mock-script FILE     scripted responses for `kind = \"mock\"` providers
@@ -503,6 +505,7 @@ fn main() -> ExitCode {
         }
     };
     let r = match a.pos.first().map(String::as_str) {
+        None if a.flags.is_empty() => hubcli::cmd_ui(&a),
         Some("run") => cmd_run(&a),
         Some("audit") => cmd_audit(&a),
         Some("policy") => cmd_policy(&a),

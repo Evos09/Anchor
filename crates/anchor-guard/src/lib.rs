@@ -6,6 +6,7 @@
 //!   permitted edit is a pure suffix append, verified byte-for-byte.
 //! * On any other existing file, a write or edit requires that the *entire*
 //!   file was read in this session **and** that it has not changed since, or
+//!   that the edited lines fall within a line-range read in this session, or
 //!   that the user confirmed an explicit diff of what will be deleted.
 //!
 //! Append-only status comes from (ADR-0010):
@@ -115,8 +116,11 @@ pub struct WorkspaceConfig {
 pub enum WriteBasis {
     NewFile,
     FullReadInSession,
+    RangeReadInSession,
     UserConfirmedDiff,
 }
+
+type RangeLedgerEntry = ([u8; 32], Vec<(u32, u32)>);
 
 #[derive(Debug)]
 pub struct Guard {
@@ -126,6 +130,8 @@ pub struct Guard {
     /// canonical path -> sha256 of the full content the agent last read
     /// (or wrote) in this session.
     ledger: HashMap<PathBuf, [u8; 32]>,
+    /// canonical path -> (sha256 of full file when range was read, merged 1-based inclusive line ranges).
+    range_ledger: HashMap<PathBuf, RangeLedgerEntry>,
     /// [`WorkspaceConfig::detected_append_only`], updated on detection.
     detected: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
@@ -160,6 +166,7 @@ impl Guard {
             detected: std::sync::Mutex::new(config.detected_append_only.iter().cloned().collect()),
             config,
             ledger: HashMap::new(),
+            range_ledger: HashMap::new(),
         })
     }
 
@@ -246,9 +253,46 @@ impl Guard {
         self.ledger.insert(canonical.to_path_buf(), sha256);
     }
 
+    /// Record that the agent read a 1-based inclusive line range `[start_line, end_line]`
+    /// of a file whose full content hash is `sha256`. Adjacent or overlapping ranges
+    /// for the same content hash are merged automatically.
+    pub fn record_range_read(
+        &mut self,
+        canonical: &Path,
+        sha256: [u8; 32],
+        start_line: u32,
+        end_line: u32,
+    ) {
+        if start_line == 0 || end_line < start_line {
+            return;
+        }
+        let entry = self
+            .range_ledger
+            .entry(canonical.to_path_buf())
+            .or_insert_with(|| (sha256, Vec::new()));
+        if entry.0 != sha256 {
+            entry.0 = sha256;
+            entry.1.clear();
+        }
+        entry.1.push((start_line, end_line));
+        entry.1.sort_unstable_by_key(|r| r.0);
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(entry.1.len());
+        for (s, e) in entry.1.drain(..) {
+            if let Some(last) = merged.last_mut()
+                && s <= last.1.saturating_add(1)
+            {
+                last.1 = last.1.max(e);
+            } else {
+                merged.push((s, e));
+            }
+        }
+        entry.1 = merged;
+    }
+
     /// Record the content the agent itself just wrote (it knows it fully).
     pub fn record_own_write(&mut self, canonical: &Path, sha256: [u8; 32]) {
         self.ledger.insert(canonical.to_path_buf(), sha256);
+        self.range_ledger.remove(canonical);
     }
 
     fn require_read(
@@ -261,7 +305,10 @@ impl Guard {
             Some(h) if *h == current_sha => Ok(WriteBasis::FullReadInSession),
             _ if diff_confirmed => Ok(WriteBasis::UserConfirmedDiff),
             Some(_) => Err(GuardError::StaleRead),
-            None => Err(GuardError::NotReadInSession),
+            None => match self.range_ledger.get(canonical) {
+                Some((h, _)) if *h != current_sha => Err(GuardError::StaleRead),
+                _ => Err(GuardError::NotReadInSession),
+            },
         }
     }
 
@@ -300,6 +347,20 @@ impl Guard {
             return Ok(WriteBasis::FullReadInSession);
         }
         let current: [u8; 32] = Sha256::digest(original).into();
+        if let Some(h) = self.ledger.get(canonical)
+            && *h == current
+        {
+            return Ok(WriteBasis::FullReadInSession);
+        }
+        if let Some((h, ranges)) = self.range_ledger.get(canonical)
+            && *h == current
+            && let Some((first_line, last_line)) = changed_line_span(original, new)
+            && ranges
+                .iter()
+                .any(|&(s, e)| s <= first_line && last_line <= e)
+        {
+            return Ok(WriteBasis::RangeReadInSession);
+        }
         self.require_read(canonical, current, diff_confirmed)
     }
 
@@ -356,6 +417,37 @@ pub fn is_pure_append(original: &[u8], new: &[u8]) -> bool {
     }
     let prefix = &new[..original.len()];
     Sha256::digest(prefix) == Sha256::digest(original) && prefix == original
+}
+
+/// Compute the 1-based inclusive line span `(first_line, last_line)` in `original`
+/// that differs between `original` and `new`.
+fn changed_line_span(original: &[u8], new: &[u8]) -> Option<(u32, u32)> {
+    let orig_str = std::str::from_utf8(original).ok()?;
+    let new_str = std::str::from_utf8(new).ok()?;
+    let orig_lines: Vec<&str> = orig_str.lines().collect();
+    let new_lines: Vec<&str> = new_str.lines().collect();
+    if orig_lines.is_empty() {
+        return None;
+    }
+    let mut prefix = 0usize;
+    while prefix < orig_lines.len()
+        && prefix < new_lines.len()
+        && orig_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+    let mut suffix = 0usize;
+    while suffix < (orig_lines.len() - prefix)
+        && suffix < (new_lines.len() - prefix)
+        && orig_lines[orig_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let total = orig_lines.len() as u32;
+    let first_line = ((prefix as u32) + 1).min(total);
+    let end_idx = orig_lines.len().saturating_sub(suffix) as u32;
+    let last_line = end_idx.max(first_line).min(total);
+    Some((first_line, last_line))
 }
 
 #[cfg(test)]

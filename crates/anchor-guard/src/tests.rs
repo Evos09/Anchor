@@ -272,3 +272,51 @@ fn heuristic_detection_is_sticky() {
         AppendOnlyStatus::Overridden(_)
     ));
 }
+
+
+#[test]
+fn range_read_permits_localized_edit_and_rejects_outside_range() {
+    let (mut g, _d) = guard();
+    let orig = b"line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n";
+    let h = sha(orig);
+    g.record_range_read(Path::new(CANON), h, 2, 4);
+
+    // Editing line 3 (within 2..=4) is authorized by RangeReadInSession.
+    let edited_in_range = b"line 1\nline 2\nline 3 modified\nline 4\nline 5\nline 6\n";
+    assert_eq!(
+        g.check_edit(
+            Path::new(CANON),
+            AppendOnlyStatus::No,
+            orig,
+            edited_in_range,
+            false
+        ),
+        Ok(WriteBasis::RangeReadInSession)
+    );
+
+    // Editing line 6 (outside 2..=4) is refused with NotReadInSession.
+    let edited_outside = b"line 1\nline 2\nline 3\nline 4\nline 5\nline 6 modified\n";
+    assert_eq!(
+        g.check_edit(
+            Path::new(CANON),
+            AppendOnlyStatus::No,
+            orig,
+            edited_outside,
+            false
+        ),
+        Err(GuardError::NotReadInSession)
+    );
+
+    // Reading adjacent range 5..=6 merges with 2..=4 -> 2..=6.
+    g.record_range_read(Path::new(CANON), h, 5, 6);
+    assert_eq!(
+        g.check_edit(
+            Path::new(CANON),
+            AppendOnlyStatus::No,
+            orig,
+            edited_outside,
+            false
+        ),
+        Ok(WriteBasis::RangeReadInSession)
+    );
+}

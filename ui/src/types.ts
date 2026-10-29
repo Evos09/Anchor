@@ -57,6 +57,12 @@ export interface Pending {
   created_ms: number;
 }
 
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed" | string;
+}
+
 export interface Overview {
   mode: "live" | "inspect";
   running: boolean;
@@ -73,6 +79,10 @@ export interface Overview {
   store: { available: boolean; note: string | null };
   rollback: string | null;
   hub: boolean;
+  todos?: TodoItem[];
+  reasoning_steps?: number;
+  subagents_spawned?: number;
+  hooks_run?: number;
 }
 
 export interface Claim {
@@ -254,4 +264,90 @@ export interface SnapshotsView {
   note?: string | null;
   snapshots: Snapshot[];
   rollback?: string | null;
+}
+
+export interface WorkspaceFileView {
+  path: string;
+  content: string;
+  lines: number;
+  bytes: number;
+  sha256: string;
+  append_only: "normal" | "append_only" | "review_needed";
+  claim: { agent: string | null; claim_type: string } | null;
+  editable: boolean;
+}
+
+export interface DiscoveredRule {
+  name: string;
+  scope: string;
+  trigger: string;
+  path: string;
+  tokens_est: number;
+  preview: string;
+}
+
+export interface DiscoveredSkill {
+  name: string;
+  description: string;
+  scope: string;
+  path: string;
+  has_scripts: boolean;
+  tokens_est: number;
+}
+
+export interface DiscoveredSubagent {
+  name: string;
+  role: string;
+  description: string;
+  model_hint: string;
+  tools: string[];
+  source: string;
+}
+
+export interface DiscoveredHook {
+  event: string;
+  matcher: string;
+  command: string;
+  source: string;
+}
+
+export interface DiscoveredMcpServer {
+  name: string;
+  transport: string;
+  command_or_url: string;
+  source: string;
+}
+
+export interface MemoryStatus {
+  path: string;
+  exists: boolean;
+  used_tokens: number;
+  budget_tokens: number;
+  content_preview: string;
+}
+
+export interface CustomizationsInventory {
+  rules: DiscoveredRule[];
+  skills: DiscoveredSkill[];
+  subagents: DiscoveredSubagent[];
+  hooks: DiscoveredHook[];
+  mcp_servers: DiscoveredMcpServer[];
+  memory: MemoryStatus;
+  total_rule_tokens: number;
+}
+
+export interface CustomizationsResponse {
+  inventory: CustomizationsInventory;
+  policy_toml: string;
+}
+
+export interface ArtifactRecord {
+  id: string;
+  name: string;
+  kind: "plan" | "report" | "walkthrough" | "diagram" | string;
+  content: string;
+  request_feedback: boolean;
+  agent: string | null;
+  session_id: string;
+  turn: number;
 }
