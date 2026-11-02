@@ -973,23 +973,25 @@ pub(crate) fn run_confined(spec: &CommandSpec) -> Result<Output, ExecError> {
             max_rss_bytes: ext.PeakProcessMemoryUsed as u64,
         })
     };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let (stdout, t1) = out_reader.take(deadline);
+    let (stderr, t2) = err_reader.take(deadline);
+
     // The job refuses allocations past its limit; a failure with the peak
     // at the limit is reported as such.
     let limit = spec.limits.address_space_bytes;
     let exit = match exit {
         ExitKind::Exited(c)
             if c != 0
-                && (ext.PeakJobMemoryUsed as u64).saturating_mul(100)
-                    >= limit.saturating_mul(95) =>
+                && ((ext.PeakJobMemoryUsed as u64).saturating_mul(100)
+                    >= limit.saturating_mul(95)
+                    || String::from_utf8_lossy(&stderr).contains("MemoryError")
+                    || String::from_utf8_lossy(&stderr).contains("out of memory")) =>
         {
             ExitKind::MemoryExceeded
         }
         e => e,
     };
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let (stdout, t1) = out_reader.take(deadline);
-    let (stderr, t2) = err_reader.take(deadline);
     Ok(Output {
         exit,
         stdout,

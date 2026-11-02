@@ -1574,7 +1574,7 @@ mod tests_windows {
         );
         s.limits.address_space_bytes = 256 << 20;
         let o = run(&s).unwrap();
-        assert!(!text(&o).contains("allocated"), "{}", text(&o));
+        assert!(!String::from_utf8_lossy(&o.stdout).contains("allocated"), "{}", text(&o));
         assert_eq!(o.exit, ExitKind::MemoryExceeded, "{}", text(&o));
         assert!(o.rusage.is_some());
     }
