@@ -162,14 +162,41 @@ fn run_desktop() -> Result<(), String> {
         server.attach_workspace(m);
     }
     let url = server.url();
+    log_line(&format!("workspace {} served on port {preferred_port}", ws.display()));
     launch_native_window(&url);
+    log_line("app window launched");
     server.wait();
     Ok(())
 }
 
+/// Appends a line to `anchor-desktop.log` next to the executable. The GUI
+/// subsystem has no console, so this is the only place failures surface.
+fn log_line(msg: &str) {
+    use std::io::Write;
+    let path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("anchor-desktop.log")))
+        .unwrap_or_else(|| PathBuf::from("anchor-desktop.log"));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
+}
+
 fn main() -> ExitCode {
+    std::panic::set_hook(Box::new(|info| log_line(&format!("PANIC: {info}"))));
+    log_line("starting anchor-desktop");
     match run_desktop() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::FAILURE,
+        Ok(()) => {
+            log_line("server stopped normally");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            log_line(&format!("ERROR: {e}"));
+            ExitCode::FAILURE
+        }
     }
 }
