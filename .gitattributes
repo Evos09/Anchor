@@ -1,0 +1,4 @@
+# Test fixtures are compared byte-for-byte (e.g. the dashboard E2E restores
+# calc.py and checks its exact contents), so keep them LF on every platform
+# regardless of core.autocrlf.
+examples/** text eol=lf
