@@ -2,20 +2,29 @@ import { useCallback, useEffect, useState } from "react";
 import { get, post } from "../api";
 import type { ArtifactRecord, Decision } from "../types";
 import { Badge, Empty, ErrorLine } from "../util";
+import { MarkdownView } from "../components/MarkdownView";
 
-export function ArtifactsPanel({ version }: { version: number }) {
+export function ArtifactsPanel({
+  version,
+  onExecutePlan,
+}: {
+  version: number;
+  onExecutePlan?: (planPrompt: string) => void;
+}) {
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"rendered" | "source">("rendered");
   const [composing, setComposing] = useState(false);
   const [name, setName] = useState("implementation_plan");
   const [kind, setKind] = useState<"plan" | "report" | "walkthrough" | "diagram">("plan");
   const [content, setContent] = useState(
-    "# Implementation Plan\n\n## Objective\nDescribe the architectural goal and verification criteria.\n\n## File Claims & Blast Radius\n- `src/...`\n\n## Verification Gate\n- `cargo test --workspace`\n",
+    "# Implementation Plan\n\n## Objective\nDescribe the architectural goal and verification criteria.\n\n## File Claims & Blast Radius\n- `calc.py` (bounds verification)\n- `tests/test_clamp.py` (test suite)\n\n## Verification Gate\n- `cargo test --workspace`\n\n> [!NOTE]\n> Read-before-write invariant is enforced across all file mutations.\n",
   );
   const [requestFeedback, setRequestFeedback] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -57,6 +66,34 @@ export function ArtifactsPanel({ version }: { version: number }) {
     }
   };
 
+  const copyContent = async () => {
+    if (!current) return;
+    try {
+      await navigator.clipboard.writeText(current.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // fallback
+    }
+  };
+
+  const downloadArtifact = () => {
+    if (!current) return;
+    const blob = new Blob([current.content], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${current.name}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExecute = () => {
+    if (!current) return;
+    const prompt = `Execute implementation plan from artifact '${current.name}.md':\n\n${current.content}`;
+    onExecutePlan?.(prompt);
+  };
+
   return (
     <div>
       <ErrorLine error={error} />
@@ -68,19 +105,26 @@ export function ArtifactsPanel({ version }: { version: number }) {
 
       <div className="wb-toolbar">
         <div className="row">
-          <strong>Artifacts & Implementation Plans</strong>
+          <strong>ARTIFACTS & IMPLEMENTATION STUDIO</strong>
           <span className="muted small">
-            Structured plans, walkthroughs, and verification reports persisted in session storage
+            Structured plans, architectural specs, and verification reports
           </span>
         </div>
-        <button type="button" className="btn btn-small btn-primary" onClick={() => setComposing((v) => !v)}>
+        <button
+          type="button"
+          className="btn btn-small btn-primary"
+          onClick={() => setComposing((v) => !v)}
+        >
           {composing ? "Close composer" : "+ New plan / artifact"}
         </button>
       </div>
 
       {composing && (
         <div className="card wb-composer">
-          <h3>Author Structured Artifact</h3>
+          <div className="wb-section-head">
+            <span>AUTHOR STRUCTURED ARTIFACT</span>
+            <span className="mono muted">MARKDOWN</span>
+          </div>
           <div className="filters">
             <label>
               Name{" "}
@@ -106,15 +150,15 @@ export function ArtifactsPanel({ version }: { version: number }) {
                 checked={requestFeedback}
                 onChange={(e) => setRequestFeedback(e.target.checked)}
               />{" "}
-              Gate execution on user Proceed / Review
+              Request user feedback before proceeding
             </label>
           </div>
           <textarea
-            className="wb-textarea"
+            className="wb-textarea mono"
             rows={10}
             value={content}
             onChange={(e) => setContent(e.target.value)}
-            aria-label="Artifact markdown content"
+            aria-label="Artifact Markdown Content"
           />
           <div className="actions">
             <button type="button" className="btn btn-primary" onClick={submitArtifact}>
@@ -139,7 +183,7 @@ export function ArtifactsPanel({ version }: { version: number }) {
                   className={current?.name === a.name ? "wb-filebtn wb-filebtn-on" : "wb-filebtn"}
                   onClick={() => setSelected(a.name)}
                 >
-                  <div className="row">
+                  <div className="row" style={{ justifyContent: "space-between" }}>
                     <code>{a.name}.md</code>
                     <Badge kind={a.kind === "plan" ? "info" : "muted"}>{a.kind}</Badge>
                   </div>
@@ -164,6 +208,7 @@ export function ArtifactsPanel({ version }: { version: number }) {
                 <div>{d.summary}</div>
               </li>
             ))}
+            {!decisions.length && <li className="small muted">No decisions recorded yet.</li>}
           </ul>
         </div>
 
@@ -177,15 +222,56 @@ export function ArtifactsPanel({ version }: { version: number }) {
             <div>
               <div className="wb-toolbar">
                 <div className="row">
-                  <code>{current.name}.md</code>
+                  <code className="wb-filepath">{current.name}.md</code>
                   <Badge kind={current.kind === "plan" ? "info" : "ok"}>{current.kind}</Badge>
-                  {current.request_feedback && <Badge kind="warn">awaiting feedback / proceed</Badge>}
+                  {current.request_feedback && <Badge kind="warn">awaiting approval</Badge>}
                 </div>
-                <span className="small mono muted">
-                  {current.agent ?? "user"} · session {current.session_id} · turn {current.turn}
-                </span>
+                <div className="row small">
+                  <div className="cmd-modes">
+                    <button
+                      type="button"
+                      className={viewMode === "rendered" ? "mode-pill mode-pill-on" : "mode-pill"}
+                      onClick={() => setViewMode("rendered")}
+                    >
+                      Rendered
+                    </button>
+                    <button
+                      type="button"
+                      className={viewMode === "source" ? "mode-pill mode-pill-on" : "mode-pill"}
+                      onClick={() => setViewMode("source")}
+                    >
+                      Raw .md
+                    </button>
+                  </div>
+                  <button type="button" className="btn btn-small" onClick={copyContent}>
+                    {copied ? "Copied! ✓" : "Copy"}
+                  </button>
+                  <button type="button" className="btn btn-small" onClick={downloadArtifact}>
+                    Download
+                  </button>
+                  {current.kind === "plan" && (
+                    <button
+                      type="button"
+                      className="btn btn-small btn-primary"
+                      onClick={handleExecute}
+                    >
+                      Approve & Execute Plan ▸
+                    </button>
+                  )}
+                </div>
               </div>
-              <pre className="pre wb-artifact-body">{current.content}</pre>
+
+              <div className="small mono muted" style={{ margin: "0.25rem 0 0.5rem" }}>
+                Author: {current.agent ?? "user"} · session {current.session_id} · turn {current.turn}
+              </div>
+
+              {viewMode === "rendered" ? (
+                <div className="card wb-artifact-rendered">
+                  <MarkdownView content={current.content} />
+                </div>
+              ) : (
+                <pre className="pre wb-artifact-body mono">{current.content}</pre>
+              )}
             </div>
           )}
         </div>

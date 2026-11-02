@@ -33,14 +33,14 @@ export const TABS = [
 ] as const;
 export type Tab = (typeof TABS)[number][0];
 
-const ACTIVITY_ITEMS: { id: Tab; icon: string; short: string; title: string }[] = [
-  { id: "story", icon: "◈", short: "MISSION", title: "Mission Control & What Happened" },
-  { id: "workbench", icon: "⌘", short: "CODE", title: "Code Workbench & File Editor" },
-  { id: "artifacts", icon: "▤", short: "PLANS", title: "Artifacts & Implementation Plans Studio" },
-  { id: "claims", icon: "◫", short: "CLAIMS", title: "Multi-Agent File Claim Map" },
-  { id: "merges", icon: "⑃", short: "MERGES", title: "Merge Queue & Verification Evidence" },
-  { id: "snapshots", icon: "⟲", short: "SNAPS", title: "Git-Backed Snapshot Timeline" },
-  { id: "customizations", icon: "⚙", short: "SKILLS", title: "Skills, Lifecycle Hooks & MCP" },
+const ACTIVITY_ITEMS: { id: Tab; icon: string; short: string; title: string; shortcut: string }[] = [
+  { id: "story", icon: "◈", short: "MISSION", title: "Mission Control & What Happened", shortcut: "1" },
+  { id: "workbench", icon: "⌘", short: "CODE", title: "Code Workbench & Editor", shortcut: "2" },
+  { id: "artifacts", icon: "▤", short: "PLANS", title: "Artifacts & Implementation Plans", shortcut: "3" },
+  { id: "claims", icon: "◫", short: "CLAIMS", title: "Multi-Agent File Claim Map", shortcut: "4" },
+  { id: "merges", icon: "⑃", short: "MERGES", title: "Merge Queue & Verification", shortcut: "5" },
+  { id: "snapshots", icon: "⟲", short: "SNAPS", title: "Git-Backed Snapshot Timeline", shortcut: "6" },
+  { id: "customizations", icon: "⚙", short: "SKILLS", title: "Skills, Lifecycle Hooks & MCP", shortcut: "7" },
 ];
 
 function tabFromHash(): Tab {
@@ -56,6 +56,7 @@ export function App() {
   const [tab, setTabState] = useState<Tab>(tabFromHash);
   const [focus, setFocus] = useState<{ merge?: number; snapshot?: string } | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>("calc.py");
+  const [externalPrompt, setExternalPrompt] = useState<string | null>(null);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [sidecarOpen, setSidecarOpen] = useState(true);
   const lastSeq = useRef(-1);
@@ -102,7 +103,7 @@ export function App() {
     }
   }, [refreshOverview]);
 
-  // The live feed: a long poll on new audit entries.
+  // Live long-polling for audit log events
   useEffect(() => {
     if (!hasToken()) return;
     let stop = false;
@@ -131,6 +132,29 @@ export function App() {
       stop = true;
     };
   }, [refreshOverview]);
+
+  // Global Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key >= "1" && e.key <= "7") {
+        const item = ACTIVITY_ITEMS[parseInt(e.key, 10) - 1];
+        if (item) {
+          e.preventDefault();
+          setTab(item.id);
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        setSidecarOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [setTab]);
+
+  const handleAskAgent = useCallback((promptText: string) => {
+    setExternalPrompt(promptText);
+    setSidecarOpen(true);
+  }, []);
 
   const colors = useMemo(() => makeColors((overview?.roster ?? []).map((r) => r.name)), [overview?.roster]);
   const version = overview?.last_seq ?? -1;
@@ -178,7 +202,7 @@ export function App() {
             </span>
           )}
           {ov && (
-            <span className="ws" title={ov.workspace}>
+            <span className="ws mono" title={ov.workspace}>
               {ov.workspace}
             </span>
           )}
@@ -194,7 +218,11 @@ export function App() {
             <button className={`stat ${ov.pending.length ? "stat-warn" : ""}`}>
               <b>{ov.pending.length}</b> awaiting you
             </button>
-            <button className="stat stat-plan" onClick={() => setTab("artifacts")} title="Reasoning CoT blocks recorded">
+            <button
+              className="stat stat-plan"
+              onClick={() => setTab("artifacts")}
+              title="Reasoning CoT blocks recorded"
+            >
               <b>{ov.reasoning_steps ?? 0}</b> CoT
             </button>
             <button
@@ -208,7 +236,7 @@ export function App() {
               type="button"
               className={`stat ${sidecarOpen ? "stat-plan" : ""}`}
               onClick={() => setSidecarOpen((v) => !v)}
-              title="Toggle Antigravity Agent Sidecar"
+              title="Toggle Antigravity Agent Sidecar (Ctrl+J)"
             >
               {sidecarOpen ? "✦ Sidecar ON" : "✦ Sidecar OFF"}
             </button>
@@ -266,7 +294,7 @@ export function App() {
                 key={item.id}
                 type="button"
                 className={tab === item.id ? "act-btn act-btn-on" : "act-btn"}
-                title={item.title}
+                title={`${item.title} (Ctrl+${item.shortcut})`}
                 onClick={() => setTab(item.id)}
               >
                 <span className="act-icon" aria-hidden="true">
@@ -291,7 +319,7 @@ export function App() {
             <button
               type="button"
               className={sidecarOpen ? "act-btn act-btn-on" : "act-btn"}
-              title="Toggle Agent Sidecar"
+              title="Toggle Agent Sidecar (Ctrl+J)"
               onClick={() => setSidecarOpen((v) => !v)}
             >
               <span className="act-icon" aria-hidden="true">
@@ -311,13 +339,15 @@ export function App() {
               <span>WORKSPACE EXPLORER</span>
               <span className="mono">{workspaceFiles.length} files</span>
             </div>
-            <ul className="wb-filelist" style={{ maxHeight: "12rem" }}>
+            <ul className="wb-filelist" style={{ maxHeight: "14rem" }}>
               {workspaceFiles.map((f) => (
                 <li key={f.path}>
                   <button
                     type="button"
                     className={
-                      selectedFile === f.path && tab === "workbench" ? "wb-filebtn wb-filebtn-on" : "wb-filebtn"
+                      selectedFile === f.path && tab === "workbench"
+                        ? "wb-filebtn wb-filebtn-on"
+                        : "wb-filebtn"
                     }
                     onClick={() => {
                       setSelectedFile(f.path);
@@ -398,6 +428,7 @@ export function App() {
                 onOpenTab={setTab}
                 onInspectFile={(p) => {
                   setSelectedFile(p);
+                  setTab("workbench");
                 }}
               />
             )}
@@ -432,9 +463,15 @@ export function App() {
                 colors={colors}
                 selectedFile={selectedFile}
                 onSelectFile={setSelectedFile}
+                onAskAgent={handleAskAgent}
               />
             )}
-            {tab === "artifacts" && <ArtifactsPanel version={version} />}
+            {tab === "artifacts" && (
+              <ArtifactsPanel
+                version={version}
+                onExecutePlan={handleAskAgent}
+              />
+            )}
             {tab === "customizations" && <CustomizationsPanel version={version} />}
           </section>
         </main>
@@ -455,7 +492,11 @@ export function App() {
                 >
                   Expand full
                 </button>
-                <button type="button" className="btn btn-small" onClick={() => setWorkbenchOpen(false)}>
+                <button
+                  type="button"
+                  className="btn btn-small"
+                  onClick={() => setWorkbenchOpen(false)}
+                >
                   ×
                 </button>
               </div>
@@ -465,6 +506,7 @@ export function App() {
               colors={colors}
               selectedFile={selectedFile}
               onSelectFile={setSelectedFile}
+              onAskAgent={handleAskAgent}
               compact
             />
           </aside>
@@ -476,6 +518,7 @@ export function App() {
             overview={ov}
             events={events}
             selectedFile={selectedFile}
+            externalPrompt={externalPrompt}
             colors={colors}
             onDispatched={syncEventsNow}
             onOpenTab={setTab}
