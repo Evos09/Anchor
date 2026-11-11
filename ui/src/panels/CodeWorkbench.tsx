@@ -32,21 +32,27 @@ export function CodeWorkbench({
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Sync available workspace files
-  useEffect(() => {
-    get<ClaimsView>("/api/claims").then(
-      (v) => {
-        setFiles(v.files);
-        if (v.files.length > 0 && !openTabs.length) {
-          setOpenTabs([v.files[0]!]);
-          setActiveTab(v.files[0]!);
-        }
-      },
-      (e) => setError(String(e)),
-    );
-  }, [version]);
+  // New file creation state
+  const [creatingFile, setCreatingFile] = useState(false);
+  const [newFileName, setNewFileName] = useState("");
 
-  // Open file when requested by parent
+  const refreshFiles = useCallback(async () => {
+    try {
+      const v = await get<ClaimsView>("/api/claims");
+      setFiles(v.files);
+      if (v.files.length > 0 && !openTabs.length) {
+        setOpenTabs([v.files[0]!]);
+        setActiveTab(v.files[0]!);
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [openTabs.length]);
+
+  useEffect(() => {
+    void refreshFiles();
+  }, [version, refreshFiles]);
+
   useEffect(() => {
     if (selectedFile) {
       if (!openTabs.includes(selectedFile)) {
@@ -54,7 +60,7 @@ export function CodeWorkbench({
       }
       setActiveTab(selectedFile);
     }
-  }, [selectedFile]);
+  }, [selectedFile, openTabs]);
 
   const loadFile = useCallback(async (path: string) => {
     try {
@@ -107,10 +113,48 @@ export function CodeWorkbench({
       await post("/api/file/edit", { path: fileView.path, content: draft });
       setStatusMsg(`Saved ${fileView.path} (audited mutation)`);
       await loadFile(fileView.path);
+      await refreshFiles();
     } catch (e) {
       setError(String(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleCreateFile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanPath = newFileName.trim().replace(/^[/\\]+/, "");
+    if (!cleanPath) return;
+    try {
+      await post("/api/file/edit", { path: cleanPath, content: "" });
+      setStatusMsg(`Created file '${cleanPath}'`);
+      setNewFileName("");
+      setCreatingFile(false);
+      await refreshFiles();
+      openFileFromList(cleanPath);
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const handleDeleteFile = async () => {
+    if (!fileView) return;
+    const confirmed = window.confirm(`Are you sure you want to delete '${fileView.path}'? A snapshot will be recorded.`);
+    if (!confirmed) return;
+    try {
+      await post("/api/file/delete", { path: fileView.path });
+      setStatusMsg(`Deleted ${fileView.path}`);
+      const remaining = openTabs.filter((t) => t !== fileView.path);
+      setOpenTabs(remaining);
+      if (remaining.length > 0) {
+        setActiveTab(remaining[remaining.length - 1]!);
+        onSelectFile(remaining[remaining.length - 1]!);
+      } else {
+        setFileView(null);
+      }
+      await refreshFiles();
+    } catch (err) {
+      setError(String(err));
     }
   };
 
@@ -167,8 +211,40 @@ export function CodeWorkbench({
         <div className="wb-sidebar">
           <div className="wb-section-head">
             <span>WORKSPACE FILES</span>
-            <span className="mono muted">{files.length}</span>
+            <div className="row">
+              <button
+                type="button"
+                className="link small"
+                onClick={() => setCreatingFile((v) => !v)}
+                title="Create a new file in workspace"
+              >
+                + New
+              </button>
+              <span className="mono muted">{files.length}</span>
+            </div>
           </div>
+
+          {creatingFile && (
+            <form className="wb-newfile-form" onSubmit={handleCreateFile}>
+              <input
+                type="text"
+                className="wb-filter mono"
+                placeholder="filename (e.g. app.py)…"
+                autoFocus
+                value={newFileName}
+                onChange={(e) => setNewFileName(e.target.value)}
+              />
+              <div className="actions" style={{ marginTop: "0.2rem" }}>
+                <button type="submit" className="btn btn-small btn-primary" disabled={!newFileName.trim()}>
+                  Create
+                </button>
+                <button type="button" className="btn btn-small" onClick={() => setCreatingFile(false)}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          )}
+
           <input
             type="search"
             className="wb-filter"
@@ -317,6 +393,14 @@ export function CodeWorkbench({
                   {selectedRange
                     ? `Ask Agent (L${selectedRange[0]}-${selectedRange[1]}) ▸`
                     : "Ask Agent (@file) ▸"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-small btn-danger"
+                  onClick={handleDeleteFile}
+                  title="Delete this file"
+                >
+                  Delete
                 </button>
               </div>
             </div>

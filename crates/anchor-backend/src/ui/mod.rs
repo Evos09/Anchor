@@ -484,6 +484,7 @@ impl State {
             },
             "customizations" => self.customizations(),
             "artifacts" => self.artifacts(),
+            "workspace-status" => self.workspace_status(),
             _ => Response::error(404, "no such endpoint"),
         }
     }
@@ -1091,6 +1092,68 @@ impl State {
                 }
                 self.execute_interactive_mission(prompt, mode)
             }
+            "file/delete" => {
+                if !allowed(&["path"]) {
+                    return bad("unexpected fields");
+                }
+                let Some(path) = field("path").as_str() else {
+                    return bad("path required");
+                };
+                if let Err(e) = self.can_rollback() {
+                    return Response::error(409, e);
+                }
+                if let Err(r) = self.audit_action("file_delete", &json!({ "path": path })) {
+                    return r;
+                }
+                let mut ws = self.workspace.lock().unwrap_or_else(|p| p.into_inner());
+                let Some(m) = ws.as_mut() else {
+                    return Response::error(409, "the workspace is not available");
+                };
+                match m.user_delete_file(path) {
+                    Ok(msg) => ok(json!({ "ok": true, "path": path, "message": msg })),
+                    Err(e) => Response::error(409, &e),
+                }
+            }
+            "command/run" => {
+                if !allowed(&["program", "args"]) {
+                    return bad("unexpected fields");
+                }
+                let Some(program) = field("program").as_str() else {
+                    return bad("program required");
+                };
+                let args = match field("args").as_array() {
+                    Some(arr) => arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>(),
+                    None => Vec::new(),
+                };
+                if let Err(r) = self.audit_action("run_command", &json!({ "program": program, "args": &args })) {
+                    return r;
+                }
+                let mut ws = self.workspace.lock().unwrap_or_else(|p| p.into_inner());
+                let Some(m) = ws.as_mut() else {
+                    return Response::error(409, "the workspace is not available");
+                };
+                match m.user_run_command(program, args) {
+                    Ok(output) => {
+                        let exit_code = match output.exit {
+                            anchor_exec::ExitKind::Exited(c) => c,
+                            anchor_exec::ExitKind::TimedOut => -1,
+                            anchor_exec::ExitKind::Signaled(s) => 128 + s,
+                            anchor_exec::ExitKind::MemoryExceeded => -2,
+                        };
+                        ok(json!({
+                            "ok": exit_code == 0,
+                            "exit_code": exit_code,
+                            "stdout": String::from_utf8_lossy(&output.stdout),
+                            "stderr": String::from_utf8_lossy(&output.stderr),
+                            "elapsed_ms": output.elapsed.as_millis(),
+                        }))
+                    }
+                    Err(e) => Response::error(409, &e),
+                }
+            }
             _ => Response::error(404, "no such action"),
         }
     }
@@ -1261,7 +1324,56 @@ impl State {
             Err(e) => Response::error(500, &e),
         }
     }
+
+    fn workspace_status(&self) -> Response {
+        let ws_path = &self.src.workspace;
+        let files = list_files(ws_path);
+        let git_status = std::process::Command::new("git")
+            .args(["status", "--porcelain", "-b"])
+            .current_dir(ws_path)
+            .output();
+        let (is_repo, branch, modified, untracked, clean) = match git_status {
+            Ok(o) if o.status.success() => {
+                let out = String::from_utf8_lossy(&o.stdout);
+                let mut lines = out.lines();
+                let head = lines.next().unwrap_or("## unknown");
+                let branch_name = head
+                    .trim_start_matches('#')
+                    .trim_start_matches('#')
+                    .trim()
+                    .split("...")
+                    .next()
+                    .unwrap_or("main")
+                    .to_string();
+                let mut mod_files = Vec::new();
+                let mut untr_files = Vec::new();
+                for l in lines {
+                    let trim = l.trim();
+                    if trim.starts_with("??") {
+                        untr_files.push(trim[2..].trim().to_string());
+                    } else if !trim.is_empty() {
+                        mod_files.push(trim[2..].trim().to_string());
+                    }
+                }
+                let clean = mod_files.is_empty() && untr_files.is_empty();
+                (true, branch_name, mod_files, untr_files, clean)
+            }
+            _ => (false, "workspace".into(), Vec::new(), Vec::new(), true),
+        };
+        ok(json!({
+            "workspace": ws_path.display().to_string(),
+            "files_count": files.len(),
+            "git": {
+                "is_repo": is_repo,
+                "branch": branch,
+                "clean": clean,
+                "modified": modified,
+                "untracked": untracked,
+            }
+        }))
+    }
 }
+
 
 /// The workspace's files for the claim map (bounded; never follows
 /// symlinks; skips VCS and cache directories).
@@ -1307,6 +1419,7 @@ fn list_files(root: &Path) -> Vec<String> {
     out.sort();
     out
 }
+
 
 #[cfg(test)]
 mod tests {

@@ -211,6 +211,21 @@ pub enum ExecError {
 /// at arbitrary binaries by path; the policy then decides on the resolved
 /// program.
 pub fn resolve_program(name: &str, path_var: &str) -> Result<PathBuf, ExecError> {
+    match resolve_program_inner(name, path_var) {
+        Ok(p) => Ok(p),
+        Err(e) => {
+            #[cfg(windows)]
+            if name == "python3" {
+                if let Ok(p) = resolve_program_inner("python", path_var) {
+                    return Ok(p);
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+fn resolve_program_inner(name: &str, path_var: &str) -> Result<PathBuf, ExecError> {
     // `:` names a drive-relative path (`C:python.exe`) or a data stream
     // on Windows; a trailing dot or space is dropped by Windows, so the
     // policy would judge a different name (round 2 W-2).
@@ -252,7 +267,18 @@ fn is_executable(p: &Path) -> bool {
 
 #[cfg(not(unix))]
 fn is_executable(p: &Path) -> bool {
-    p.is_file()
+    let Ok(m) = std::fs::metadata(p) else {
+        return false;
+    };
+    if !m.is_file() {
+        return false;
+    }
+    // On Windows, Microsoft Store 0-byte reparse execution aliases in WindowsApps
+    // are unconfigured placeholders that fail when executed. Skip 0-byte executables.
+    if m.len() == 0 {
+        return false;
+    }
+    true
 }
 
 /// `p` as commands expect to see it in an argument or variable: on

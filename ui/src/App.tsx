@@ -16,12 +16,16 @@ import { CommandBar } from "./panels/CommandBar";
 import { CodeWorkbench } from "./panels/CodeWorkbench";
 import { ArtifactsPanel } from "./panels/ArtifactsPanel";
 import { CustomizationsPanel } from "./panels/CustomizationsPanel";
+import { TerminalPanel } from "./panels/TerminalPanel";
 import { AgentSidecar } from "./panels/AgentSidecar";
+import { CommandPalette } from "./components/CommandPalette";
+import { ShortcutsModal } from "./components/ShortcutsModal";
 
 export const TABS = [
   ["story", "What happened"],
   ["workbench", "Code workbench"],
   ["artifacts", "Artifacts & plans"],
+  ["terminal", "Terminal & tasks"],
   ["customizations", "Skills, hooks & MCP"],
   ["claims", "Claim map"],
   ["merges", "Merge queue"],
@@ -37,11 +41,24 @@ const ACTIVITY_ITEMS: { id: Tab; icon: string; short: string; title: string; sho
   { id: "story", icon: "◈", short: "MISSION", title: "Mission Control & What Happened", shortcut: "1" },
   { id: "workbench", icon: "⌘", short: "CODE", title: "Code Workbench & Editor", shortcut: "2" },
   { id: "artifacts", icon: "▤", short: "PLANS", title: "Artifacts & Implementation Plans", shortcut: "3" },
-  { id: "claims", icon: "◫", short: "CLAIMS", title: "Multi-Agent File Claim Map", shortcut: "4" },
-  { id: "merges", icon: "⑃", short: "MERGES", title: "Merge Queue & Verification", shortcut: "5" },
-  { id: "snapshots", icon: "⟲", short: "SNAPS", title: "Git-Backed Snapshot Timeline", shortcut: "6" },
-  { id: "customizations", icon: "⚙", short: "SKILLS", title: "Skills, Lifecycle Hooks & MCP", shortcut: "7" },
+  { id: "terminal", icon: "▶", short: "TERM", title: "Sandboxed Task Runner & Terminal", shortcut: "4" },
+  { id: "claims", icon: "◫", short: "CLAIMS", title: "Multi-Agent File Claim Map", shortcut: "5" },
+  { id: "merges", icon: "⑃", short: "MERGES", title: "Merge Queue & Verification", shortcut: "6" },
+  { id: "snapshots", icon: "⟲", short: "SNAPS", title: "Git-Backed Snapshot Timeline", shortcut: "7" },
+  { id: "customizations", icon: "⚙", short: "SKILLS", title: "Skills, Lifecycle Hooks & MCP", shortcut: "8" },
 ];
+
+interface WorkspaceStatus {
+  workspace: string;
+  files_count: number;
+  git: {
+    is_repo: boolean;
+    branch: string;
+    clean: boolean;
+    modified: string[];
+    untracked: string[];
+  };
+}
 
 function tabFromHash(): Tab {
   const h = window.location.hash.replace(/^#\/?/, "");
@@ -52,6 +69,7 @@ export function App() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [events, setEvents] = useState<Event[]>([]);
   const [claimsView, setClaimsView] = useState<ClaimsView | null>(null);
+  const [wsStatus, setWsStatus] = useState<WorkspaceStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTabState] = useState<Tab>(tabFromHash);
   const [focus, setFocus] = useState<{ merge?: number; snapshot?: string } | null>(null);
@@ -59,6 +77,11 @@ export function App() {
   const [externalPrompt, setExternalPrompt] = useState<string | null>(null);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [sidecarOpen, setSidecarOpen] = useState(true);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteMode, setPaletteMode] = useState<"command" | "file">("command");
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [pendingCommand, setPendingCommand] = useState<{ program: string; args: string[] } | null>(null);
+  const [copiedWs, setCopiedWs] = useState(false);
   const lastSeq = useRef(-1);
 
   const setTab = useCallback((t: Tab) => {
@@ -74,13 +97,17 @@ export function App() {
 
   const refreshOverview = useCallback(async () => {
     try {
-      const [ovData, claimsData] = await Promise.all([
+      const [ovData, claimsData, statusData] = await Promise.all([
         get<Overview>("/api/overview"),
         get<ClaimsView>("/api/claims").catch(() => null),
+        get<WorkspaceStatus>("/api/workspace-status").catch(() => null),
       ]);
       setOverview(ovData);
       if (claimsData) {
         setClaimsView(claimsData);
+      }
+      if (statusData) {
+        setWsStatus(statusData);
       }
       setError(null);
     } catch (e) {
@@ -136,7 +163,20 @@ export function App() {
   // Global Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key >= "1" && e.key <= "7") {
+      const isInput =
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        (e.target as HTMLElement)?.isContentEditable;
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteMode("command");
+        setPaletteOpen((v) => !v);
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        setPaletteMode("file");
+        setPaletteOpen(true);
+      } else if ((e.ctrlKey || e.metaKey) && e.key >= "1" && e.key <= "8") {
         const item = ACTIVITY_ITEMS[parseInt(e.key, 10) - 1];
         if (item) {
           e.preventDefault();
@@ -145,6 +185,12 @@ export function App() {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "j") {
         e.preventDefault();
         setSidecarOpen((v) => !v);
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "/") {
+        e.preventDefault();
+        setShortcutsOpen((v) => !v);
+      } else if (e.key === "?" && !isInput && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setShortcutsOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -155,6 +201,21 @@ export function App() {
     setExternalPrompt(promptText);
     setSidecarOpen(true);
   }, []);
+
+  const handleRunCommand = useCallback((program: string, args: string[]) => {
+    setPendingCommand({ program, args });
+  }, []);
+
+  const copyWorkspacePath = useCallback(async () => {
+    if (!overview?.workspace) return;
+    try {
+      await navigator.clipboard.writeText(overview.workspace);
+      setCopiedWs(true);
+      setTimeout(() => setCopiedWs(false), 2000);
+    } catch {
+      // fallback
+    }
+  }, [overview?.workspace]);
 
   const colors = useMemo(() => makeColors((overview?.roster ?? []).map((r) => r.name)), [overview?.roster]);
   const version = overview?.last_seq ?? -1;
@@ -201,14 +262,55 @@ export function App() {
               {ov.mode === "live" ? (ov.running ? "LIVE · team running" : "run finished") : "inspecting"}
             </span>
           )}
-          {ov && (
-            <span className="ws mono" title={ov.workspace}>
-              {ov.workspace}
+          {wsStatus?.git.is_repo && (
+            <span
+              className={`badge mono ${wsStatus.git.clean ? "badge-ok" : "badge-warn"}`}
+              title={`${wsStatus.git.modified.length} modified, ${wsStatus.git.untracked.length} untracked`}
+            >
+              ⎇ {wsStatus.git.branch} {wsStatus.git.clean ? "✓ clean" : `● ${wsStatus.git.modified.length + wsStatus.git.untracked.length} changes`}
             </span>
+          )}
+          {ov && (
+            <button
+              type="button"
+              className="ws mono link"
+              onClick={copyWorkspacePath}
+              title="Click to copy workspace path to clipboard"
+              style={{ textDecoration: "none", color: "inherit", cursor: "pointer" }}
+            >
+              {copiedWs ? "✓ Copied path" : ov.workspace}
+            </button>
           )}
         </div>
         {ov && (
           <div className="stats" aria-label="summary">
+            <button
+              type="button"
+              className="stat"
+              onClick={() => {
+                setPaletteMode("command");
+                setPaletteOpen(true);
+              }}
+              title="Universal Command Palette (Ctrl+K)"
+            >
+              <b>⌘</b> Palette
+            </button>
+            <button
+              type="button"
+              className="stat"
+              onClick={() => setShortcutsOpen(true)}
+              title="Antigravity Keyboard Shortcuts (?)"
+            >
+              <b>?</b> Hotkeys
+            </button>
+            <button
+              type="button"
+              className="stat"
+              onClick={refreshOverview}
+              title="Refresh workspace status and telemetry"
+            >
+              <b>↻</b> Sync
+            </button>
             <button className="stat" onClick={() => setTab("cost")}>
               <b>{usd(ov.cost_total.spend_usd)}</b> spent
             </button>
@@ -340,32 +442,39 @@ export function App() {
               <span className="mono">{workspaceFiles.length} files</span>
             </div>
             <ul className="wb-filelist" style={{ maxHeight: "14rem" }}>
-              {workspaceFiles.map((f) => (
-                <li key={f.path}>
-                  <button
-                    type="button"
-                    className={
-                      selectedFile === f.path && tab === "workbench"
-                        ? "wb-filebtn wb-filebtn-on"
-                        : "wb-filebtn"
-                    }
-                    onClick={() => {
-                      setSelectedFile(f.path);
-                      setTab("workbench");
-                    }}
-                  >
-                    <div className="row" style={{ justifyContent: "space-between" }}>
-                      <span className="mono">{f.path}</span>
-                      <span className="row">
-                        {f.conflict && <span className="badge badge-fail">!</span>}
-                        {f.holders.map((h) => (
-                          <AgentChip key={h} name={h} color={colors(h)} />
-                        ))}
-                      </span>
-                    </div>
-                  </button>
-                </li>
-              ))}
+              {workspaceFiles.map((f) => {
+                const isMod = wsStatus?.git.modified.includes(f.path);
+                const isUntr = wsStatus?.git.untracked.includes(f.path);
+
+                return (
+                  <li key={f.path}>
+                    <button
+                      type="button"
+                      className={
+                        selectedFile === f.path && tab === "workbench"
+                          ? "wb-filebtn wb-filebtn-on"
+                          : "wb-filebtn"
+                      }
+                      onClick={() => {
+                        setSelectedFile(f.path);
+                        setTab("workbench");
+                      }}
+                    >
+                      <div className="row" style={{ justifyContent: "space-between" }}>
+                        <span className="mono">{f.path}</span>
+                        <span className="row">
+                          {isMod && <span className="badge badge-warn" style={{ padding: "0 0.2rem" }}>M</span>}
+                          {isUntr && <span className="badge badge-ok" style={{ padding: "0 0.2rem" }}>U</span>}
+                          {f.conflict && <span className="badge badge-fail">!</span>}
+                          {f.holders.map((h) => (
+                            <AgentChip key={h} name={h} color={colors(h)} />
+                          ))}
+                        </span>
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
               {!workspaceFiles.length && <li className="small muted">Scanning workspace tree…</li>}
             </ul>
           </section>
@@ -432,6 +541,24 @@ export function App() {
                 }}
               />
             )}
+            {tab === "workbench" && (
+              <CodeWorkbench
+                version={version}
+                colors={colors}
+                selectedFile={selectedFile}
+                onSelectFile={setSelectedFile}
+                onAskAgent={handleAskAgent}
+              />
+            )}
+            {tab === "artifacts" && (
+              <ArtifactsPanel
+                version={version}
+                onExecutePlan={handleAskAgent}
+              />
+            )}
+            {tab === "terminal" && (
+              <TerminalPanel onAskAgent={handleAskAgent} pendingCommand={pendingCommand} />
+            )}
             {tab === "messages" && (
               <Messages
                 version={version}
@@ -457,21 +584,6 @@ export function App() {
             {tab === "cost" && <Cost version={version} colors={colors} />}
             {tab === "snapshots" && <Snapshots version={version} colors={colors} focus={focus?.snapshot} />}
             {tab === "audit" && <Audit events={events} overview={ov} />}
-            {tab === "workbench" && (
-              <CodeWorkbench
-                version={version}
-                colors={colors}
-                selectedFile={selectedFile}
-                onSelectFile={setSelectedFile}
-                onAskAgent={handleAskAgent}
-              />
-            )}
-            {tab === "artifacts" && (
-              <ArtifactsPanel
-                version={version}
-                onExecutePlan={handleAskAgent}
-              />
-            )}
             {tab === "customizations" && <CustomizationsPanel version={version} />}
           </section>
         </main>
@@ -525,6 +637,24 @@ export function App() {
           />
         )}
       </div>
+
+      {/* ANTIGRAVITY UNIVERSAL COMMAND PALETTE (Ctrl+K / Ctrl+P) */}
+      <CommandPalette
+        open={paletteOpen}
+        initialMode={paletteMode}
+        files={workspaceFiles.map((f) => f.path)}
+        onClose={() => setPaletteOpen(false)}
+        onSelectFile={setSelectedFile}
+        onSelectTab={setTab}
+        onRunCommand={handleRunCommand}
+        onAskAgent={handleAskAgent}
+        onToggleWorkbench={() => setWorkbenchOpen((v) => !v)}
+        onToggleSidecar={() => setSidecarOpen((v) => !v)}
+        onOpenShortcuts={() => setShortcutsOpen(true)}
+      />
+
+      {/* ANTIGRAVITY KEYBOARD SHORTCUTS REFERENCE MODAL (?) */}
+      <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
     </div>
   );
 }

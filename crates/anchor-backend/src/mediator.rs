@@ -1501,6 +1501,71 @@ impl Mediator {
         Ok(hex(&rcpt.new_sha256))
     }
 
+    /// User-initiated file removal from the desktop Workspace Explorer.
+    pub fn user_delete_file(&mut self, path: &str) -> Result<String, String> {
+        let r = self.ws.resolve(path).map_err(|e| e.to_string())?;
+        if !r.exists() {
+            return Err("file does not exist".into());
+        }
+        let cur = match self.current(&r) {
+            Ok(c) => c,
+            Err(_) => None,
+        };
+        let cur_sha = cur.as_ref().map(|c| c.sha256);
+        let req = user_request(self.ws.root(), &r, Operation::Delete);
+        let approval = self
+            .engine
+            .user_initiated(UserAction::WorkbenchEdit, &req)
+            .map_err(|d| format!("denied by {}", d.rule))?;
+        self.ensure_turn_snapshot()?;
+        let id = approval.decision_id();
+        self.ws.remove(&r, approval).map_err(|e| e.to_string())?;
+        self.audit_mutation(id, &r.canonical, cur_sha, [0u8; 32], None);
+        Ok(format!("Deleted {path}"))
+    }
+
+    /// User-initiated command execution from the desktop Terminal & Task Runner.
+    pub fn user_run_command(
+        &mut self,
+        program: &str,
+        args: Vec<String>,
+    ) -> Result<anchor_exec::Output, String> {
+        let prog = anchor_exec::resolve_program(program, &self.path_var)
+            .map_err(|e| e.to_string())?;
+        if let Err(e) = self.ensure_turn_snapshot() {
+            return Err(format!("refusing to run: workspace snapshot failed: {e}"));
+        }
+        let spec = CommandSpec {
+            program: prog.clone(),
+            args: args.clone(),
+            cwd: self.ws.root().to_path_buf(),
+            env: vec![
+                ("PATH".into(), self.path_var.clone()),
+                ("HOME".into(), self.ws.root().display().to_string()),
+                ("LANG".into(), "C.UTF-8".into()),
+            ],
+            limits: self.exec_limits.clone(),
+            network: Network::Deny,
+            fs: Some(FsConfinement {
+                read_write: vec![self.ws.root().to_path_buf()],
+                read_only: self.exec_read_only.clone(),
+            }),
+            stdin: Vec::new(),
+        };
+        let result = anchor_exec::run(&spec).map_err(|e| e.to_string())?;
+        self.stats.commands += 1;
+        let _ = self.log(
+            "user_command",
+            serde_json::json!({
+                "program": prog,
+                "args": args,
+                "exit": format!("{:?}", result.exit),
+                "elapsed_ms": result.elapsed.as_millis(),
+            }),
+        );
+        Ok(result)
+    }
+
     fn run_command(&mut self, program: &str, args: Vec<String>, network: bool) -> ToolOutcome {
         let prog = match anchor_exec::resolve_program(program, &self.path_var) {
             Ok(p) => p,
